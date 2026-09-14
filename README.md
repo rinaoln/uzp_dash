@@ -96,4 +96,3 @@ def build(ctx: Context) -> str:
 работе (поиск/фильтр/пагинация), симуляция закрытия плана и нарратив LLM с
 анализом свободного текста активностей. Подробнее — `uzp_dash/dashboards/tb_health/README.md`.
 # uzp_dash
-# uzp_dash
