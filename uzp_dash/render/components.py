@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import html as _html
+import math
 from typing import Iterable, Sequence
 
 
@@ -164,6 +165,188 @@ def hbars(items: list[tuple[str, float]], unit: str = "") -> str:
             '</div>'
         )
     return "".join(rows)
+
+
+def _ticks(lo: float, hi: float, n: int = 4) -> list[float]:
+    """Круглые отметки шкалы в диапазоне [lo, hi]."""
+    if hi <= lo:
+        return [lo]
+    raw = (hi - lo) / max(n, 1)
+    mag = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
+    step = next((m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw), 10 * mag)
+    first = math.ceil(lo / step) * step
+    out, v = [], first
+    while v <= hi + step * 0.001:
+        out.append(v)
+        v += step
+    return out or [lo, hi]
+
+
+# Геометрия обоих графиков в координатах viewBox. Одна на два графика намеренно:
+# они стоят друг под другом, и месяц обязан приходиться на одну вертикаль.
+_CW, _CH = 720, 210          # ширина/высота полотна
+_PL, _PR, _PT, _PB = 66, 14, 14, 34   # поля: слева под подписи шкалы, снизу под месяцы
+
+
+def _x_of(i: int, n: int) -> float:
+    """Центр i-го месяца по горизонтали."""
+    inner = _CW - _PL - _PR
+    step = inner / max(n, 1)
+    return _PL + step * (i + 0.5)
+
+
+def _grid(ticks: list[float], y_of, fmt=lambda v: fmt_num(v)) -> str:
+    """Горизонтальные линии шкалы с подписями — приглушённые, как фон."""
+    out = []
+    for t in ticks:
+        y = y_of(t)
+        out.append(
+            f'<line x1="{_PL}" y1="{y:.1f}" x2="{_CW - _PR}" y2="{y:.1f}" '
+            f'stroke="var(--separator)" stroke-width="1"/>'
+            f'<text x="{_PL - 8}" y="{y + 4:.1f}" text-anchor="end" font-size="11" '
+            f'fill="var(--text-2)">{esc(fmt(t))}</text>')
+    return "".join(out)
+
+
+def _months_axis(rows: list[dict]) -> str:
+    """Подписи месяцев под графиком. Через одну, если месяцев много."""
+    n = len(rows)
+    every = 1 if n <= 12 else 2
+    out = []
+    for i, r in enumerate(rows):
+        if i % every:
+            continue
+        out.append(f'<text x="{_x_of(i, n):.1f}" y="{_CH - 12}" text-anchor="middle" '
+                   f'font-size="11" fill="var(--text-2)">{esc(r["short"])}</text>')
+    return "".join(out)
+
+
+def trend_plan_fact(rows: list[dict]) -> str:
+    """Портфель помесячно: факт линией, план — пунктиром.
+
+    Две линии, а не столбцы: план и факт отличаются на проценты, и столбцы от нуля
+    были бы неразличимы. У линий шкала может не начинаться с нуля — тогда это
+    подписывается прямо под графиком, чтобы разрыв не читался как обвал.
+
+    Идентичность серий держится не только цветом: факт — сплошная линия с точками,
+    план — пунктир, плюс легенда. При печати и у дальтоников различие сохраняется.
+    """
+    if not rows:
+        return ""
+    vals = [v for r in rows for v in (r["plan"], r["fact"]) if v]
+    if not vals:
+        return ""
+    lo, hi = min(vals), max(vals)
+    pad = (hi - lo) * 0.18 or max(hi * 0.02, 1)
+    lo, hi = max(lo - pad, 0), hi + pad
+    n = len(rows)
+
+    def y_of(v):
+        return _PT + (_CH - _PT - _PB) * (1 - (v - lo) / (hi - lo or 1))
+
+    def path(key):
+        return " ".join(f'{_x_of(i, n):.1f},{y_of(r[key]):.1f}'
+                        for i, r in enumerate(rows))
+
+    fact_pts = path("fact")
+    plan_pts = path("plan")
+    dots = "".join(
+        f'<circle cx="{_x_of(i, n):.1f}" cy="{y_of(r["fact"]):.1f}" r="4" '
+        f'fill="var(--accent)" stroke="var(--surface-solid)" stroke-width="2">'
+        f'<title>{esc(r["label"])}: факт {fmt_num(r["fact"])} · план '
+        f'{fmt_num(r["plan"])} · {(r["fact"] / r["plan"] * 100) if r["plan"] else 0:.0f}%'
+        f'</title></circle>'
+        for i, r in enumerate(rows))
+    last = rows[-1]
+    lx, ly = _x_of(n - 1, n), y_of(last["fact"])
+    label = (f'<text x="{lx - 6:.1f}" y="{ly - 12:.1f}" text-anchor="end" font-size="12" '
+             f'font-weight="700" fill="var(--text)">{esc(fmt_num(last["fact"]))}</text>')
+    cut = ("" if lo <= 0 else
+           '<div class="ch-note">шкала начинается не с нуля — показан размах, '
+           'а не абсолютная величина</div>')
+    return (
+        '<div class="chart">'
+        '<div class="ch-legend">'
+        '<span class="ch-key"><i class="ch-line fact"></i>факт</span>'
+        '<span class="ch-key"><i class="ch-line plan"></i>план</span>'
+        '</div>'
+        f'<svg viewBox="0 0 {_CW} {_CH}" role="img" preserveAspectRatio="xMidYMid meet" '
+        f'aria-label="Портфель помесячно: факт и план">'
+        + _grid(_ticks(lo, hi), y_of)
+        + f'<polyline points="{plan_pts}" fill="none" stroke="var(--text-2)" '
+          f'stroke-width="2" stroke-dasharray="6 4" stroke-linejoin="round"/>'
+        + f'<polyline points="{fact_pts}" fill="none" stroke="var(--accent)" '
+          f'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
+        + dots + label + _months_axis(rows)
+        + '</svg>' + cut + '</div>'
+    )
+
+
+def trend_delta(rows: list[dict]) -> str:
+    """Выполнение плана помесячно: столбцы «факт минус план» от нуля.
+
+    Отдельный график, а не вторая пара линий: на линиях разрыв в проценты не виден,
+    а именно он и есть ответ на вопрос «сделали план или нет». Ноль — общая база,
+    поэтому длина столбца честно кодирует величину отклонения.
+    """
+    if not rows:
+        return ""
+    deltas = [r["fact"] - r["plan"] for r in rows]
+    mx = max((abs(x) for x in deltas), default=0) or 1
+    n = len(rows)
+    top, bot = _PT, _CH - _PB
+    zero = (top + bot) / 2
+
+    def y_of(v):
+        return zero - (bot - top) / 2 * (v / mx)
+
+    inner = (_CW - _PL - _PR) / max(n, 1)
+    bw = min(inner * 0.55, 34)
+    bars = []
+    for i, (r, dv) in enumerate(zip(rows, deltas)):
+        x = _x_of(i, n) - bw / 2
+        y = min(y_of(dv), zero)
+        h = max(abs(zero - y_of(dv)), 1.5)
+        col = "var(--good)" if dv >= 0 else "var(--bad)"
+        ex = (r["fact"] / r["plan"] * 100) if r["plan"] else 0
+        bars.append(
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="3" '
+            f'fill="{col}"><title>{esc(r["label"])}: {"+" if dv >= 0 else "−"}'
+            f'{fmt_num(abs(dv))} чел к плану · {ex:.0f}% плана</title></rect>')
+    ticks = [t for t in _ticks(-mx, mx, 3) if abs(t) > mx * 0.02]
+    return (
+        '<div class="chart">'
+        f'<svg viewBox="0 0 {_CW} {_CH}" role="img" preserveAspectRatio="xMidYMid meet" '
+        f'aria-label="Отклонение факта от плана помесячно">'
+        + _grid(ticks, y_of, fmt=lambda v: ("+" if v > 0 else "−") + fmt_num(abs(v)))
+        + f'<line x1="{_PL}" y1="{zero:.1f}" x2="{_CW - _PR}" y2="{zero:.1f}" '
+          f'stroke="var(--text-2)" stroke-width="1.5"/>'
+        + "".join(bars) + _months_axis(rows)
+        + '</svg></div>'
+    )
+
+
+def trend_table(rows: list[dict]) -> str:
+    """Те же 12 месяцев числами — под свёрткой.
+
+    Нужна не для красоты: график читается глазом, а числа читаются точно, и для
+    печати, скринридера и спора о конкретном месяце нужна именно таблица.
+    """
+    if not rows:
+        return ""
+    body = []
+    for r in rows:
+        dv = r["fact"] - r["plan"]
+        ex = (r["fact"] / r["plan"]) if r["plan"] else None
+        col = "var(--good)" if dv >= 0 else "var(--bad)"
+        body.append([esc(r["label"]), fmt_num(r["fact"]), fmt_num(r["plan"]),
+                     f'<b style="color:{col}">{"+" if dv >= 0 else "−"}'
+                     f'{fmt_num(abs(dv))}</b>',
+                     f'{ex * 100:.0f}%' if ex is not None else "—"])
+    return ('<details class="ch-tbl"><summary>Показать числами</summary>'
+            + table(["месяц", "факт", "план", "к плану", "выполнение"], body,
+                    num_cols=[1, 2, 3, 4])
+            + '</details>')
 
 
 def narrative_html(text: str) -> str:

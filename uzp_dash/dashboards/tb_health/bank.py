@@ -33,6 +33,8 @@ OUT_MIN_QTY = 3
 # Глубина окна помесячных активностей под блок «Портфель год к году»: год плюс месяц,
 # потому что задачу на отток заводят и в следующем отчётном месяце.
 YOY_DEPTH = 13
+# Глубина графиков динамики портфеля и план/факт — 12 ЗАКРЫТЫХ месяцев.
+TREND_MONTHS = 12
 # Аппарат ТБ — не продающее подразделение, в разборе ему делать нечего. Опознаётся
 # по имени, но с обязательной оговоркой: если аппарат — ЕДИНСТВЕННОЕ подразделение
 # своего ТБ (Московский банк), исключать его нельзя, иначе ТБ обнулится.
@@ -48,6 +50,7 @@ class Bank:
     tb_of: dict                       # new_gosb_id -> tb_id, единственный источник
     gosb_name: dict                   # new_gosb_id -> имя
     verdict: pd.DataFrame             # план/факт уровней tb и sb за три месяца
+    trend: pd.DataFrame               # план/факт помесячно за 12 закрытых месяцев
     unit_seg: pd.DataFrame            # ГОСБ × сегмент, обе опорные даты
     unit_tot: pd.DataFrame            # итоги ГОСБ, обе опорные даты
     orgs: pd.DataFrame                # (ГОСБ, ИНН) — витрина + воронка + отток
@@ -96,6 +99,14 @@ def load(ctx) -> Bank:
         progress.done(f"ВНИМАНИЕ: под level_name='sb' несколько level_id {sb_ids} — "
                       f"вердикт банка неоднозначен, берётся строка с наибольшим фактом")
     _log_metrics(verdict, d)
+
+    progress.step(f"История плана и факта за {TREND_MONTHS} закрытых месяцев "
+                  f"(банк, ТБ, ГОСБ)")
+    trend = read_sql(e, Q.MONTHLY_TREND, {"m_rcp": Q.METRIC_RECIPIENTS,
+                                          "trend_from": d["trend_from"],
+                                          "ref_closed": d["ref_closed"]})
+    trend["end_dt"] = pd.to_datetime(trend["end_dt"]).dt.date
+    _log_trend(trend, d)
 
     progress.step("Матрица ГОСБ × сегмент и итоги ГОСБ по всему банку")
     unit_seg = read_sql(e, Q.UNIT_SEG, {"m_rcp": Q.METRIC_RECIPIENTS,
@@ -149,7 +160,7 @@ def load(ctx) -> Bank:
     _log_outflow_worked(orgs)
 
     return Bank(dates=d, tbs=tbs, apparat=apparat, tb_of=tb_of, gosb_name=gosb_name,
-                verdict=verdict, unit_seg=unit_seg, unit_tot=unit_tot,
+                verdict=verdict, trend=trend, unit_seg=unit_seg, unit_tot=unit_tot,
                 orgs=orgs, orgs_tb=orgs_tb, fagg=fagg, act_tot=act_tot, act_brk=act_brk,
                 fmonths=fmonths, orgs_fc=orgs_fc, conv=conv,
                 params=dict(ctx.params or {}), fc_stats=stats)
@@ -228,6 +239,9 @@ def dates(engine, params: dict) -> dict:
     # окно сделок для помесячного план/факт: PIPE_MONTHS закрытых месяцев + текущий.
     # Шире окна активностей: коэффициент реализуемости считается по закрытым месяцам.
     plan_from = (p_cur - PIPE_MONTHS).to_timestamp().date()
+    # окно графиков динамики: TREND_MONTHS закрытых месяцев, заканчивая закрытым.
+    # Первое число окна — начало месяца, чтобы условие по end_dt взяло его целиком.
+    trend_from = (p_closed - (TREND_MONTHS - 1)).to_timestamp().date()
     # days_left — сколько КАЛЕНДАРНОГО времени осталось, чтобы привлечения по сделкам
     # успели дойти. Меряется по РЕАЛЬНОЙ текущей дате.
     today = params.get("today")
@@ -257,7 +271,7 @@ def dates(engine, params: dict) -> dict:
             "ref_yoy": ref_yoy,
             "ref_funnel": ref_funnel, "funnel_from": funnel_from,
             "fresh_from": fresh_from, "plan_from": plan_from,
-            "months_from": months_from,
+            "months_from": months_from, "trend_from": trend_from,
             "out_months": out_months, "out_label": out_lbl,
             "m_out1": out_months[0], "m_out2": out_months[1], "m_out3": out_months[2],
             "cur_month": int(cur.month),
@@ -285,6 +299,28 @@ def _only_known_tb(df: pd.DataFrame, tb_ids: set, what: str) -> pd.DataFrame:
         dropped = sorted({int(x) for x in df.loc[~keep, "tb_id"].dropna()})
         progress.done(f"Отброшено {n_drop} {what}: ТБ {dropped} не входят в отчёт")
     return df[keep].reset_index(drop=True)
+
+
+def _log_trend(trend: pd.DataFrame, d: dict) -> None:
+    """Глубина истории по каждому уровню — графики строятся по тому, что реально есть.
+
+    Месяцев может прийти меньше запрошенных: витрина начинается позже, чем окно.
+    Тогда график просто короче, и это нужно видеть в логе, а не гадать по картинке.
+    """
+    if trend.empty:
+        progress.warn(f"Истории плана и факта за период {d['trend_from']} … "
+                      f"{d['ref_closed']} в витрине нет — графики динамики "
+                      f"будут пустыми")
+        return
+    for lvl in ("sb", "tb", "gosb"):
+        sub = trend[trend["level_name"] == lvl]
+        if sub.empty:
+            progress.warn(f"Динамика: уровня '{lvl}' в витрине метрик нет — "
+                          f"графики на нём не построятся")
+            continue
+        n_m = sub["end_dt"].nunique()
+        progress.done(f"Динамика ({lvl}): {n_m} мес · {sub['unit_id'].nunique()} ед. · "
+                      f"{sub['end_dt'].min()} … {sub['end_dt'].max()}")
 
 
 def _log_metrics(verdict: pd.DataFrame, d: dict) -> None:

@@ -47,6 +47,10 @@ EXPLORER_MIN_FL_DEFAULT = 5
 # красную ячейку в тепловой карте (render.components.heat_bg). Порог в одного
 # получателя отсекает только шум округления.
 MIN_SEG_GAP = 1.0
+# Сколько организаций показывать в разделе «Отток». Раздел отвечает на вопрос
+# «где мы потеряли больше всего и что там делали», а не заменяет собой выгрузку:
+# хвост из тысяч мелких оттоков читать никто не будет, и он подписывается числом.
+OUTFLOW_TOP_N = 25
 
 
 def _failing_seg(nedobor) -> bool:
@@ -78,6 +82,8 @@ class Analysis:
     pf: dict = field(default_factory=dict)         # блок «Управление портфелем»
     closed: dict = field(default_factory=dict)     # вердикт ЗАКРЫТОГО месяца + ранг
     yoy: dict = field(default_factory=dict)        # прирост закрытого месяца год к году
+    trend: list = field(default_factory=list)      # план/факт помесячно за 12 мес
+    outflow: dict = field(default_factory=dict)    # раздел «Отток»: топ потерь + отработка
     fc_stats: dict = field(default_factory=dict)   # диагностика прогноза
     gosb_detail: dict = field(default_factory=dict)  # new_gosb_id -> разбор прогноза
     explorer_min_fl: float = EXPLORER_MIN_FL_DEFAULT  # порог эффекта для списка в файле
@@ -134,6 +140,8 @@ def prepare(b: Bank, tb_id: int, tb_short: str, tb_full: str) -> Analysis:
                   orgs, orgs_fc, detail, base_seg, plan_seg, base_tot, plan_tot,
                   fc_stats, _activity(b.act_tot[b.act_tot.tb_id == tb_id],
                                       b.act_brk[b.act_brk.tb_id == tb_id]))
+
+    a.trend = _trend_rows(b.trend, "tb", tb_id)
 
     # --- Классификация по агрегатам (все активности) ---
     progress.step(f"{tb_short}: классификация (ГОСБ,ИНН) — работать / нет смысла")
@@ -195,6 +203,7 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
     # (ТБ, ИНН): перекладываем, иначе блок годового тренда банка остался бы без
     # единой зафиксированной причины
     a.insights = _insights_by_tb(per_tb, b.tb_of)
+    a.trend = _trend_rows(b.trend, "sb")
 
     progress.step("Уровень СБ: карточки ТБ + детализация прогноза")
     a.gosb_cards = _unit_cards(a.gosb_gap, a.matrix, pd.DataFrame(), pd.DataFrame(),
@@ -209,7 +218,9 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
                                  a.gosb_gap, fc_stats["conv_tb"], fc_stats["conv"],
                                  fc_stats["conv_by_gosb"], d,
                                  unit_src="tb_id", unit_label="ТБ",
-                                 funnel_months=b.fmonths)
+                                 funnel_months=b.fmonths, trend=b.trend)
+    a.outflow = _outflow_top(a, b.fmonths)
+    _log_outflow_section(a)
     return a
 
 
@@ -266,7 +277,9 @@ def finish(ctx, b: Bank, a: Analysis, text_df) -> Analysis:
                                  a.gosb_gap, a.fc_stats.get("conv_tb", 1.0),
                                  a.fc_stats.get("conv", {}),
                                  a.fc_stats.get("conv_by_gosb", {}), d,
-                                 funnel_months=fmonths)
+                                 funnel_months=fmonths, trend=b.trend)
+    a.outflow = _outflow_top(a, fmonths)
+    _log_outflow_section(a)
     n_named = sum(sum(len(g["rows"]) for g in v["out_groups"]) + len(v["top_pipe"])
                   for v in a.gosb_detail.values())
     n_grp = sum(len(v["out_groups"]) for v in a.gosb_detail.values())
@@ -429,6 +442,35 @@ def _verdict(v: pd.DataFrame, level: str, end_dt, level_id: int | None = None
                     "rank": (int(r.rnk) if level == "tb" else None),
                     "n_tb": (int(r.n_tb) if level == "tb" else None)}
     return out, ref
+
+
+def _trend_rows(trend: pd.DataFrame, level: str, unit_id: int | None = None) -> list:
+    """Помесячный план/факт одной единицы → строки графика, по возрастанию месяца.
+
+    Месяцы берутся те, что реально есть в витрине: если история короче окна, график
+    просто короче. Дырку внутри окна не заполняем нулём — ноль не отличить от
+    настоящего нулевого факта, а на графике он выглядел бы провалом.
+
+    `unit_id=None` — уровень банка, где под одним level_name может лежать несколько
+    level_id. Берём строку с наибольшим фактом, тем же правилом, что и `_verdict`:
+    иначе месяцы графика взялись бы из разных срезов и линия запрыгала бы.
+    """
+    if trend is None or trend.empty:
+        return []
+    sub = trend[trend["level_name"] == level]
+    if unit_id is not None:
+        sub = sub[sub["unit_id"] == unit_id]
+    elif not sub.empty and sub["unit_id"].nunique() > 1:
+        keep = sub.groupby("unit_id")["fact_amt"].sum().idxmax()
+        sub = sub[sub["unit_id"] == keep]
+    if sub.empty:
+        return []
+    sub = sub.sort_values("end_dt")
+    return [{"dt": r.end_dt,
+             "label": f"{pd.Timestamp(r.end_dt).month:02d}.{pd.Timestamp(r.end_dt).year}",
+             "short": f"{pd.Timestamp(r.end_dt).month:02d}.{pd.Timestamp(r.end_dt).year % 100:02d}",
+             "plan": float(r.plan_amt or 0), "fact": float(r.fact_amt or 0)}
+            for r in sub.itertuples()]
 
 
 def _yoy(prev: dict, closed: dict, d: dict, area: str = "Год к году") -> dict:
@@ -1492,13 +1534,122 @@ def _rest_row(gosb_row, segs: list, n_need_total: int) -> dict | None:
             "n_need": n_need}
 
 
+def _log_outflow_section(a: "Analysis") -> None:
+    """Что попало в раздел «Отток» — и сколько осталось за его пределами."""
+    o = a.outflow or {}
+    if not o:
+        progress.done(f"{a.tb_short}: оттока за окно нет — раздел «Отток» не строится")
+        return
+    progress.done(
+        f"Отток: {o['n_all']} организаций потеряли {o['tot_kept']:.0f} чел "
+        f"(ушло {o['tot_gone']:.0f}, вернулось {o['tot_ret']:.0f}) · "
+        f"в разделе показаны {o['n_shown']} крупнейших на {o['top_kept']:.0f} чел")
+    progress.done(
+        f"Отработка оттока: успешно закрытая задача есть у {o['n_worked']} орг "
+        f"({o['kept_worked']:.0f} чел) · ни одной задачи у {o['n_silent']} "
+        f"({o['kept_silent']:.0f} чел) · месяц ухода вне окна воронки у "
+        f"{o['n_unknown']} — по ним отработка неизвестна")
+
+
+def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
+                 top_n: int = OUTFLOW_TOP_N) -> dict:
+    """Крупнейшие оттоки уровня и что по ним делали.
+
+    Собирается из тех же строк (единица, организация), что и остальной разбор, но
+    отвечает на свой вопрос: не «кого брать в работу», а «где мы уже потеряли людей
+    и чем это сопровождалось». Поэтому здесь нет отбора под план и нет фильтра
+    эталонной базы — потеря есть потеря, даже если работать с организацией нельзя.
+
+    История взаимодействия берётся по МЕСЯЦАМ УХОДА и следующим за ними: витрина
+    закрывает отток позже, чем он случился, и задачу заводят следующим отчётным
+    месяцем — то же правило, что и в `bank._outflow_worked`, иначе нормально
+    отработанный отток выглядел бы брошенным.
+
+    Вывод по комментариям берётся из `insights` — это результат разбора свободного
+    текста активностей, он уже посчитан аудитом и здесь не пересчитывается.
+    """
+    fc = a.orgs_fc
+    src = a.unit_src
+    if fc is None or fc.empty or src not in fc:
+        return {}
+    fc = fc.dropna(subset=[src])
+    fc = fc[forecast.num(fc, "out_kept") > 0]
+    if fc.empty:
+        return {}
+
+    unit_name = {int(r.unit_id): str(r.unit_name or "")
+                 for r in a.gosb_gap.itertuples()} if not a.gosb_gap.empty else {}
+    names, emp_of = {}, {}
+    if a.detail is not None and not a.detail.empty:
+        key = src if src in a.detail else "new_gosb_id"
+        for r in a.detail.dropna(subset=[key]).itertuples():
+            k = (int(getattr(r, key)), int(r.inn))
+            names[k] = str(getattr(r, "company_name", "") or "") or f"Орг. {int(r.inn)}"
+            emp_of[k] = str(getattr(r, "emp_fio", "") or "").strip()
+    fidx, fwindow = month_index(funnel_months, src)
+
+    rows = []
+    for r in fc.itertuples():
+        uid, inn = int(getattr(r, src)), int(r.inn)
+        k = (uid, inn)
+        months = list(getattr(r, "out_months", None) or [])
+        # задачи считаем и в месяц ухода, и в следующий за ним — см. докстроку
+        seen, n_tasks, n_succ, n_out, n_out_succ, known = set(), 0, 0, 0, 0, False
+        for m in months:
+            for lbl in (m, next_month(m)):
+                if lbl in seen:
+                    continue
+                seen.add(lbl)
+                if lbl in fwindow:
+                    known = True
+                agg = fidx.get((uid, inn, lbl))
+                if not agg:
+                    continue
+                n_tasks += agg["n_tasks"]
+                n_succ += agg["n_success"]
+                n_out += agg["n_outflow"]
+                n_out_succ += agg["n_out_success"]
+        ins = a.insights.get(k, {})
+        rows.append({
+            "inn": inn, "unit": unit_name.get(uid, str(uid)),
+            "name": names.get(k, f"Орг. {inn}"), "emp": emp_of.get(k, ""),
+            "gone": float(r.out_qty), "ret": float(r.ret_qty),
+            "kept": float(r.out_kept), "months": months,
+            "tasks": n_tasks, "success": n_succ,
+            "out_tasks": n_out, "out_success": n_out_succ,
+            # отработанным считаем только успешно закрытую задачу ИМЕННО про отток
+            "worked": bool(n_out_succ),
+            # «данных нет» и «задач не было» — разные утверждения, и путать их нельзя
+            "known": known,
+            "reason": ins.get("reason", ""), "action": ins.get("action", ""),
+        })
+    rows.sort(key=lambda x: x["kept"], reverse=True)
+    top = rows[:top_n]
+    worked = [r for r in rows if r["worked"]]
+    silent = [r for r in rows if r["known"] and not r["tasks"]]
+    return {
+        "rows": top,
+        "n_all": len(rows), "n_shown": len(top),
+        "tot_gone": sum(r["gone"] for r in rows),
+        "tot_ret": sum(r["ret"] for r in rows),
+        "tot_kept": sum(r["kept"] for r in rows),
+        "top_kept": sum(r["kept"] for r in top),
+        "n_worked": len(worked),
+        "kept_worked": sum(r["kept"] for r in worked),
+        "n_silent": len(silent),
+        "kept_silent": sum(r["kept"] for r in silent),
+        "n_unknown": sum(1 for r in rows if not r["known"]),
+    }
+
+
 def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
                  to_work: pd.DataFrame, no_point: pd.DataFrame,
                  gosb_gap: pd.DataFrame, conv_tb: float,
                  conv_diag: dict | None = None,
                  conv_by_gosb: dict | None = None, dates: dict | None = None,
                  unit_src: str = "new_gosb_id", unit_label: str = "ГОСБ",
-                 funnel_months: pd.DataFrame | None = None) -> dict:
+                 funnel_months: pd.DataFrame | None = None,
+                 trend: pd.DataFrame | None = None) -> dict:
     """Разбор прогноза по каждой единице — то, что открывается по клику на карточку.
 
     Единица — ГОСБ в отчёте ТБ и ТБ в отчёте СБ; `unit_src` называет колонку грейна
@@ -1636,6 +1787,9 @@ def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
             "yoy_total": float(yoy_tot.get(nid, 0.0)), "yoy_groups": yoy_groups,
             "yoy_n_all": len(yoy_rows),
             "yoy_down_tot": float(sum(r["yoy"] for r in yoy_rows)),
+            # история единицы: у ГОСБ — свой уровень витрины, у ТБ — уровень 'tb'
+            "trend": _trend_rows(trend, "gosb" if unit_src == "new_gosb_id" else "tb",
+                                 nid),
         }
     if skipped_no_base:
         fl = sum(x[1] for x in skipped_no_base)

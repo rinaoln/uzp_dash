@@ -123,7 +123,10 @@ def build(ctx: Context) -> str:
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
         # оборачивает gdOpen, поэтому идёт после всех остальных скриптов
         tail=(f'<script>{_asset("ux.js")}</script>\n'
-              f'{_asset("help.html")}<script>\n{_asset("help.js")}</script>'),
+              f'{_asset("help.html")}<script>\n{_asset("help.js")}</script>\n'
+              # прямой потомок <body> — на него ссылается печатный CSS в
+              # ux-fix.css (скрывает всё, кроме этого блока, во время печати)
+              f'<div id="print-root" aria-hidden="true"></div>'),
     )
 
 
@@ -142,13 +145,12 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     `idx` уходит в id элементов: в одном документе живут 13 отчётов, и повторяющийся
     id сломал бы и оверлеи, и списки организаций (по id их находит скрипт).
     """
-    back = ('<div class="lvl-back"><button onclick="lvlGo(0)">← Главный экран</button>'
-            f'<span>{C.esc(a.tb_full)}</span></div>' if idx else "")
     body = (
-        back
+        _lvl_head(a, idx)
         + _hero(a)
         + _kpis(a)
         + _portfolio_block(a, story.get("forecast"))
+        + _trend_section(a)
         + _matrix(a, story.get("matrix"))
         + _problem_gosb(a, story.get("gosb"), idx)
     )
@@ -156,7 +158,27 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     # а имена — один переход вниз (и это сотни тысяч строк, которые никто не листает)
     if a.level != "sb":
         body += _orgs(a, story.get("orgs"), idx)
+    body += _outflow_section(a, story.get("outflow"))
     return body
+
+
+def _lvl_head(a: analyze.Analysis, idx: int) -> str:
+    """Шапка уровня: чьё это отчёт и кнопка выгрузки.
+
+    Имя области стоит крупно и на каждом уровне, включая банк: в одном файле лежат
+    тринадцать отчётов, вкладки переключаются мышью, и без имени на самой странице
+    (а не только в подсвеченной вкладке) легко читать чужие числа как свои.
+    """
+    back = ('<button type="button" class="lvl-up" onclick="lvlGo(0)">← Все банки'
+            '</button>' if idx else "")
+    return (
+        '<div class="lvl-head">'
+        f'<div class="lvl-id">{back}<h2 class="lvl-name">{C.esc(a.tb_full)}</h2></div>'
+        f'<button type="button" class="lvl-pdf" onclick="exportLevelPdf({idx})" '
+        f'title="Собрать отчёт этого уровня в PDF: все разделы раскрыты">'
+        f'Скачать PDF</button>'
+        '</div>'
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -174,17 +196,43 @@ def _hero(a: analyze.Analysis) -> str:
     closed_txt = (f'закрытый месяц {C.esc(d.get("closed_label", ""))}' if not r["rank"]
                   else f'ранг ТБ {r["rank"]}/{r["n_tb"]} за закрытый месяц '
                        f'{C.esc(d.get("closed_label", ""))}')
+    # процент отвечает «насколько», абсолют — «сколько людей». Без второго числа
+    # 91% у банка и 91% у небольшого ГОСБ читаются как одна и та же новость
+    fot = a.verdict["fot"]
     inner = (
         f'<div class="eyebrow">Прогноз выполнения на {C.esc(d.get("label", ""))}</div>'
         f'<div class="verdict">{C.esc(word)} · '
         f'<span class="big">{(r["exec"] or 0)*100:.0f}%</span></div>'
-        f'<div>{C.badge("−" + C.fmt_num(a.gap_rcp) + " получателей до плана", st)}</div>'
+        f'<div class="row2">Получатели: прогноз <b>{C.fmt_num(r["fact"])}</b> '
+        f'при плане {C.fmt_num(r["plan"])} · '
+        f'{_delta_html(r["fact"] - r["plan"], "чел")}</div>'
+        # при выполненном плане разрыва нет, и «−0 получателей до плана» рядом со
+        # строкой «+N к плану» читается как ошибка отчёта
+        + ('<div>' + C.badge("−" + C.fmt_num(a.gap_rcp) + " получателей до плана", st)
+           + '</div>' if a.gap_rcp >= 0.5 else
+           '<div>' + C.badge("план закрыт по получателям", st) + '</div>')
         + C.meter(r["exec"])
-        + f'<div class="row2">ФОТ: {(a.verdict["fot"]["exec"] or 0)*100:.0f}% плана · '
-          f'недобор {C.fmt_num(a.gap_fot_mln)} млн ₽</div>'
+        + f'<div class="row2">ФОТ: прогноз <b>{C.fmt_num(fot["fact"] / 1e6)}</b> '
+          f'при плане {C.fmt_num(fot["plan"] / 1e6)} млн ₽ · '
+          f'{(fot["exec"] or 0)*100:.0f}% · '
+          f'{_delta_html((fot["fact"] - fot["plan"]) / 1e6, "млн ₽")}</div>'
         + f'<div class="row2">{closed_txt}</div>'
     )
     return C.card(inner, cls="hero")
+
+
+def _delta_html(delta: float, unit: str = "") -> str:
+    """Отклонение от плана в абсолюте: знак, цвет, единица.
+
+    Показывается рядом с процентом везде, где стоит выполнение плана. Ноль в пределах
+    округления пишем как «вровень с планом», иначе рядом с «100%» стояло бы «+0».
+    """
+    if abs(delta) < 0.5:
+        return '<b style="color:var(--text-2)">вровень с планом</b>'
+    col = "var(--good)" if delta > 0 else "var(--bad)"
+    sign = "+" if delta > 0 else "−"
+    tail = f" {C.esc(unit)}" if unit else ""
+    return f'<b style="color:{col}">{sign}{C.fmt_num(abs(delta))}{tail} к плану</b>'
 
 
 def _kpis(a: analyze.Analysis) -> str:
@@ -201,7 +249,8 @@ def _kpis(a: analyze.Analysis) -> str:
             return ""
         head = (f'{C.esc(d.get("closed_label", ""))} закрыт: '
                 f'{C.fmt_num(cl["fact"] / scale, unit)} '
-                f'({(cl.get("exec") or 0) * 100:.0f}% плана)')
+                f'({(cl.get("exec") or 0) * 100:.0f}% плана, '
+                + _delta_html((cl["fact"] - cl.get("plan", 0)) / scale, unit) + ')')
         y = yoy.get(key)
         if not y:
             # год к году не рассчитан — честное «—», а не молчаливый ноль
@@ -219,7 +268,8 @@ def _kpis(a: analyze.Analysis) -> str:
             f'<div class="label">{C.esc(title)}</div>'
             f'<div class="value">{C.fmt_num(v["fact"] / scale, unit)}</div>'
             f'<div class="delta">план {C.fmt_num(v["plan"] / scale, unit)} · '
-            f'<b style="color:{_col(v["exec"])}">{(v["exec"] or 0)*100:.0f}%</b></div>'
+            f'<b style="color:{_col(v["exec"])}">{(v["exec"] or 0)*100:.0f}%</b> · '
+            + _delta_html((v["fact"] - v["plan"]) / scale, unit) + '</div>'
             + C.meter(v["exec"]) + foot(key, scale, unit),
             cls="kpi",
         )
@@ -310,6 +360,48 @@ def _portfolio_block(a: analyze.Analysis, ai: str | None = None) -> str:
                             + total + upside)
                      + _ai(ai),
                      eyebrow="Справочно")
+
+
+def _trend_block(rows: list, title: str) -> str:
+    """Два графика и числа под ними: портфель по месяцам и выполнение плана.
+
+    Графики разные не для разнообразия: на линиях видно, куда идёт портфель, но
+    разница с планом в проценты там незаметна — её показывают столбцы отклонения от
+    нуля. Один график вместо двух отвечал бы только на половину вопроса.
+    """
+    if not rows:
+        return ('<div class="gd-note">истории по этой единице в витрине метрик нет — '
+                'графики не построены</div>')
+    return (
+        f'<h4>{C.esc(title)}</h4>'
+        '<div class="ch-cap">Портфель получателей помесячно, факт и план</div>'
+        + C.trend_plan_fact(rows)
+        + '<div class="ch-cap">Отклонение факта от плана, чел</div>'
+        + C.trend_delta(rows)
+        + C.trend_table(rows)
+    )
+
+
+def _trend_section(a: analyze.Analysis) -> str:
+    """Раздел «Динамика за 12 месяцев» — по области уровня целиком.
+
+    Стоит сразу после управления портфелем: там сказано, что с портфелем сейчас,
+    здесь — как он к этому пришёл. Только ЗАКРЫТЫЕ месяцы: факт текущего набегает
+    в течение месяца и на графике выглядел бы обвалом.
+    """
+    if not a.trend:
+        return ""
+    first, last = a.trend[0], a.trend[-1]
+    grew = last["fact"] - first["fact"]
+    n_miss = sum(1 for r in a.trend if r["fact"] < r["plan"])
+    lead = (f'<p class="sub" style="font-size:15px;margin:-2px 0 14px">'
+            f'{C.esc(first["label"])} — {C.esc(last["label"])}, только закрытые месяцы. '
+            f'Портфель за это время {"вырос" if grew >= 0 else "сократился"} на '
+            f'<b>{C.fmt_num(abs(grew))}</b> чел; план не выполнен в '
+            f'<b>{n_miss}</b> из {len(a.trend)} месяцев.</p>')
+    return C.section("Динамика за 12 месяцев",
+                     lead + C.card(_trend_block(a.trend, "")),
+                     eyebrow="Как пришли к текущему прогнозу")
 
 
 def _matrix(a: analyze.Analysis, ai: str | None = None) -> str:
@@ -582,8 +674,12 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
         f'<div class="gd-head"><div><h3 style="margin:0">{C.esc(c["gosb_name"])}</h3>'
         f'<div class="gd-note">прогноз {C.fmt_num(pf["forecast"])} из плана '
         f'{C.fmt_num(pf["plan"])} · {ex*100:.0f}%</div></div>'
-        f'<button class="gd-close" onclick="gdClose(\'{uid}\')" '
-        f'aria-label="Закрыть">×</button></div>'
+        f'<div class="gd-head-actions">'
+        f'<button type="button" class="gd-export" onclick="event.stopPropagation();'
+        f'exportCardPdf(\'{uid}\')" title="Экспорт карточки в PDF, все разделы развёрнуты">'
+        f'Экспорт PDF</button>'
+        f'<button type="button" class="gd-close" onclick="gdClose(\'{uid}\')" '
+        f'aria-label="Закрыть">×</button></div></div>'
 
         f'<div class="gd-block"><h4>Портфель, потери и приход</h4>{wf_html}</div>'
 
@@ -601,7 +697,11 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
 
         f'<div class="gd-block">{yoy_head}{yoy_html}</div>'
 
-        f'<div class="gd-block"><h4>Разбор по сегментам</h4>{_gosb_table(c, wide=True)}</div>'
+        + f'<div class="gd-block">'
+        + _trend_block(det.get("trend") or [], "Динамика за 12 месяцев")
+        + '</div>'
+
+        + f'<div class="gd-block"><h4>Разбор по сегментам</h4>{_gosb_table(c, wide=True)}</div>'
         f'</div></dialog>'
     )
 
@@ -666,10 +766,16 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         drill = (f'<div class="g-more g-drill" onclick="event.stopPropagation();'
                  f'lvlGo({c["lvl"]})">Открыть разбор {C.esc(c["gosb_name"])} →</div>'
                  if c.get("lvl") else "")
+        # Выполнение прогноза — главное число карточки, поэтому оно стоит крупно,
+        # подписано словом и окрашено по статусу. Одного цвета мало: рядом со
+        # знаком «%» идёт подпись, а статус продублирован бейджем ниже.
         inner = (
             f'<div class="g-head"><h3 style="margin:0">{C.esc(c["gosb_name"])}</h3>'
-            f'<span class="g-ex" style="color:{_col(c["exec"])}">{c["exec"]*100:.0f}%</span></div>'
+            f'<span class="g-ex {st}"><i>прогноз</i>{c["exec"]*100:.0f}%</span></div>'
             + C.meter(c["exec"])
+            + f'<div class="g-fc">{C.fmt_num(c["forecast"])} из '
+              f'{C.fmt_num(c["plan"])} · {_delta_html(c["forecast"] - c["plan"], "чел")}'
+              f'</div>'
             + f'<div style="margin:2px 0 6px">{head_badge}</div>'
             + f'{seg_html}{do}{more}{drill}'
         )
@@ -693,6 +799,88 @@ function gdOpen(id){var d=document.getElementById('gd-'+id); if(d) d.showModal()
 function gdClose(id){var d=document.getElementById('gd-'+id); if(d) d.close();}
 document.querySelectorAll('dialog.gd').forEach(function(d){
   d.addEventListener('click', function(e){ if(e.target===d) d.close(); });
+});
+
+/* Экспорт карточки ТБ/ГОСБ в PDF, развёрнутый вид: содержимое оверлея (и,
+   если ux.js уже вынес блок «Портфель, потери и приход» в отдельное
+   всплывающее окно gd-{uid}-mgmt — содержимое обоих окон) клонируется в
+   #print-root, все <details> внутри клона раскрываются, и печатается только
+   этот блок — печать через window.print() выбрана, потому что страница
+   самодостаточна и без сети (закрытый контур), внешнюю библиотеку под PDF
+   подключить нельзя. */
+function exportCardPdf(uid){
+  var main = document.getElementById('gd-' + uid);
+  var root = document.getElementById('print-root');
+  if(!main || !root) return;
+  var mainSheet = main.querySelector('.gd-sheet');
+  if(!mainSheet) return;
+  root.innerHTML = '';
+
+  var mainClone = mainSheet.cloneNode(true);
+  mainClone.querySelectorAll('.gd-close, .mgmt-trigger').forEach(function(el){ el.remove(); });
+  var mainHead = mainClone.querySelector(':scope > .gd-head');
+  if(mainHead) root.appendChild(mainHead);
+
+  var mgmt = document.getElementById('gd-' + uid + '-mgmt');
+  if(mgmt){
+    var mgmtSheet = mgmt.querySelector('.gd-sheet');
+    if(mgmtSheet){
+      var mgmtClone = mgmtSheet.cloneNode(true);
+      mgmtClone.querySelectorAll('.gd-close').forEach(function(el){ el.remove(); });
+      while(mgmtClone.firstChild) root.appendChild(mgmtClone.firstChild);
+    }
+  }
+  Array.prototype.slice.call(mainClone.children).forEach(function(el){ root.appendChild(el); });
+
+  root.querySelectorAll('details').forEach(function(d){ d.open = true; });
+  document.body.classList.add('printing-card');
+  window.print();
+}
+/* Экспорт ЦЕЛОГО УРОВНЯ (банк или ТБ) в PDF, развёрнутый вид.
+   Уровень после ux.js выглядит не так, как в исходном HTML: разделы завёрнуты в
+   свёрнутые <details>, плашка показателей сворачивается через style.display, а
+   «Управление портфелем» вообще вынесено из уровня в отдельное окно mgmt-lvl-N.
+   Поэтому клон собирается из ОБОИХ мест и приводится к раскрытому виду. */
+function exportLevelPdf(idx){
+  var lvl = document.getElementById('lvl-' + idx);
+  var root = document.getElementById('print-root');
+  if(!lvl || !root) return;
+  root.innerHTML = '';
+  var clone = lvl.cloneNode(true);
+  clone.removeAttribute('hidden');
+
+  var mgmt = document.getElementById('mgmt-lvl-' + idx);
+  if(mgmt){
+    var sheet = mgmt.querySelector('.gd-sheet');
+    if(sheet){
+      var sec = document.createElement('section');
+      var mc = sheet.cloneNode(true);
+      mc.querySelectorAll('.gd-close').forEach(function(el){ el.remove(); });
+      while(mc.firstChild) sec.appendChild(mc.firstChild);
+      clone.appendChild(sec);
+    }
+  }
+  /* оверлеи карточек в отчёт уровня не кладём: у каждой карточки своя кнопка,
+     а вместе они дают сотни страниц вместо отчёта */
+  clone.querySelectorAll('dialog').forEach(function(el){ el.remove(); });
+  /* интерактивная обвязка на бумаге бессмысленна */
+  clone.querySelectorAll('.lvl-pdf, .lvl-up, .forecast-toggle, .mgmt-trigger, '
+    + '.gd-export, .gd-close, .gosb-finder, .ts-dropdown').forEach(function(el){
+    el.remove();
+  });
+  clone.querySelectorAll('details').forEach(function(d){ d.open = true; });
+  /* плашка показателей могла быть свёрнута кнопкой — возвращаем */
+  clone.querySelectorAll('[style]').forEach(function(el){
+    if(el.style && el.style.display === 'none') el.style.display = '';
+  });
+  root.appendChild(clone);
+  document.body.classList.add('printing-card');
+  window.print();
+}
+window.addEventListener('afterprint', function(){
+  document.body.classList.remove('printing-card');
+  var root = document.getElementById('print-root');
+  if(root) root.innerHTML = '';
 });
 </script>
 """
@@ -808,6 +996,85 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
             f'{cand}{hold}</p>')
     return C.section("Потенциал организаций", C.card(head + explorer) + _ai(ai),
                      eyebrow="Потенциал организаций")
+
+
+def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
+    """Раздел «Отток»: где потеряли больше всего и что там делали.
+
+    Остальной отчёт смотрит вперёд — кого брать в работу, чтобы закрыть план. Этот
+    раздел смотрит назад: люди уже ушли, и вопрос в том, была ли по ним работа. Одно
+    без другого не читается — по половине крупнейших потерь задач не заводили вовсе,
+    и видно это только рядом с именами.
+
+    Порядок колонок повторяет вопрос: кто ушёл → сколько → когда → кто вёл →
+    что делали → что из этого следует.
+    """
+    o = a.outflow or {}
+    if not o or not o.get("rows"):
+        return ""
+    unit = a.unit_label
+    # на уровне банка закрепление в строку не приходит — колонка называется иначе
+    has_emp = any(r["emp"] for r in o["rows"])
+    rows = []
+    for r in o["rows"]:
+        when = ", ".join(r["months"][:3]) + (f" и ещё {len(r['months']) - 3}"
+                                             if len(r["months"]) > 3 else "")
+        if not r["known"]:
+            work = '<span style="color:var(--text-2)">месяц ухода вне окна задач</span>'
+        elif r["worked"]:
+            work = (f'<span style="color:var(--good)">отработан</span> · задач '
+                    f'{r["tasks"]}, по оттоку {r["out_tasks"]}')
+        elif r["tasks"]:
+            work = (f'<span style="color:var(--warn)">задачи были, результата нет'
+                    f'</span> · всего {r["tasks"]}')
+        else:
+            work = '<span style="color:var(--bad)">задач не заводили</span>'
+        # вывод аудита по комментариям: причина и, если она есть, рекомендация
+        why = " · ".join(C.esc(x) for x in (r["reason"], r["action"]) if x) or "—"
+        # закрепление живёт на грейне (ГОСБ, организация): на уровне банка его
+        # в строке нет, и писать «закрепления нет» было бы неправдой — там просто
+        # другой разрез. Отсутствие закрепления называем только там, где оно видно
+        if r["emp"]:
+            who = f' · {C.esc(r["emp"])}'
+        elif has_emp:
+            who = ' · <span style="color:var(--warn)">закрепления нет</span>'
+        else:
+            who = ""
+        rows.append([
+            f'{C.esc(r["name"])}<div class="gd-emp">{C.esc(r["unit"])}{who}</div>',
+            C.fmt_num(r["gone"]),
+            C.fmt_num(r["ret"]) if r["ret"] else "—",
+            f'<b style="color:var(--bad)">−{C.fmt_num(r["kept"])}</b>',
+            C.esc(when) or "—",
+            work,
+            why,
+        ])
+    tbl = C.table([f"Организация · {unit}" + (" · кто вёл" if has_emp else ""),
+                   "ушло", "вернулось", "не вернулось", "когда", "что делали",
+                   "вывод по комментариям"],
+                  rows, num_cols=[1, 2, 3])
+    ret_pct = (o["tot_ret"] / o["tot_gone"] * 100) if o["tot_gone"] else 0
+    head = (
+        f'<h3>Куда ушли люди и что по ним делали</h3>'
+        f'<p class="sub" style="font-size:15px;margin:-4px 0 14px">'
+        f'За {C.esc((a.dates or {}).get("out_label", "три закрытых месяца"))} ушли '
+        f'<b>{C.fmt_num(o["tot_gone"])}</b> чел из {C.fmt_num(o["n_all"])} организаций, '
+        f'вернулись {C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%), '
+        f'остались потерянными <b>{C.fmt_num(o["tot_kept"])}</b>. '
+        f'Ниже — {o["n_shown"]} крупнейших потерь на {C.fmt_num(o["top_kept"])} чел.</p>'
+    )
+    facts = (
+        f'<div class="g-act">Успешно закрытая задача по оттоку есть у '
+        f'<b>{o["n_worked"]}</b> организаций ({C.fmt_num(o["kept_worked"])} чел). '
+        f'Ни одной задачи не заводили по <b>{o["n_silent"]}</b> '
+        f'({C.fmt_num(o["kept_silent"])} чел) — это и есть та часть потерь, где '
+        f'банк не сделал ничего.'
+        + (f' Ещё по {o["n_unknown"]} организациям месяц ухода не попал в окно '
+           f'воронки — про них сказать нечего.' if o["n_unknown"] else "")
+        + '</div>'
+    )
+    return C.section("Отток", C.card(head + facts + tbl) + _ai(ai),
+                     eyebrow="Что уже потеряли")
 
 
 def _log_llm_stats(a: analyze.Analysis) -> None:

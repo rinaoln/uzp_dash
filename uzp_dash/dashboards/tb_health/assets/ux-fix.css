@@ -23,3 +23,116 @@
 @media (max-height: 720px) {
   .app-sidebar .rp-hint { display: none; }
 }
+
+/* --- Шапка уровня: чей это отчёт + выгрузка ---
+   Раньше имя банка стояло в .lvl-back шрифтом 13px цветом подписи — на странице,
+   где тринадцать отчётов переключаются вкладками, его просто не замечали. Теперь
+   это заголовок уровня: крупный, основным цветом, с кнопкой выгрузки справа. */
+.lvl-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin: 0 0 18px;
+  padding-bottom: 14px; border-bottom: 1px solid var(--separator);
+}
+.lvl-id { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.lvl-name {
+  margin: 0; font-size: clamp(24px, 3.2vw, 34px); line-height: 1.1;
+  letter-spacing: -0.02em; font-weight: 700; color: var(--text);
+}
+.lvl-up {
+  border: 0; background: var(--accent); color: #fff; cursor: pointer;
+  font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 999px;
+  white-space: nowrap; flex-shrink: 0;
+}
+.lvl-up:hover { background: color-mix(in srgb, var(--accent) 82%, black); }
+.lvl-pdf {
+  border: 1px solid var(--separator); background: var(--surface-solid);
+  color: var(--text); cursor: pointer; font-size: 13px; font-weight: 600;
+  padding: 8px 16px; border-radius: 999px; white-space: nowrap; flex-shrink: 0;
+}
+.lvl-pdf:hover { border-color: var(--accent); color: var(--accent); }
+
+/* --- Выполнение прогноза в карточке единицы — главное число карточки ---
+   Цветом статус не кодируется в одиночку: над числом стоит подпись «прогноз»,
+   а ниже идёт бейдж словами. */
+.gcard .g-ex {
+  display: flex; flex-direction: column; align-items: flex-end; line-height: 1.05;
+  font-size: 34px; font-weight: 800; letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+.gcard .g-ex > i {
+  font-style: normal; font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  text-transform: uppercase; color: var(--text-2);
+}
+.gcard .g-ex.good { color: var(--good); }
+.gcard .g-ex.warn { color: var(--warn); }
+.gcard .g-ex.bad  { color: var(--bad); }
+.gcard .g-fc {
+  font-size: 13px; color: var(--text-2); margin: 6px 0 2px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Графики динамики (инлайновый SVG, без библиотек) --- */
+.chart { margin: 6px 0 4px; }
+.chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+.ch-cap {
+  font-size: 12.5px; font-weight: 600; color: var(--text-2);
+  margin: 14px 0 2px; letter-spacing: 0.01em;
+}
+.ch-legend { display: flex; gap: 16px; align-items: center; margin: 2px 0 4px; }
+.ch-key {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--text-2);
+}
+.ch-line { display: inline-block; width: 18px; height: 0; border-top-width: 2px; }
+.ch-line.fact { border-top: 2px solid var(--accent); }
+.ch-line.plan { border-top: 2px dashed var(--text-2); }
+.ch-note { font-size: 11.5px; color: var(--text-2); margin-top: 2px; }
+.ch-tbl { margin-top: 10px; }
+.ch-tbl > summary {
+  cursor: pointer; font-size: 13px; color: var(--accent); font-weight: 600;
+  padding: 6px 0; list-style: none;
+}
+.ch-tbl > summary::-webkit-details-marker { display: none; }
+.ch-tbl > summary::before { content: "▸ "; display: inline-block; }
+.ch-tbl[open] > summary::before { content: "▾ "; }
+.ch-tbl table { font-size: 13px; }
+
+/* --- Экспорт карточки ТБ/ГОСБ в PDF (кнопка «Экспорт PDF» в шапке оверлея) ---
+   Кнопка ставится рядом с «×» в .gd-head; сам .gd-head уже flex space-between
+   на 2 дочерних элемента, поэтому обе кнопки оборачиваем в одну группу, чтобы
+   не разъезжались по ширине шапки. */
+.gd-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.gd-export {
+  border: 1px solid var(--separator); background: var(--surface-solid); color: var(--text);
+  cursor: pointer; font-size: 12px; font-weight: 600; padding: 6px 12px;
+  border-radius: 999px; white-space: nowrap;
+}
+.gd-export:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Печатный вид: #print-root — прямой потомок <body> (см. tail страницы),
+   на экране пустой и скрытый. Кнопка «Экспорт PDF» перед печатью клонирует в
+   него содержимое оверлея карточки с раскрытыми <details> — на печати виден
+   только этот блок, остальная страница (сайдбар, вкладки, другие карточки)
+   скрыта целиком через .printing-card на <body>. */
+#print-root { display: none; }
+@media print {
+  body.printing-card > *:not(#print-root) { display: none !important; }
+  body.printing-card #print-root {
+    display: block !important; max-width: none; margin: 0; padding: 0;
+  }
+  #print-root .gd-block, #print-root .gd-grp { break-inside: avoid; }
+  #print-root details { break-inside: avoid; }
+  /* выгрузка целого уровня: раскладка экрана (боковая колонка, липкие панели,
+     ограничение высоты оверлеев) на бумаге только мешает */
+  #print-root .lvl { display: block !important; }
+  #print-root .app-sidebar, #print-root nav.lvls, #print-root .top-switchers,
+  #print-root .read-progress, #print-root .quicknav { display: none !important; }
+  #print-root .card, #print-root section { break-inside: auto; }
+  #print-root .gcard, #print-root .chart { break-inside: avoid; }
+  #print-root .lvl-name { font-size: 22px; }
+  #print-root .grid.cols-2 { display: block; }
+  /* сворачивалки на бумаге превращаются в обычные заголовки */
+  #print-root summary { list-style: none; }
+  #print-root summary::-webkit-details-marker { display: none; }
+  @page { margin: 12mm; }
+}

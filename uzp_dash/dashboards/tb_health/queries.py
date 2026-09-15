@@ -180,6 +180,47 @@ UNIT_TOTALS = _UNITS.replace("{seg_col}", "") \
                     .replace("{seg_filter}", "COALESCE(m.extended_dim_1,1)=1") \
                     .replace("{seg_group}", "")
 
+# Помесячная история плана и факта по получателям — ОКНО ЗАКРЫТЫХ МЕСЯЦЕВ, все три
+# уровня сразу (банк, ТБ, ГОСБ). По ней рисуется динамика портфеля и план/факт.
+#
+# Берутся ТОЛЬКО закрытые месяцы (по :ref_closed включительно). Текущий месяц сюда
+# не входит намеренно: факт в нём неполный (набегает в течение месяца), и на графике
+# он выглядел бы обвалом портфеля, которого нет.
+#
+# Уровень банка отдаётся вместе с level_id: под level_name='sb' в профиле прома
+# встречаются несколько level_value, и какая из строк верная, решает pandas тем же
+# правилом, что и вердикт (строка с наибольшим фактом) — см. analyze._verdict.
+MONTHLY_TREND = """
+WITH gmap AS (""" + _GMAP + """),
+tb AS (SELECT DISTINCT tb_id FROM {schema}.uzp_dim_gosb
+       WHERE tb_short_name IS NOT NULL AND """ + _NO_CA + """)
+SELECT 'sb' AS level_name, m.level_id AS unit_id, m.end_dt,
+       sum(m.plan_amt) AS plan_amt, sum(m.fact_amt) AS fact_amt
+FROM {schema}.uzp_dwh_metrics m
+WHERE m.level_name='sb' AND m.period_type='m' AND m.metric_id=:m_rcp
+  AND COALESCE(m.extended_dim_1,1)=1
+  AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
+GROUP BY m.level_id, m.end_dt
+UNION ALL
+SELECT 'tb' AS level_name, m.level_id AS unit_id, m.end_dt,
+       sum(m.plan_amt) AS plan_amt, sum(m.fact_amt) AS fact_amt
+FROM {schema}.uzp_dwh_metrics m
+JOIN tb ON tb.tb_id = m.level_id
+WHERE m.level_name='tb' AND m.period_type='m' AND m.metric_id=:m_rcp
+  AND COALESCE(m.extended_dim_1,1)=1
+  AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
+GROUP BY m.level_id, m.end_dt
+UNION ALL
+SELECT 'gosb' AS level_name, g.new_gosb_id AS unit_id, m.end_dt,
+       sum(m.plan_amt) AS plan_amt, sum(m.fact_amt) AS fact_amt
+FROM {schema}.uzp_dwh_metrics m
+JOIN gmap g ON g.old_gosb_id = m.level_id
+WHERE m.level_name='gosb' AND m.period_type='m' AND m.metric_id=:m_rcp
+  AND COALESCE(m.extended_dim_1,1)=1
+  AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
+GROUP BY g.new_gosb_id, m.end_dt
+"""
+
 # Организации ПО ВСЕМУ БАНКУ на грейне (ГОСБ, ИНН): витринные метрики, сегмент,
 # средняя ЗП, годовой тренд и признак «закреплена в эталонной базе».
 #
