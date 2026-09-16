@@ -113,7 +113,7 @@ def heat_matrix(rows_id_label: list[tuple], seg_names: list[str], cells: dict) -
                 # выполненной, хотя план недобран (и в карточке ГОСБ она красная)
                 pct = f"{ex*100:.1f}%" if 0.995 <= ex < 1 else f"{ex*100:.0f}%"
                 tds.append(
-                    f'<td class="num heat" style="background:{bg}" title="недобор {ned:.0f}">'
+                    f'<td class="num heat" style="background:{bg}" title="отклонение от плана {ned:.0f}">'
                     f'{pct}</td>'
                 )
         rows.append(f'<tr>{"".join(tds)}</tr>')
@@ -147,7 +147,7 @@ def projection_bar(attract: float, retention: float, gap: float) -> str:
     )
     return (f'<div class="proj">{segs}'
             f'<div class="proj-plan" style="left:{plan_pos}"><span>план</span></div></div>'
-            f'<div class="proj-legend">{leg_html}<span class="lg-note">масштаб = недобор {fmt_num(gap)} чел{tail}</span></div>')
+            f'<div class="proj-legend">{leg_html}<span class="lg-note">масштаб = отклонение от плана {fmt_num(gap)} чел{tail}</span></div>')
 
 
 def hbars(items: list[tuple[str, float]], unit: str = "") -> str:
@@ -262,8 +262,8 @@ def trend_plan_fact(rows: list[dict]) -> str:
     label = (f'<text x="{lx - 6:.1f}" y="{ly - 12:.1f}" text-anchor="end" font-size="12" '
              f'font-weight="700" fill="var(--text)">{esc(fmt_num(last["fact"]))}</text>')
     cut = ("" if lo <= 0 else
-           '<div class="ch-note">шкала начинается не с нуля — показан размах, '
-           'а не абсолютная величина</div>')
+           '<div class="ch-note">Шкала не начинается с нуля: масштаб подобран под '
+           'размах изменений. Высота линии над осью величину портфеля не отражает.</div>')
     return (
         '<div class="chart">'
         '<div class="ch-legend">'
@@ -312,7 +312,7 @@ def trend_delta(rows: list[dict]) -> str:
         bars.append(
             f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="3" '
             f'fill="{col}"><title>{esc(r["label"])}: {"+" if dv >= 0 else "−"}'
-            f'{fmt_num(abs(dv))} чел к плану · {ex:.0f}% плана</title></rect>')
+            f'{fmt_num(abs(dv))} чел к плану · выполнение {ex:.0f}%</title></rect>')
     ticks = [t for t in _ticks(-mx, mx, 3) if abs(t) > mx * 0.02]
     return (
         '<div class="chart">'
@@ -343,8 +343,8 @@ def trend_table(rows: list[dict]) -> str:
                      f'<b style="color:{col}">{"+" if dv >= 0 else "−"}'
                      f'{fmt_num(abs(dv))}</b>',
                      f'{ex * 100:.0f}%' if ex is not None else "—"])
-    return ('<details class="ch-tbl"><summary>Показать числами</summary>'
-            + table(["месяц", "факт", "план", "к плану", "выполнение"], body,
+    return ('<details class="ch-tbl"><summary>Показать в табличном виде</summary>'
+            + table(["месяц", "факт", "план", "отклонение", "выполнение"], body,
                     num_cols=[1, 2, 3, 4])
             + '</details>')
 

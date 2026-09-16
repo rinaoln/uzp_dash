@@ -228,7 +228,7 @@ def _delta_html(delta: float, unit: str = "") -> str:
     округления пишем как «вровень с планом», иначе рядом с «100%» стояло бы «+0».
     """
     if abs(delta) < 0.5:
-        return '<b style="color:var(--text-2)">вровень с планом</b>'
+        return '<b style="color:var(--text-2)">без отклонения</b>'
     col = "var(--good)" if delta > 0 else "var(--bad)"
     sign = "+" if delta > 0 else "−"
     tail = f" {C.esc(unit)}" if unit else ""
@@ -350,11 +350,13 @@ def _portfolio_block(a: analyze.Analysis, ai: str | None = None) -> str:
         upside = (f'<div class="g-act">Если пайплайн отработают на 100%, придёт на '
                   f'<b>+{C.fmt_num(pf["pipe_upside"])} фл</b> больше, чем заложено '
                   f'с поправкой на реализуемость.</div>')
+    # Пояснение нужно: без него три строки ниже принимают за слагаемые прогноза и
+    # начинают сверять их сумму с ним. Но объяснять методику двумя фразами с тире
+    # и тройкой однородных — значит писать не читателю, а в протокол.
     note = ('<p class="sub" style="font-size:14px;margin:-4px 0 12px">'
-            'прогноз получателей считает витрина — отчёт его не пересчитывает. '
-            'Три строки ниже не складываются в него: это независимые факты '
-            'управления портфелем — что защищаем, что уже потеряли и что придёт '
-            'из сделок.</p>')
+            'Показатели ниже в прогноз не суммируются. Прогноз поступает из '
+            'витрины готовым, а это независимые факты управления портфелем: '
+            'текущая база, безвозвратные потери и ожидаемый приход по сделкам.</p>')
     return C.section("Управление портфелем",
                      C.card('<h3>Портфель, потери и приход</h3>' + note + body
                             + total + upside)
@@ -395,13 +397,13 @@ def _trend_section(a: analyze.Analysis) -> str:
     grew = last["fact"] - first["fact"]
     n_miss = sum(1 for r in a.trend if r["fact"] < r["plan"])
     lead = (f'<p class="sub" style="font-size:15px;margin:-2px 0 14px">'
-            f'{C.esc(first["label"])} — {C.esc(last["label"])}, только закрытые месяцы. '
-            f'Портфель за это время {"вырос" if grew >= 0 else "сократился"} на '
-            f'<b>{C.fmt_num(abs(grew))}</b> чел; план не выполнен в '
+            f'Период {C.esc(first["label"])} — {C.esc(last["label"])}, закрытые '
+            f'месяцы. {"Прирост" if grew >= 0 else "Снижение"} портфеля за период — '
+            f'<b>{C.fmt_num(abs(grew))}</b> чел. План не выполнен в '
             f'<b>{n_miss}</b> из {len(a.trend)} месяцев.</p>')
     return C.section("Динамика за 12 месяцев",
                      lead + C.card(_trend_block(a.trend, "")),
-                     eyebrow="Как пришли к текущему прогнозу")
+                     eyebrow="Ретроспектива портфеля")
 
 
 def _matrix(a: analyze.Analysis, ai: str | None = None) -> str:
@@ -427,7 +429,7 @@ def _matrix(a: analyze.Analysis, ai: str | None = None) -> str:
             C.fmt_num(r.nedobor), f'{r.share*100:.0f}%') for r in a.top_cells.itertuples()]
     # «ГОСБхСегмент» — и на уровне банка тоже: так в дизайне пользователя
     top_tbl = C.card(f'<h3>ТОП {a.unit_label} по невыполнению</h3>'
-                     + C.table(["ГОСБхСегмент", "Выполн.", "Недобор, чел", "Доля разрыва"],
+                     + C.table(["ГОСБ × сегмент", "Выполн.", "Отклонение, чел", "Доля отклонения"],
                                top, num_cols=[2, 3]))
     return C.section(f"Матрица выполнения {a.unit_label}/сегмент",
                      f'<div class="grid cols-2">{heat}{top_tbl}</div>' + _ai(ai),
@@ -471,7 +473,7 @@ def _gosb_table(c: dict, wide: bool = False) -> str:
 
     cols = ('<span>пайплайн</span>' if wide else "")
     head = (f'<div class="g-row head"><span>сегмент</span><span>прогноз</span>'
-            f'<span>план</span><span>недобор</span>{cols}<span>орг</span></div>')
+            f'<span>план</span><span>отклонение</span>{cols}<span>орг</span></div>')
     tot = {"forecast": c["forecast"], "plan": c["plan"], "nedobor": c["gap"],
            "n_need": c["n_need"],
            "pipe_np": sum(s.get("pipe_np", 0) for s in c["segs"])}
@@ -667,7 +669,7 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
     yoy_head = (f'<h4>Портфель год к году: '
                 f'<span style="color:{"var(--bad)" if yoy < 0 else "var(--good)"}">'
                 f'{"−" if yoy < 0 else "+"}{C.fmt_num(abs(yoy))} чел</span>'
-                f' · просели {C.fmt_num(det.get("yoy_n_all", 0))} орг на '
+                f' · снижение у {C.fmt_num(det.get("yoy_n_all", 0))} орг на '
                 f'−{C.fmt_num(abs(det.get("yoy_down_tot", 0)))}</h4>')
     return (
         f'<dialog class="gd" id="gd-{uid}"><div class="gd-sheet">'
@@ -728,7 +730,7 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         for s in c["segs_bad"]:
             cov = s["coverage"]
             if not s["n_avail"]:
-                notes.append(f'в {s["seg"]} своих организаций нет — добор из других')
+                notes.append(f'в {s["seg"]} собственных организаций нет, нужна компенсация за счёт других сегментов')
             elif cov is not None and cov < 0.999:
                 notes.append(f'в {s["seg"]} хватает на {cov*100:.0f}% ({s["n_avail"]} орг)')
         note_html = (f'<div class="g-act">{C.esc(" · ".join(notes[:3]))}</div>'
@@ -737,15 +739,15 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         if c["healthy"]:
             head_badge = C.badge("план выполняется по всем сегментам", "good")
         elif c["seg_only"]:
-            head_badge = C.badge(f'план выполняется, но западает '
+            head_badge = C.badge(f'план выполняется, не выполнен в сегментах: '
                                  f'{", ".join(s["seg"] for s in c["segs_bad"][:3])}', "warn")
         else:
             head_badge = C.badge("−" + C.fmt_num(c["gap"]) + " чел до плана", st)
-        filler = (f' · добор из других сегментов: <b>{c["filler_n"]}</b> орг '
+        filler = (f' · компенсация за счёт других сегментов: <b>{c["filler_n"]}</b> орг '
                   f'(+{C.fmt_num(c["filler_fl"])})' if c["filler_n"] else "")
         cover = (c["fl_need"] / c["gap_seg"]) if c["gap_seg"] > 0 else None
-        short = (f' · этого хватает лишь на <b>{cover*100:.0f}%</b> разрыва — '
-                 f'потенциала в {unit} больше нет'
+        short = (f' · покрывает <b>{cover*100:.0f}%</b> отклонения, '
+                 f'собственный потенциал {unit} исчерпан'
                  if cover is not None and cover < 0.999 else "")
         do = (
             f'<div class="g-do">Итого под план: <b>{c["n_need"]}</b> организаций '
@@ -944,7 +946,7 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
         ins = a.insights.get((int(r.new_gosb_id), int(r.inn)), {})
         reason = ins.get("reason") or r.reason
         if bool(getattr(r, "filler", False)):
-            reason = "добор из другого сегмента · " + reason
+            reason = "компенсация за счёт другого сегмента · " + reason
         rows.append({
             "inn": int(r.inn), "company": (getattr(r, "company_name", "") or "")[:48],
             "lever": r.lever,
@@ -990,9 +992,9 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
             else f'всего кандидатов {C.fmt_num(len(rows))}')
     head = (f'<h3>С кем работать — {sim["k"]} организаций закрывают план</h3>'
             f'<p class="sub" style="font-size:14px;margin:-4px 0 14px">'
-            f'отбор идёт внутри ЗАПАДАЮЩИХ сегментов каждого ГОСБ '
-            f'({C.esc(", ".join(bad_segs)) or "—"}), по величине эффекта, пока разрыв '
-            f'сегмента не закрыт · переключатель «Цель» задаёт перевыполнение · '
+            f'отбор идёт внутри сегментов с невыполнением плана каждого ГОСБ '
+            f'({C.esc(", ".join(bad_segs)) or "—"}), по величине эффекта, пока отклонение '
+            f'сегмента не закрыто · переключатель «Цель» задаёт перевыполнение · '
             f'{cand}{hold}</p>')
     return C.section("Потенциал организаций", C.card(head + explorer) + _ai(ai),
                      eyebrow="Потенциал организаций")
@@ -1020,15 +1022,16 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
         when = ", ".join(r["months"][:3]) + (f" и ещё {len(r['months']) - 3}"
                                              if len(r["months"]) > 3 else "")
         if not r["known"]:
-            work = '<span style="color:var(--text-2)">месяц ухода вне окна задач</span>'
+            work = ('<span style="color:var(--text-2)">месяц оттока вне окна '
+                    'воронки</span>')
         elif r["worked"]:
             work = (f'<span style="color:var(--good)">отработан</span> · задач '
                     f'{r["tasks"]}, по оттоку {r["out_tasks"]}')
         elif r["tasks"]:
-            work = (f'<span style="color:var(--warn)">задачи были, результата нет'
-                    f'</span> · всего {r["tasks"]}')
+            work = (f'<span style="color:var(--warn)">задачи заведены, результат '
+                    f'не достигнут</span> · всего {r["tasks"]}')
         else:
-            work = '<span style="color:var(--bad)">задач не заводили</span>'
+            work = '<span style="color:var(--bad)">задачи не заводились</span>'
         # вывод аудита по комментариям: причина и, если она есть, рекомендация
         why = " · ".join(C.esc(x) for x in (r["reason"], r["action"]) if x) or "—"
         # закрепление живёт на грейне (ГОСБ, организация): на уровне банка его
@@ -1049,32 +1052,33 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
             work,
             why,
         ])
-    tbl = C.table([f"Организация · {unit}" + (" · кто вёл" if has_emp else ""),
-                   "ушло", "вернулось", "не вернулось", "когда", "что делали",
+    tbl = C.table([f"Организация · {unit}" + (" · ответственный" if has_emp else ""),
+                   "отток", "возврат", "потери", "период оттока", "отработка",
                    "вывод по комментариям"],
                   rows, num_cols=[1, 2, 3])
     ret_pct = (o["tot_ret"] / o["tot_gone"] * 100) if o["tot_gone"] else 0
     head = (
-        f'<h3>Куда ушли люди и что по ним делали</h3>'
+        f'<h3>Крупнейшие потери портфеля и их отработка</h3>'
         f'<p class="sub" style="font-size:15px;margin:-4px 0 14px">'
-        f'За {C.esc((a.dates or {}).get("out_label", "три закрытых месяца"))} ушли '
-        f'<b>{C.fmt_num(o["tot_gone"])}</b> чел из {C.fmt_num(o["n_all"])} организаций, '
-        f'вернулись {C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%), '
-        f'остались потерянными <b>{C.fmt_num(o["tot_kept"])}</b>. '
-        f'Ниже — {o["n_shown"]} крупнейших потерь на {C.fmt_num(o["top_kept"])} чел.</p>'
+        f'За {C.esc((a.dates or {}).get("out_label", "три закрытых месяца"))} отток '
+        f'составил <b>{C.fmt_num(o["tot_gone"])}</b> чел по '
+        f'{C.fmt_num(o["n_all"])} организациям, возврат — '
+        f'{C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%). Безвозвратные потери: '
+        f'<b>{C.fmt_num(o["tot_kept"])}</b> чел. Ниже {o["n_shown"]} крупнейших '
+        f'на {C.fmt_num(o["top_kept"])} чел.</p>'
     )
     facts = (
-        f'<div class="g-act">Успешно закрытая задача по оттоку есть у '
-        f'<b>{o["n_worked"]}</b> организаций ({C.fmt_num(o["kept_worked"])} чел). '
-        f'Ни одной задачи не заводили по <b>{o["n_silent"]}</b> '
-        f'({C.fmt_num(o["kept_silent"])} чел) — это и есть та часть потерь, где '
-        f'банк не сделал ничего.'
-        + (f' Ещё по {o["n_unknown"]} организациям месяц ухода не попал в окно '
-           f'воронки — про них сказать нечего.' if o["n_unknown"] else "")
+        f'<div class="g-act">По <b>{o["n_silent"]}</b> организациям '
+        f'({C.fmt_num(o["kept_silent"])} чел) задачи не заводились — отработка '
+        f'оттока не велась. У <b>{o["n_worked"]}</b> организаций '
+        f'({C.fmt_num(o["kept_worked"])} чел) задача по оттоку закрыта успешно, '
+        f'однако возврат не состоялся.'
+        + (f' Ещё по {o["n_unknown"]} организациям месяц оттока не попал в окно '
+           f'воронки — отработка не оценивается.' if o["n_unknown"] else "")
         + '</div>'
     )
     return C.section("Отток", C.card(head + facts + tbl) + _ai(ai),
-                     eyebrow="Что уже потеряли")
+                     eyebrow="Безвозвратные потери портфеля")
 
 
 def _log_llm_stats(a: analyze.Analysis) -> None:
