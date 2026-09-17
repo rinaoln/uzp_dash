@@ -78,9 +78,18 @@ def card(inner: str, cls: str = "") -> str:
     return f'<div class="card {esc(cls)}">{inner}</div>'
 
 
-def section(title: str, inner: str, eyebrow: str = "") -> str:
+def section(title: str, inner: str, eyebrow: str = "", desc: str = "") -> str:
+    """Раздел отчёта. `desc` — подстрочник под заголовком.
+
+    Класс `section-desc` и место сразу после `<h2>` выбраны не случайно: скрипт
+    дизайна сворачивает разделы в `<details>` и переносит в шапку именно такой
+    элемент. Свои описания он знает только для исходных разделов (по заголовку),
+    поэтому новым разделам подстрочник отдаём готовым — иначе пришлось бы править
+    сам скрипт, который держится копией макета.
+    """
     eb = f'<div class="eyebrow">{esc(eyebrow)}</div>' if eyebrow else ""
-    return f'<section>{eb}<h2>{esc(title)}</h2>{inner}</section>'
+    ds = f'<p class="section-desc">{esc(desc)}</p>' if desc else ""
+    return f'<section>{eb}<h2>{esc(title)}</h2>{ds}{inner}</section>'
 
 
 def heat_bg(exec_pct: float | None) -> str:
@@ -182,10 +191,14 @@ def _ticks(lo: float, hi: float, n: int = 4) -> list[float]:
     return out or [lo, hi]
 
 
-# Геометрия обоих графиков в координатах viewBox. Одна на два графика намеренно:
-# они стоят друг под другом, и месяц обязан приходиться на одну вертикаль.
-_CW, _CH = 720, 210          # ширина/высота полотна
-_PL, _PR, _PT, _PB = 66, 14, 14, 34   # поля: слева под подписи шкалы, снизу под месяцы
+# Геометрия графика в координатах viewBox.
+#
+# Снизу оставлено место под ДВЕ строки подписей: месяц и отклонение этого месяца от
+# плана. Отклонение стоит числом, а не отдельным графиком: два графика заставляли
+# читателя сопоставлять их глазами по вертикали, а вопрос «выполнен план или нет»
+# решается одним числом под точкой.
+_CW, _CH = 760, 250          # ширина/высота полотна
+_PL, _PR, _PT, _PB = 72, 58, 26, 54   # поля: слева шкала, справа подписи линий, снизу два ряда подписей
 
 
 def _x_of(i: int, n: int) -> float:
@@ -209,15 +222,26 @@ def _grid(ticks: list[float], y_of, fmt=lambda v: fmt_num(v)) -> str:
 
 
 def _months_axis(rows: list[dict]) -> str:
-    """Подписи месяцев под графиком. Через одну, если месяцев много."""
+    """Два ряда подписей под графиком: месяц и его отклонение от плана.
+
+    Отклонение подписано цветом статуса и знаком, поэтому «выполнен план в этом
+    месяце или нет» читается по нижней строке, не поднимая глаз на линии.
+    """
     n = len(rows)
     every = 1 if n <= 12 else 2
     out = []
     for i, r in enumerate(rows):
         if i % every:
             continue
-        out.append(f'<text x="{_x_of(i, n):.1f}" y="{_CH - 12}" text-anchor="middle" '
+        x = _x_of(i, n)
+        out.append(f'<text x="{x:.1f}" y="{_CH - 32}" text-anchor="middle" '
                    f'font-size="11" fill="var(--text-2)">{esc(r["short"])}</text>')
+        dv = r["fact"] - r["plan"]
+        col = "var(--good)" if dv >= 0 else "var(--bad)"
+        sign = "+" if dv >= 0 else "−"
+        out.append(f'<text x="{x:.1f}" y="{_CH - 14}" text-anchor="middle" '
+                   f'font-size="10.5" font-weight="600" fill="{col}">'
+                   f'{esc(sign + fmt_num(abs(dv)))}</text>')
     return "".join(out)
 
 
@@ -250,34 +274,43 @@ def trend_plan_fact(rows: list[dict]) -> str:
 
     fact_pts = path("fact")
     plan_pts = path("plan")
-    dots = "".join(
-        f'<circle cx="{_x_of(i, n):.1f}" cy="{y_of(r["fact"]):.1f}" r="4" '
-        f'fill="var(--accent)" stroke="var(--surface-solid)" stroke-width="2">'
-        f'<title>{esc(r["label"])}: факт {fmt_num(r["fact"])} · план '
-        f'{fmt_num(r["plan"])} · {(r["fact"] / r["plan"] * 100) if r["plan"] else 0:.0f}%'
-        f'</title></circle>'
-        for i, r in enumerate(rows))
-    last = rows[-1]
-    lx, ly = _x_of(n - 1, n), y_of(last["fact"])
-    label = (f'<text x="{lx - 6:.1f}" y="{ly - 12:.1f}" text-anchor="end" font-size="12" '
-             f'font-weight="700" fill="var(--text)">{esc(fmt_num(last["fact"]))}</text>')
+    dots, vals = [], []
+    for i, r in enumerate(rows):
+        x, y = _x_of(i, n), y_of(r["fact"])
+        ex = (r["fact"] / r["plan"] * 100) if r["plan"] else 0
+        dots.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="var(--accent)" '
+            f'stroke="var(--surface-solid)" stroke-width="2">'
+            f'<title>{esc(r["label"])}: факт {fmt_num(r["fact"])} · план '
+            f'{fmt_num(r["plan"])} · выполнение {ex:.0f}%</title></circle>')
+        # значение факта над точкой: управляющему нужна величина, а не только форма
+        # кривой. Ниже плана — подпись уходит вверх, выше — тоже вверх, но от точки,
+        # поэтому линия плана её не перечёркивает
+        vals.append(
+            f'<text x="{x:.1f}" y="{y - 11:.1f}" text-anchor="middle" font-size="9.5" '
+            f'font-weight="600" fill="var(--text)">{esc(fmt_num(r["fact"]))}</text>')
+    # подписи прямо у концов линий: надёжнее легенды, её приходится сопоставлять
+    ly_f, ly_p = y_of(rows[-1]["fact"]), y_of(rows[-1]["plan"])
+    if abs(ly_f - ly_p) < 14:            # линии сошлись — разводим подписи
+        ly_p = ly_f + 14
+    ends = (f'<text x="{_CW - _PR + 6}" y="{ly_f + 4:.1f}" font-size="12" '
+            f'font-weight="700" fill="var(--accent)">факт</text>'
+            f'<text x="{_CW - _PR + 6}" y="{ly_p + 4:.1f}" font-size="12" '
+            f'font-weight="600" fill="var(--text-2)">план</text>')
     cut = ("" if lo <= 0 else
            '<div class="ch-note">Шкала не начинается с нуля: масштаб подобран под '
-           'размах изменений. Высота линии над осью величину портфеля не отражает.</div>')
+           'размах изменений. Высота линии над осью величину портфеля не отражает. '
+           'Под месяцем — отклонение факта от плана.</div>')
     return (
         '<div class="chart">'
-        '<div class="ch-legend">'
-        '<span class="ch-key"><i class="ch-line fact"></i>факт</span>'
-        '<span class="ch-key"><i class="ch-line plan"></i>план</span>'
-        '</div>'
         f'<svg viewBox="0 0 {_CW} {_CH}" role="img" preserveAspectRatio="xMidYMid meet" '
-        f'aria-label="Портфель помесячно: факт и план">'
+        f'aria-label="Портфель помесячно: факт, план и отклонение">'
         + _grid(_ticks(lo, hi), y_of)
         + f'<polyline points="{plan_pts}" fill="none" stroke="var(--text-2)" '
           f'stroke-width="2" stroke-dasharray="6 4" stroke-linejoin="round"/>'
         + f'<polyline points="{fact_pts}" fill="none" stroke="var(--accent)" '
           f'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
-        + dots + label + _months_axis(rows)
+        + "".join(dots) + "".join(vals) + ends + _months_axis(rows)
         + '</svg>' + cut + '</div>'
     )
 

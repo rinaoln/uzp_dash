@@ -106,10 +106,53 @@ html.js-boot .app-layout { visibility: hidden; }
 .ch-tbl[open] > summary::before { content: "▾ "; }
 .ch-tbl table { font-size: 13px; }
 
+/* --- Памятка: блок «Новое в отчёте» ---
+   Селекторы с двумя классами: help.css подключается ПОСЛЕ этого файла, и по
+   одному .hlp-card его правила перебили бы наши. */
+.hlp-card.hlp-new {
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-solid));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--separator));
+}
+.hlp-card.hlp-new .hlp-tag {
+  flex: none; display: inline-flex; align-items: center;
+  background: var(--accent); color: #fff; border-radius: 999px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.03em;
+  text-transform: uppercase; padding: 3px 9px;
+}
+
+/* --- Раздел «Отток»: два списка переключателем ---
+   Второй список стоял под таблицей на пятнадцать строк, за нижней границей экрана,
+   и до него не долистывали. Кнопки держат оба заголовка с итогами на виду. */
+.of-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+.of-tab {
+  flex: 1 1 280px; display: flex; flex-direction: column; gap: 3px;
+  text-align: left; cursor: pointer; font: inherit; padding: 10px 14px;
+  border: 1px solid var(--separator); border-radius: 12px;
+  background: var(--surface-solid); color: var(--text-2);
+}
+.of-tab:hover { border-color: var(--accent); }
+.of-tab-t { font-size: 13.5px; font-weight: 700; line-height: 1.25; }
+.of-tab-n { font-size: 12.5px; font-variant-numeric: tabular-nums; }
+/* открытый список: рамка акцентом + утолщение внутренней тенью (не только цвет) */
+.of-tab.on {
+  color: var(--text); border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.of-tab.on .of-tab-t { color: var(--accent); }
+/* заголовок панели дублировал бы активную кнопку — на экране он лишний */
+.of-wrap.tabbed > .of-pane > h4 { display: none; }
+
 /* --- Экспорт карточки ТБ/ГОСБ в PDF (кнопка «Экспорт PDF» в шапке оверлея) ---
    Кнопка ставится рядом с «×» в .gd-head; сам .gd-head уже flex space-between
    на 2 дочерних элемента, поэтому обе кнопки оборачиваем в одну группу, чтобы
    не разъезжались по ширине шапки. */
+/* Строка прогноза в шапке карточки ГОСБ. Раньше стояла классом .gd-note (13px,
+   цвет подписи) и на светлом фоне практически не читалась, хотя это главное
+   число карточки. */
+.gd-fc {
+  font-size: 15px; color: var(--text); line-height: 1.4; margin: 6px 0 0;
+  font-variant-numeric: tabular-nums;
+}
 .gd-head-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .gd-export {
   border: 1px solid var(--separator); background: var(--surface-solid); color: var(--text);
@@ -143,5 +186,10 @@ html.js-boot .app-layout { visibility: hidden; }
   /* сворачивалки на бумаге превращаются в обычные заголовки */
   #print-root summary { list-style: none; }
   #print-root summary::-webkit-details-marker { display: none; }
+  /* «Отток»: на бумаге переключаться нечем — печатаем оба списка со своими
+     заголовками, а кнопки убираем */
+  .of-tabs { display: none !important; }
+  .of-pane[hidden] { display: block !important; }
+  .of-wrap.tabbed > .of-pane > h4 { display: block !important; }
   @page { margin: 12mm; }
 }

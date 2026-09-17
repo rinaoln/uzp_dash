@@ -71,7 +71,32 @@ _BOOT_JS = (
     'setTimeout(function(){document.documentElement.classList.remove("js-boot");},'
     '4000);</script>'
 )
-_REVEAL_JS = '<script>document.documentElement.classList.remove("js-boot");</script>'
+# Доводка раскладки ПОСЛЕ скрипта дизайна и снятие маски.
+#
+# Скрипт дизайна раскладывает блоки карточки ГОСБ в своём порядке: «Разбор по
+# сегментам», затем отток, затем всё остальное — и динамика за 12 месяцев уезжает
+# в самый низ. Читать её там поздно: это то, с чего разбор начинается. Переставляем
+# сами, потому что порядок задаётся файлом дизайнера, а он остаётся копией макета.
+_REVEAL_JS = """
+<script>
+(function(){
+  function h4text(b){ var h = b.querySelector(':scope > h4'); return h ? h.textContent.trim() : ''; }
+  document.querySelectorAll('dialog.gd .gd-sheet').forEach(function(sheet){
+    var blocks = Array.prototype.slice.call(sheet.querySelectorAll(':scope > .gd-block'));
+    var trend = null, seg = null;
+    blocks.forEach(function(b){
+      var t = h4text(b);
+      if(t.indexOf('Динамика за 12 месяцев') === 0) trend = b;
+      else if(t.indexOf('Разбор по сегментам') === 0) seg = b;
+    });
+    if(trend && seg && trend.compareDocumentPosition(seg) & Node.DOCUMENT_POSITION_PRECEDING){
+      sheet.insertBefore(trend, seg);
+    }
+  });
+  document.documentElement.classList.remove('js-boot');
+})();
+</script>
+"""
 
 
 def _asset(name: str) -> str:
@@ -146,7 +171,7 @@ def build(ctx: Context) -> str:
         title=TITLE,
         subtitle=f"Прогноз на {C.esc(d.get('label', sb.ref_date))}",
         body=(_BOOT_JS + _LEGEND + _tabs([a for a, _ in levels]) + bodies
-              + _GD_JS + _LVL_JS),
+              + _GD_JS + _LVL_JS + _OF_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
         css=_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css"),
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
@@ -407,10 +432,9 @@ def _trend_block(rows: list, title: str) -> str:
                 'графики не построены</div>')
     return (
         f'<h4>{C.esc(title)}</h4>'
-        '<div class="ch-cap">Портфель получателей помесячно, факт и план</div>'
+        '<div class="ch-cap">Портфель получателей помесячно: факт, план и '
+        'отклонение</div>'
         + C.trend_plan_fact(rows)
-        + '<div class="ch-cap">Отклонение факта от плана, чел</div>'
-        + C.trend_delta(rows)
         + C.trend_table(rows)
     )
 
@@ -432,9 +456,13 @@ def _trend_section(a: analyze.Analysis) -> str:
             f'месяцы. {"Прирост" if grew >= 0 else "Снижение"} портфеля за период — '
             f'<b>{C.fmt_num(abs(grew))}</b> чел. План не выполнен в '
             f'<b>{n_miss}</b> из {len(a.trend)} месяцев.</p>')
-    return C.section("Динамика за 12 месяцев",
-                     lead + C.card(_trend_block(a.trend, "")),
-                     eyebrow="Ретроспектива портфеля")
+    return C.section(
+        "Динамика за 12 месяцев",
+        lead + C.card(_trend_block(a.trend, "")),
+        eyebrow="Ретроспектива портфеля",
+        desc="Как портфель получателей менялся месяц к месяцу и в каких месяцах "
+             "план не выполнялся — чтобы отличить разовое отклонение от "
+             "устойчивой тенденции.")
 
 
 def _matrix(a: analyze.Analysis, ai: str | None = None) -> str:
@@ -705,8 +733,11 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
     return (
         f'<dialog class="gd" id="gd-{uid}"><div class="gd-sheet">'
         f'<div class="gd-head"><div><h3 style="margin:0">{C.esc(c["gosb_name"])}</h3>'
-        f'<div class="gd-note">прогноз {C.fmt_num(pf["forecast"])} из плана '
-        f'{C.fmt_num(pf["plan"])} · {ex*100:.0f}%</div></div>'
+        # не .gd-note: это главная строка шапки, а цвет подписи делал её нечитаемой
+        f'<div class="gd-fc">Прогноз <b>{C.fmt_num(pf["forecast"])}</b> из плана '
+        f'{C.fmt_num(pf["plan"])} · <b style="color:{_col(pf.get("exec"))}">'
+        f'{ex*100:.0f}%</b> · {_delta_html(pf["forecast"] - pf["plan"], "чел")}'
+        f'</div></div>'
         f'<div class="gd-head-actions">'
         f'<button type="button" class="gd-export" onclick="event.stopPropagation();'
         f'exportCardPdf(\'{uid}\')" title="Экспорт карточки в PDF, все разделы развёрнуты">'
@@ -945,6 +976,30 @@ lvlFromHash();
 """
 
 
+# Переключатель списков в разделе «Отток». Панели прячет скрипт, а не разметка:
+# в HTML открыты обе, поэтому при вырезанном JS раздел остаётся полным.
+_OF_JS = """
+<script>
+function ofTab(btn, i){
+  var w = btn.closest('.of-wrap');
+  if(!w) return;
+  w.querySelectorAll(':scope > .of-tabs > .of-tab').forEach(function(b, k){
+    b.classList.toggle('on', k === i);
+    b.setAttribute('aria-selected', k === i ? 'true' : 'false');
+  });
+  w.querySelectorAll(':scope > .of-pane').forEach(function(p, k){ p.hidden = (k !== i); });
+}
+(function(){
+  document.querySelectorAll('.of-wrap').forEach(function(w){
+    if(w.querySelectorAll(':scope > .of-tabs > .of-tab').length < 2) return;
+    w.classList.add('tabbed');
+    w.querySelectorAll(':scope > .of-pane').forEach(function(p, k){ p.hidden = (k !== 0); });
+  });
+})();
+</script>
+"""
+
+
 def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
     """Список к отработке: по умолчанию — ровно те, кем закрывается план.
 
@@ -1046,23 +1101,93 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
     if not o or not o.get("rows"):
         return ""
     unit = a.unit_label
-    # на уровне банка закрепление в строку не приходит — колонка называется иначе
-    has_emp = any(r["emp"] for r in o["rows"])
+    ret_pct = (o["tot_ret"] / o["tot_gone"] * 100) if o["tot_gone"] else 0
+    head = (
+        f'<h3>Крупнейшие потери портфеля и их отработка</h3>'
+        f'<p class="sub" style="font-size:15px;margin:-4px 0 14px">'
+        f'За {C.esc((a.dates or {}).get("out_label", "три закрытых месяца"))} отток '
+        f'составил <b>{C.fmt_num(o["tot_gone"])}</b> чел по '
+        f'{C.fmt_num(o["n_all"])} организациям, возврат — '
+        f'{C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%). Безвозвратные потери: '
+        f'<b>{C.fmt_num(o["tot_kept"])}</b> чел.</p>'
+    )
+    groups = []
+    for rows_src, title, lead in (
+        (o.get("top_worked") or [], "Отработка проведена, возврат не состоялся",
+         "Задачи по этим клиентам заводились, люди в портфель не вернулись. "
+         "Разбор нужен по существу работы, а не по факту её наличия."),
+        (o.get("top_silent") or [], "Отток на контроль",
+         "Крупнейшие потери, по которым отработка в воронке не отражена. "
+         "Требуют решения по дальнейшим действиям."),
+    ):
+        if not rows_src:
+            continue
+        groups.append({"title": title,
+                       "n": len(rows_src),
+                       "kept": sum(r["kept"] for r in rows_src),
+                       "html": _outflow_group(rows_src, unit, title, lead)})
+    return C.section(
+        "Отток", C.card(head + _outflow_tabs(groups)) + _ai(ai),
+        eyebrow="Безвозвратные потери портфеля",
+        desc="Кого потеряли за три закрытых месяца и что по этим клиентам "
+             "делали — чтобы отделить случаи, где работа велась и не дала "
+             "результата, от тех, где нужно принимать решение.")
+
+
+def _outflow_tabs(groups: list) -> str:
+    """Две группы оттока — переключателем, а не одним свитком.
+
+    Списком в столбик вторая группа оказывалась за экраном первой таблицы на
+    пятнадцать строк, и до неё просто не долистывали. Переключатель держит оба
+    заголовка с их итогами на виду: видно, что списка два, ещё до чтения таблицы.
+
+    Скрывает лишнюю панель САМ СКРИПТ (см. _OF_JS), в разметке открыты обе. Без JS
+    страница вернётся к прежнему виду — два списка подряд, — а не потеряет половину
+    раздела. По той же причине печать показывает обе панели: см. ux-fix.css.
+    """
+    if not groups:
+        return ""
+    panes = "".join(f'<div class="of-pane" role="tabpanel">{g["html"]}</div>'
+                    for g in groups)
+    if len(groups) < 2:
+        return f'<div class="of-wrap">{panes}</div>'
+    tabs = "".join(
+        f'<button type="button" class="of-tab{" on" if i == 0 else ""}" role="tab" '
+        f'aria-selected="{"true" if i == 0 else "false"}" onclick="ofTab(this,{i})">'
+        f'<span class="of-tab-t">{C.esc(g["title"])}</span>'
+        f'<span class="of-tab-n">{g["n"]} клиентов · потери '
+        f'{C.fmt_num(g["kept"])} чел</span></button>'
+        for i, g in enumerate(groups))
+    lead = ('<p class="sub" style="font-size:14px;margin:0 0 10px">'
+            'Потери разнесены по двум спискам — выберите нужный.</p>')
+    return (f'<div class="of-wrap">{lead}'
+            f'<div class="of-tabs" role="tablist">{tabs}</div>{panes}</div>')
+
+
+def _outflow_group(rows_src: list, unit: str, title: str, lead: str) -> str:
+    """Одна группа раздела «Отток»: заголовок, пояснение и таблица клиентов.
+
+    Колонка отработки показывается только там, где есть что показать. У группы без
+    задач она была бы колонкой из одинаковых прочерков и говорила бы ровно то, что
+    в этом отчёте проговаривать не нужно: состав группы и так задан её заголовком.
+    """
+    if not rows_src:
+        return ""
+    has_emp = any(r["emp"] for r in rows_src)
+    has_work = any(r["tasks"] for r in rows_src)
+    tot = sum(r["kept"] for r in rows_src)
     rows = []
-    for r in o["rows"]:
+    for r in rows_src:
         when = ", ".join(r["months"][:3]) + (f" и ещё {len(r['months']) - 3}"
                                              if len(r["months"]) > 3 else "")
-        if not r["known"]:
-            work = ('<span style="color:var(--text-2)">месяц оттока вне окна '
-                    'воронки</span>')
-        elif r["worked"]:
-            work = (f'<span style="color:var(--good)">отработан</span> · задач '
-                    f'{r["tasks"]}, по оттоку {r["out_tasks"]}')
-        elif r["tasks"]:
-            work = (f'<span style="color:var(--warn)">задачи заведены, результат '
-                    f'не достигнут</span> · всего {r["tasks"]}')
-        else:
-            work = '<span style="color:var(--bad)">задачи не заводились</span>'
+        work = ""
+        if has_work:
+            if r["worked"]:
+                work = (f'<span style="color:var(--good)">задача закрыта</span> · '
+                        f'всего {r["tasks"]}, по оттоку {r["out_tasks"]}')
+            else:
+                work = (f'<span style="color:var(--warn)">в работе, результат '
+                        f'не достигнут</span> · всего {r["tasks"]}')
         # вывод аудита по комментариям: причина и, если она есть, рекомендация
         why = " · ".join(C.esc(x) for x in (r["reason"], r["action"]) if x) or "—"
         # закрепление живёт на грейне (ГОСБ, организация): на уровне банка его
@@ -1074,42 +1199,28 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
             who = ' · <span style="color:var(--warn)">закрепления нет</span>'
         else:
             who = ""
-        rows.append([
+        row = [
             f'{C.esc(r["name"])}<div class="gd-emp">{C.esc(r["unit"])}{who}</div>',
             C.fmt_num(r["gone"]),
             C.fmt_num(r["ret"]) if r["ret"] else "—",
             f'<b style="color:var(--bad)">−{C.fmt_num(r["kept"])}</b>',
             C.esc(when) or "—",
-            work,
-            why,
-        ])
-    tbl = C.table([f"Организация · {unit}" + (" · ответственный" if has_emp else ""),
-                   "отток", "возврат", "потери", "период оттока", "отработка",
-                   "вывод по комментариям"],
-                  rows, num_cols=[1, 2, 3])
-    ret_pct = (o["tot_ret"] / o["tot_gone"] * 100) if o["tot_gone"] else 0
-    head = (
-        f'<h3>Крупнейшие потери портфеля и их отработка</h3>'
-        f'<p class="sub" style="font-size:15px;margin:-4px 0 14px">'
-        f'За {C.esc((a.dates or {}).get("out_label", "три закрытых месяца"))} отток '
-        f'составил <b>{C.fmt_num(o["tot_gone"])}</b> чел по '
-        f'{C.fmt_num(o["n_all"])} организациям, возврат — '
-        f'{C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%). Безвозвратные потери: '
-        f'<b>{C.fmt_num(o["tot_kept"])}</b> чел. Ниже {o["n_shown"]} крупнейших '
-        f'на {C.fmt_num(o["top_kept"])} чел.</p>'
+        ]
+        if has_work:
+            row.append(work)
+        row.append(why)
+        rows.append(row)
+    cols = [f"Организация · {unit}" + (" · ответственный" if has_emp else ""),
+            "отток", "возврат", "потери", "период оттока"]
+    if has_work:
+        cols.append("отработка")
+    cols.append("вывод по комментариям")
+    return (
+        f'<h4 style="margin-top:22px">{C.esc(title)} — {len(rows)} клиентов на '
+        f'{C.fmt_num(tot)} чел</h4>'
+        f'<p class="g-act" style="margin:0 0 10px">{C.esc(lead)}</p>'
+        + C.table(cols, rows, num_cols=[1, 2, 3])
     )
-    facts = (
-        f'<div class="g-act">По <b>{o["n_silent"]}</b> организациям '
-        f'({C.fmt_num(o["kept_silent"])} чел) задачи не заводились — отработка '
-        f'оттока не велась. У <b>{o["n_worked"]}</b> организаций '
-        f'({C.fmt_num(o["kept_worked"])} чел) задача по оттоку закрыта успешно, '
-        f'однако возврат не состоялся.'
-        + (f' Ещё по {o["n_unknown"]} организациям месяц оттока не попал в окно '
-           f'воронки — отработка не оценивается.' if o["n_unknown"] else "")
-        + '</div>'
-    )
-    return C.section("Отток", C.card(head + facts + tbl) + _ai(ai),
-                     eyebrow="Безвозвратные потери портфеля")
 
 
 def _log_llm_stats(a: analyze.Analysis) -> None:
