@@ -93,15 +93,25 @@ def section(title: str, inner: str, eyebrow: str = "", desc: str = "") -> str:
 
 
 def heat_bg(exec_pct: float | None) -> str:
-    """Фон ячейки тепловой карты по выполнению плана (доля)."""
+    """Фон ячейки тепловой карты по выполнению плана (доля).
+
+    Границы те же, что у `status_of`, и это обязательно: одна и та же цифра стоит
+    в ячейке матрицы, на карточке единицы и в бейдже рядом с ней, и разъезжаться
+    им нельзя. Раньше красным закрашивалось всё ниже 100%, поэтому 97% в матрице
+    читались как провал, а тем же 97% в бейдже соответствовал жёлтый.
+
+    Внутри красной зоны заливка остаётся градиентом: 0.75 и ниже — насыщенный
+    красный, у границы 0.95 — едва заметный. Матрица для того и нужна, чтобы
+    видеть глубину провала, а не только его факт.
+    """
     if exec_pct is None:
         return "transparent"
-    # 0.75 и ниже — насыщенный красный; 1.0+ — зелёный; между — плавно
-    x = max(0.0, min((exec_pct - 0.75) / 0.30, 1.0))
     if exec_pct >= 1.0:
         return "color-mix(in srgb, var(--good) 22%, transparent)"
-    r = int(60 * (1 - x)) + 20  # прозрачность краснее при меньшем x
-    return f"color-mix(in srgb, var(--bad) {int(46*(1-x))+8}%, transparent)"
+    if exec_pct >= 0.95:
+        return "color-mix(in srgb, var(--warn) 20%, transparent)"
+    x = max(0.0, min((exec_pct - 0.75) / 0.20, 1.0))
+    return f"color-mix(in srgb, var(--bad) {int(40 * (1 - x)) + 14}%, transparent)"
 
 
 def heat_matrix(rows_id_label: list[tuple], seg_names: list[str], cells: dict) -> str:
@@ -118,9 +128,12 @@ def heat_matrix(rows_id_label: list[tuple], seg_names: list[str], cells: dict) -
             else:
                 ex, ned = cell
                 bg = heat_bg(ex)
-                # 99.5–99.9% печатаем с десятой долей: иначе ячейка «100%» выглядит
-                # выполненной, хотя план недобран (и в карточке ГОСБ она красная)
-                pct = f"{ex*100:.1f}%" if 0.995 <= ex < 1 else f"{ex*100:.0f}%"
+                # У границ цвета печатаем десятую долю: округление до целого
+                # перебрасывает число через границу, и ячейка «100%» выглядела бы
+                # выполненной при недоборе плана, а «95%» — жёлтой при красной заливке
+                pct = (f"{math.floor(ex * 1000) / 10:.1f}%"
+                       if (0.995 <= ex < 1) or (0.945 <= ex < 0.95)
+                       else f"{ex*100:.0f}%")
                 tds.append(
                     f'<td class="num heat" style="background:{bg}" title="отклонение от плана {ned:.0f}">'
                     f'{pct}</td>'

@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -39,13 +40,18 @@ SEG_ORDER = segments.ORDER   # короткие названия сегмент�
 _ASSETS = Path(__file__).with_name("assets")
 TITLE = "Прогноз портфеля, причины невыполнения"
 
-# Легенда под шапкой — из дизайна пользователя дословно
+# Легенда под шапкой — из дизайна пользователя; цвета подписаны границами, потому
+# что раскраска везде идёт по одному правилу (C.status_of) и по одному числу —
+# выполнению прогноза. Про невыполненные сегменты говорит бейдж на карточке, а не
+# цвет: единица с выполнением 107% и одним слабым сегментом — зелёная.
 _LEGEND = (
     '<div class="legend">\n'
-    '<span class="lg-item"><span class="lg-dot good"></span><b>план выполняется</b></span>\n'
-    '<span class="lg-item"><span class="lg-dot warn"></span><b>план выполняется, но есть '
-    'слабый сегмент</b></span>\n'
-    '<span class="lg-item"><span class="lg-dot bad"></span><b>план не выполняется</b></span>\n'
+    '<span class="lg-item"><span class="lg-dot good"></span><b>план выполняется</b> — '
+    'от 100%</span>\n'
+    '<span class="lg-item"><span class="lg-dot warn"></span><b>план близок к выполнению</b> — '
+    '95–100%</span>\n'
+    '<span class="lg-item"><span class="lg-dot bad"></span><b>план не выполняется</b> — '
+    'ниже 95%</span>\n'
     '<span class="lg-item"><span class="lg-arrow">→</span>карточка кликабельна — открывает '
     'подробный разбор</span>\n'
     '<span class="lg-item"><span class="lg-arrow" style="border-radius:50%">▸</span>'
@@ -270,7 +276,7 @@ def _hero(a: analyze.Analysis) -> str:
         f'<div class="row2 row2-fot">Получатели: прогноз '
         f'<b>{C.fmt_num(r["fact"])}</b> '
         f'при плане {C.fmt_num(r["plan"])} · '
-        f'<b style="color:{_col(r["exec"])}">{(r["exec"] or 0)*100:.0f}%</b> · '
+        f'<b style="color:{_col(r["exec"])}">{_pct(r["exec"])}</b> · '
         f'{_delta_html(r["fact"] - r["plan"], "чел")}</div>'
         # Бейджа про разрыв до плана здесь нет: gap_rcp — это ровно план минус
         # прогноз, то же число и с тем же знаком уже стоит в строке выше.
@@ -280,7 +286,7 @@ def _hero(a: analyze.Analysis) -> str:
           f'при плане {C.fmt_num(fot["plan"] / 1e6)} млн ₽ · '
         # процент набран как остальные числа строки и окрашен по статусу — так же, как
         # выполнение показано в карточках показателей ниже
-          f'<b style="color:{_col(fot["exec"])}">{(fot["exec"] or 0)*100:.0f}%</b> · '
+          f'<b style="color:{_col(fot["exec"])}">{_pct(fot["exec"])}</b> · '
           f'{_delta_html((fot["fact"] - fot["plan"]) / 1e6, "млн ₽")}</div>'
         + f'<div class="row2">{closed_txt}</div>'
     )
@@ -313,9 +319,13 @@ def _kpis(a: analyze.Analysis) -> str:
         cl = closed.get(key, {})
         if not cl.get("fact"):
             return ""
+        # выполнение закрытого месяца окрашено тем же правилом, что и выполнение
+        # прогноза строкой выше: это одна и та же величина за разные месяцы, и
+        # чёрный процент рядом с цветным читался как другая по смыслу цифра
         head = (f'{C.esc(d.get("closed_label", ""))} закрыт: '
                 f'{C.fmt_num(cl["fact"] / scale, unit)} '
-                f'({(cl.get("exec") or 0) * 100:.0f}% плана, '
+                f'(<b style="color:{_col(cl.get("exec"))}">'
+                f'{_pct(cl.get("exec"))}</b> плана, '
                 + _delta_html((cl["fact"] - cl.get("plan", 0)) / scale, unit) + ')')
         y = yoy.get(key)
         if not y:
@@ -334,7 +344,7 @@ def _kpis(a: analyze.Analysis) -> str:
             f'<div class="label">{C.esc(title)}</div>'
             f'<div class="value">{C.fmt_num(v["fact"] / scale, unit)}</div>'
             f'<div class="delta">план {C.fmt_num(v["plan"] / scale, unit)} · '
-            f'<b style="color:{_col(v["exec"])}">{(v["exec"] or 0)*100:.0f}%</b> · '
+            f'<b style="color:{_col(v["exec"])}">{_pct(v["exec"])}</b> · '
             + _delta_html((v["fact"] - v["plan"]) / scale, unit) + '</div>'
             + C.meter(v["exec"]) + foot(key, scale, unit),
             cls="kpi",
@@ -375,7 +385,9 @@ def _wf_lines(pf: dict, d: dict, conv: float, conv_diag: dict | None = None,
         (f'Портфель — {C.esc(d.get("closed_label", ""))} закрыт', pf["base"], 0, ""),
         (f'Фактический отток за 3 месяца, который не вернулся',
          pf.get("out_kept", 0), -1,
-         f'{out_lbl} · uzp_dwh_fact_outflow от {bank.OUT_MIN_QTY} чел '
+         # имени витрины в подписи нет: читателю отчёта оно ничего не объясняет,
+         # а условие отбора объясняет
+         f'{out_lbl} · организации от {bank.OUT_MIN_QTY} чел '
          f'за вычетом вернувшихся' if out_lbl else ""),
         ("Пайплайн на месяц", pf["pipe"], 1, pipe_hint),
     ]
@@ -404,12 +416,11 @@ def _portfolio_block(a: analyze.Analysis, ai: str | None = None) -> str:
     d = a.dates or {}
     fc = a.fc_stats or {}
     body = _wf_lines(pf, d, fc.get("conv_tb", 1.0), fc.get("conv"), conv_is_tb=False)
-    ex = pf.get("exec") or 0
     st = C.status_of(pf.get("exec"))
     total = (
         f'<div class="g-do">Прогноз витрины на {C.esc(d.get("label", ""))}: '
         f'<b>{C.fmt_num(pf["forecast"])}</b> при плане {C.fmt_num(pf["plan"])} → '
-        + C.badge(f"{ex * 100:.0f}% плана", st) + '</div>'
+        + C.badge(f"{_pct(pf.get('exec'))} плана", st) + '</div>'
     )
     upside = ""
     if pf.get("pipe_upside", 0) >= 1:
@@ -494,7 +505,7 @@ def _matrix(a: analyze.Analysis, ai: str | None = None) -> str:
         '<h3>Прогноз выполнения плана по получателям, %</h3>'
         + C.heat_matrix(rows_id_label, segs, cells))
     top = [(f'{r.unit_name} · {r.seg_name}',
-            C.badge(f'{r.execution_percent*100:.0f}%', C.status_of(r.execution_percent)),
+            C.badge(_pct(r.execution_percent), C.status_of(r.execution_percent)),
             C.fmt_num(r.nedobor), f'{r.share*100:.0f}%') for r in a.top_cells.itertuples()]
     # «ГОСБхСегмент» — и на уровне банка тоже: так в дизайне пользователя
     top_tbl = C.card(f'<h3>ТОП {a.unit_label} по невыполнению</h3>'
@@ -514,8 +525,7 @@ def _seg_badge(s: dict) -> str:
     """Бейдж сегмента: имя + выполнение, цвет по статусу — состояние не кодируется
     одним лишь цветом. При 99.5–99.9% показываем десятую долю, иначе рядом с
     недобором стояло бы «100%»."""
-    fmt = "%s %.1f%%" if s["exec"] >= 0.995 else "%s %.0f%%"
-    return C.badge(fmt % (s["seg"], s["exec"] * 100), C.status_of(s["exec"]))
+    return C.badge(f'{s["seg"]} {_pct(s["exec"])}', C.status_of(s["exec"]))
 
 
 def _gosb_table(c: dict, wide: bool = False) -> str:
@@ -733,7 +743,6 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
     if not det:
         return ""
     pf = det["pf"]
-    ex = pf.get("exec") or 0
     # у единицы свой коэффициент реализуемости и своя доля пройденного месяца
     wf_html = _wf_lines(pf, d, det["conv"], det.get("conv_diag"),
                         det.get("conv_is_tb", False))
@@ -761,7 +770,7 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
         # не .gd-note: это главная строка шапки, а цвет подписи делал её нечитаемой
         f'<div class="gd-fc">Прогноз <b>{C.fmt_num(pf["forecast"])}</b> из плана '
         f'{C.fmt_num(pf["plan"])} · <b style="color:{_col(pf.get("exec"))}">'
-        f'{ex*100:.0f}%</b> · {_delta_html(pf["forecast"] - pf["plan"], "чел")}'
+        f'{_pct(pf.get("exec"))}</b> · {_delta_html(pf["forecast"] - pf["plan"], "чел")}'
         f'</div></div>'
         f'<div class="gd-head-actions">'
         f'<button type="button" class="gd-export" onclick="event.stopPropagation();'
@@ -839,9 +848,15 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
     d = a.dates or {}
     unit = a.unit_label
     for c in a.gosb_cards:
-        st = ("good" if c["healthy"] else
-              "warn" if c["seg_only"] else
-              "bad" if c["exec"] < 0.9 else "warn")
+        # Цвет карточки — СТРОГО по выполнению прогноза, тем же правилом, что и
+        # везде в отчёте (C.status_of: ≥100% зелёный, 95–100% жёлтый, ниже красный).
+        # Раньше здесь было своё правило: единица с выполнением 107% и одним
+        # невыполненным сегментом красилась жёлтым, а число «107%» рядом с зелёным
+        # 107% в матрице и в плашке читалось как ошибка расчёта. Заодно уходил порог
+        # 0.9, из-за которого 92% на карточке были жёлтыми, а в матрице — красными.
+        # Про сегменты говорит бейдж ниже: он и остаётся жёлтым, когда план вытянут
+        # другими сегментами.
+        st = C.status_of(c["exec"])
         seg_html = _gosb_table(c)
         # пояснения по западающим сегментам в строку таблицы не влезают — отдельно
         notes = []
@@ -894,7 +909,7 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         # знаком «%» идёт подпись, а статус продублирован бейджем ниже.
         inner = (
             f'<div class="g-head"><h3 style="margin:0">{C.esc(c["gosb_name"])}</h3>'
-            f'<span class="g-ex {st}"><i>прогноз</i>{c["exec"]*100:.0f}%</span></div>'
+            f'<span class="g-ex {st}"><i>прогноз</i>{_pct(c["exec"])}</span></div>'
             + C.meter(c["exec"])
             + f'<div class="g-fc">{C.fmt_num(c["forecast"])} из '
               f'{C.fmt_num(c["plan"])} · {_delta_html(c["forecast"] - c["plan"], "чел")}'
@@ -1317,3 +1332,19 @@ def _ai(text: str | None) -> str:
 
 def _col(exec_pct):
     return {"good": "var(--good)", "warn": "var(--warn)", "bad": "var(--bad)"}[C.status_of(exec_pct)]
+
+
+def _pct(exec_pct) -> str:
+    """Выполнение плана строкой — вместе с `_col` и `C.status_of`.
+
+    В приграничных долях процента печатаем десятую. Округление до целого
+    перебрасывает число через границу цвета: 99.6% превращались в «100%» рядом с
+    жёлтым, 94.7% — в «95%» рядом с красным, и цвет выглядел ошибкой расчёта.
+    Так же давно устроены ячейки матрицы и бейджи сегментов.
+    """
+    p = (exec_pct or 0) * 100
+    if (99.5 <= p < 100) or (94.5 <= p < 95):
+        # округление отбрасываем вниз: 99.96% округлились бы в «100.0%» и снова
+        # встали бы рядом с жёлтым, ради чего вся эта ветка и написана
+        return f"{math.floor(p * 10) / 10:.1f}%"
+    return f"{p:.0f}%"
