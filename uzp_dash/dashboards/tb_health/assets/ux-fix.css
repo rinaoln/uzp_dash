@@ -142,6 +142,43 @@ html.js-boot .app-layout { visibility: hidden; }
 /* заголовок панели дублировал бы активную кнопку — на экране он лишний */
 .of-wrap.tabbed > .of-pane > h4 { display: none; }
 
+/* --- Карточка ГОСБ крупнее ---
+   760px на весь разбор до организаций было тесно: названия организаций переносились
+   по два-три раза, и строка блока занимала три. Ширину даём с запасом, но не во весь
+   экран — строка длиннее ~1100px уже плохо читается. Заодно чуть крупнее шрифт:
+   раньше он был на грани читаемого для проекции и печати. */
+dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
+.gd-sheet { max-height: 92vh; padding: 24px 28px; }
+.gd-block h4 { font-size: 15.5px; }
+.gd-row { font-size: 14px; }
+.gd-row .gd-why { font-size: 13.5px; }
+.gd-row .gd-emp { font-size: 12.5px; }
+.gd-grp > summary { font-size: 14px; }
+.gd-note { font-size: 13.5px; }
+
+/* --- Подсказка «как считаем» под заголовком блока ---
+   Свёрнута по умолчанию: объяснение нужно один раз, а место в карточке занимало бы
+   всегда. <details> раскрывается кликом и с клавиатуры и не требует скрипта. */
+.gd-help { margin: 0 0 10px; }
+.gd-help > summary {
+  cursor: pointer; list-style: none; display: inline-flex; align-items: center;
+  gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--accent);
+  padding: 2px 0;
+}
+.gd-help > summary::-webkit-details-marker { display: none; }
+.gd-help > summary::before { content: "?"; display: inline-flex;
+  align-items: center; justify-content: center; width: 16px; height: 16px;
+  border-radius: 999px; border: 1px solid var(--accent); font-size: 11px;
+  font-weight: 700; line-height: 1; }
+.gd-help-b {
+  margin-top: 6px; padding: 10px 14px; border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface-solid));
+  border: 1px solid var(--separator);
+}
+.gd-help-b p { margin: 0 0 7px; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+.gd-help-b p:last-child { margin-bottom: 0; }
+.gd-help-b b { color: var(--text); font-weight: 650; }
+
 /* --- Экспорт карточки ТБ/ГОСБ в PDF (кнопка «Экспорт PDF» в шапке оверлея) ---
    Кнопка ставится рядом с «×» в .gd-head; сам .gd-head уже flex space-between
    на 2 дочерних элемента, поэтому обе кнопки оборачиваем в одну группу, чтобы

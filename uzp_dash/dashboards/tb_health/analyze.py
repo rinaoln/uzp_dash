@@ -270,8 +270,20 @@ def finish(ctx, b: Bank, a: Analysis, text_df) -> Analysis:
 
     gosb_ids = set(a.gosb_gap["unit_id"].astype("int64")) if not a.gosb_gap.empty else set()
     fagg = b.fagg[b.fagg["new_gosb_id"].isin(gosb_ids)] if not b.fagg.empty else b.fagg
-    fmonths = (b.fmonths[b.fmonths["tb_id"] == a.tb_id]
-               if "tb_id" in b.fmonths else b.fmonths)
+    # Активности уровня отбираем по ЕДИНСТВЕННОМУ источнику принадлежности ГОСБ → ТБ
+    # (`tb_of`), а не по реквизиту tb_id из самой задачи: у части строк воронки он
+    # расходится со справочником, и отбор по нему выбрасывал реальные задачи —
+    # организация с отработкой уезжала в список «Отток на контроль».
+    #
+    # И не по составу карточек уровня: в разбор попадают ГОСБ, которых нет в витрине
+    # метрик (карточка для них не строится, а организации и отток есть), и отбор по
+    # ним потерял бы задачи ровно по этим ГОСБ.
+    if "new_gosb_id" in b.fmonths and not b.fmonths.empty:
+        own = [pd.notna(g) and b.tb_of.get(int(g)) == a.tb_id
+               for g in b.fmonths["new_gosb_id"]]
+        fmonths = b.fmonths[own]
+    else:
+        fmonths = b.fmonths
     a.insights, a.to_work, a.no_point = insights, to_work, no_point
     a.themes, a.llm_stats, a.sim, a.gosb_plan = themes, llm_stats, sim, gosb_plan
     a.gosb_cards = _unit_cards(a.gosb_gap, a.matrix, to_work, fagg, gosb_plan)
@@ -1562,6 +1574,11 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
     и чем это сопровождалось». Поэтому здесь нет отбора под план и нет фильтра
     эталонной базы — потеря есть потеря, даже если работать с организацией нельзя.
 
+    Ранжирование идёт по безвозвратным потерям на грейне ЕДИНИЦЫ уровня: у отчёта ТБ
+    это (ГОСБ, организация) — та же пара, что стоит в строке списка, — а у отчёта СБ
+    (ТБ, организация). Без свёртки до единицы крупная организация распадалась бы на
+    строки своих ГОСБ и в топ по банку не попадала.
+
     История взаимодействия берётся по МЕСЯЦАМ УХОДА и следующим за ними: витрина
     закрывает отток позже, чем он случился, и задачу заводят следующим отчётным
     месяцем — то же правило, что и в `bank._outflow_worked`, иначе нормально
@@ -1591,40 +1608,47 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
     fidx, fwindow = month_index(funnel_months, src)
 
     rows = []
-    for r in fc.itertuples():
-        uid, inn = int(getattr(r, src)), int(r.inn)
-        k = (uid, inn)
-        months = list(getattr(r, "out_months", None) or [])
-        # задачи считаем и в месяц ухода, и в следующий за ним — см. докстроку
-        seen, n_tasks, n_succ, n_out, n_out_succ, known = set(), 0, 0, 0, 0, False
-        for m in months:
-            for lbl in (m, next_month(m)):
-                if lbl in seen:
-                    continue
-                seen.add(lbl)
-                if lbl in fwindow:
-                    known = True
-                agg = fidx.get((uid, inn, lbl))
-                if not agg:
-                    continue
-                n_tasks += agg["n_tasks"]
-                n_succ += agg["n_success"]
-                n_out += agg["n_outflow"]
-                n_out_succ += agg["n_out_success"]
-        ins = a.insights.get(k, {})
-        rows.append({
-            "inn": inn, "unit": unit_name.get(uid, str(uid)),
-            "name": names.get(k, f"Орг. {inn}"), "emp": emp_of.get(k, ""),
-            "gone": float(r.out_qty), "ret": float(r.ret_qty),
-            "kept": float(r.out_kept), "months": months,
-            "tasks": n_tasks, "success": n_succ,
-            "out_tasks": n_out, "out_success": n_out_succ,
-            # отработанным считаем только успешно закрытую задачу ИМЕННО про отток
-            "worked": bool(n_out_succ),
-            # «данных нет» и «задач не было» — разные утверждения, и путать их нельзя
-            "known": known,
-            "reason": ins.get("reason", ""), "action": ins.get("action", ""),
-        })
+    # Свёртка до грейна ЕДИНИЦЫ уровня обязательна перед ранжированием. Прогноз лежит
+    # на (ГОСБ, ИНН), и на уровне СБ, где единица — ТБ, организация, обслуживаемая в
+    # нескольких ГОСБ одного ТБ, давала НЕСКОЛЬКО строк с одним и тем же именем ТБ,
+    # у каждой — только часть её потерь. В топ она попадала по этой части, а то и не
+    # попадала вовсе, хотя по ТБ целиком была крупнейшей. На уровне ТБ единица — ГОСБ,
+    # грейн уже такой, и свёртка ничего не меняет (см. `_unit_grain`).
+    for _uid, part in _unit_grain(fc, src):
+        for r in part.itertuples():
+            uid, inn = int(getattr(r, src)), int(r.inn)
+            k = (uid, inn)
+            months = list(getattr(r, "out_months", None) or [])
+            # задачи считаем и в месяц ухода, и в следующий за ним — см. докстроку
+            seen, n_tasks, n_succ, n_out, n_out_succ, known = set(), 0, 0, 0, 0, False
+            for m in months:
+                for lbl in (m, next_month(m)):
+                    if lbl in seen:
+                        continue
+                    seen.add(lbl)
+                    if lbl in fwindow:
+                        known = True
+                    agg = fidx.get((uid, inn, lbl))
+                    if not agg:
+                        continue
+                    n_tasks += agg["n_tasks"]
+                    n_succ += agg["n_success"]
+                    n_out += agg["n_outflow"]
+                    n_out_succ += agg["n_out_success"]
+            ins = a.insights.get(k, {})
+            rows.append({
+                "inn": inn, "unit": unit_name.get(uid, str(uid)),
+                "name": names.get(k, f"Орг. {inn}"), "emp": emp_of.get(k, ""),
+                "gone": float(r.out_qty), "ret": float(r.ret_qty),
+                "kept": float(r.out_kept), "months": months,
+                "tasks": n_tasks, "success": n_succ,
+                "out_tasks": n_out, "out_success": n_out_succ,
+                # отработанным считаем только успешно закрытую задачу ИМЕННО про отток
+                "worked": bool(n_out_succ),
+                # «данных нет» и «задач не было» — разные утверждения, и путать их нельзя
+                "known": known,
+                "reason": ins.get("reason", ""), "action": ins.get("action", ""),
+            })
     rows.sort(key=lambda x: x["kept"], reverse=True)
     top = rows[:top_n]
     # Две группы раздела. Деление идёт по тому, была ли по организации хоть какая-то

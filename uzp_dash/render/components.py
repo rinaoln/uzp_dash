@@ -221,15 +221,21 @@ def _grid(ticks: list[float], y_of, fmt=lambda v: fmt_num(v)) -> str:
     return "".join(out)
 
 
-def _months_axis(rows: list[dict]) -> str:
+def _months_axis(rows: list[dict], row_label: str = "") -> str:
     """Два ряда подписей под графиком: месяц и его отклонение от плана.
 
     Отклонение подписано цветом статуса и знаком, поэтому «выполнен план в этом
     месяце или нет» читается по нижней строке, не поднимая глаз на линии.
+
+    `row_label` — подпись нижнего ряда в левом поле: без неё числа под месяцами
+    приходится расшифровывать по тексту под графиком, а единицы у них свои.
     """
     n = len(rows)
     every = 1 if n <= 12 else 2
     out = []
+    if row_label:
+        out.append(f'<text x="{_PL - 8}" y="{_CH - 14}" text-anchor="end" '
+                   f'font-size="10" fill="var(--text-2)">{esc(row_label)}</text>')
     for i, r in enumerate(rows):
         if i % every:
             continue
@@ -301,16 +307,24 @@ def trend_plan_fact(rows: list[dict]) -> str:
            '<div class="ch-note">Шкала не начинается с нуля: масштаб подобран под '
            'размах изменений. Высота линии над осью величину портфеля не отражает. '
            'Под месяцем — отклонение факта от плана.</div>')
+    # единицы у шкалы и у нижнего ряда: без подписи числа на графике читаются как
+    # «какие-то значения», а получатели (чел) и отклонение (тоже чел, но со знаком)
+    # стоят в разных местах и в одну единицу не сливаются
+    unit = (f'<text x="{_PL - 8}" y="{_PT - 10}" text-anchor="end" font-size="10.5" '
+            f'font-weight="600" fill="var(--text-2)">чел</text>')
     return (
         '<div class="chart">'
         f'<svg viewBox="0 0 {_CW} {_CH}" role="img" preserveAspectRatio="xMidYMid meet" '
-        f'aria-label="Портфель помесячно: факт, план и отклонение">'
+        f'aria-label="Портфель получателей помесячно, человек: факт, план и '
+        f'отклонение от плана">'
+        + unit
         + _grid(_ticks(lo, hi), y_of)
         + f'<polyline points="{plan_pts}" fill="none" stroke="var(--text-2)" '
           f'stroke-width="2" stroke-dasharray="6 4" stroke-linejoin="round"/>'
         + f'<polyline points="{fact_pts}" fill="none" stroke="var(--accent)" '
           f'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
-        + "".join(dots) + "".join(vals) + ends + _months_axis(rows)
+        + "".join(dots) + "".join(vals) + ends
+        + _months_axis(rows, "± к плану, чел")
         + '</svg>' + cut + '</div>'
     )
 
@@ -377,8 +391,8 @@ def trend_table(rows: list[dict]) -> str:
                      f'{fmt_num(abs(dv))}</b>',
                      f'{ex * 100:.0f}%' if ex is not None else "—"])
     return ('<details class="ch-tbl"><summary>Показать в табличном виде</summary>'
-            + table(["месяц", "факт", "план", "отклонение", "выполнение"], body,
-                    num_cols=[1, 2, 3, 4])
+            + table(["месяц", "факт, чел", "план, чел", "отклонение, чел",
+                     "выполнение"], body, num_cols=[1, 2, 3, 4])
             + '</details>')
 
 
