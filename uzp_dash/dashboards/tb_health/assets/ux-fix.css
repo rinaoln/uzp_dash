@@ -80,6 +80,22 @@ html.js-boot .app-layout { visibility: hidden; }
   font-variant-numeric: tabular-nums;
 }
 
+/* --- Плашка «Прогноз выполнения»: строки показателей крупнее ---
+   Получатели и ФОТ — две главные строки отчёта, и читают их первыми. В базовом
+   макете они набраны подписью (12.5px), из-за чего числа в них проигрывают
+   вердикту. Обе строки и числа в них поднимаем одинаково: строки равны по смыслу,
+   значит должны быть равны и по начертанию. */
+.forecast-panel .hero .row2.row2-fot { font-size: 17px; margin-top: 9px; }
+.forecast-panel .hero .row2.row2-fot b { font-size: 16px; }
+/* Скрипт макета оборачивает первый процент первой строки показателя в свой
+   «крупный» <b class="row2-num">. Строка там ожидалась одна (ФОТ), у нас их две —
+   и от этой обёртки процент получателей получал вторую плашку поверх своей и
+   размер, которого нет у процента ФОТ. Вложенный <b> сводим к обычному числу. */
+.forecast-panel .hero .row2.row2-fot b b {
+  font-size: inherit; font-weight: inherit; letter-spacing: inherit;
+  background: none; padding: 0; margin: 0;
+}
+
 /* --- Графики динамики (инлайновый SVG, без библиотек) --- */
 .chart { margin: 6px 0 4px; }
 .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
