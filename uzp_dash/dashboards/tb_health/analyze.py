@@ -1646,6 +1646,13 @@ def _log_outflow_section(a: "Analysis") -> None:
         f"Отток: {o['n_all']} организаций потеряли {o['tot_kept']:.0f} чел "
         f"(ушло {o['tot_gone']:.0f}, вернулось {o['tot_ret']:.0f}) · "
         f"в разделе показаны {o['n_shown']} крупнейших на {o['top_kept']:.0f} чел")
+    if o.get("reasons"):
+        cov = (o["reason_known_kept"] / o["tot_kept"] * 100) if o["tot_kept"] else 0
+        top = " · ".join(f"{g['reason']} {g['kept']:.0f} чел"
+                         for g in o["reasons"][:3])
+        progress.done(
+            f"Причина ухода известна у {o['reason_known_n']} из {o['n_all']} "
+            f"организаций — это {cov:.0f}% безвозвратных потерь. Крупнейшие: {top}")
     progress.done(
         f"Группы раздела: обещали вернуться, но не вернулись — {o['n_promised']} орг "
         f"({o['kept_promised']:.0f} чел) · отработали без результата — "
@@ -1655,12 +1662,16 @@ def _log_outflow_section(a: "Analysis") -> None:
 
 def _promise_index(promises: pd.DataFrame | None, unit_src: str,
                    tb_of: dict | None = None) -> dict:
-    """Обещания вернуть получателей на грейне ЕДИНИЦЫ уровня: (единица, орг) -> …
+    """Что сказано в задачах по оттоку — на грейне ЕДИНИЦЫ уровня.
+
+    Отдаёт {(единица, организация): {"promise": …|None, "reason": …, "reason_src": …}}.
 
     Кадр приходит на грейне (ГОСБ, организация) — там же, где живёт работа с
     клиентом. На уровне банка единица разбора ТБ, и обещания его ГОСБ по одной
     организации складываются: строка оттока там тоже свёрнута по ТБ, и обещание
-    должно сравниваться с тем же объёмом.
+    должно сравниваться с тем же объёмом. Причина не складывается — берётся та,
+    что зафиксирована в чек-листе; если чек-листа нет ни у одного ГОСБ, первая
+    найденная в комментариях.
     """
     if promises is None or promises.empty:
         return {}
@@ -1670,18 +1681,26 @@ def _promise_index(promises: pd.DataFrame | None, unit_src: str,
         uid = gid if unit_src == "new_gosb_id" else (tb_of or {}).get(gid)
         if uid is None:
             continue
-        qty = float(r.promise_qty) if pd.notna(r.promise_qty) else None
         k = (int(uid), int(r.inn))
-        cur = out.get(k)
-        if cur is None:
-            out[k] = {"qty": qty, "month": str(r.promise_month or ""),
-                      "src": str(r.promise_src or "")}
+        cur = out.setdefault(k, {"promise": None, "reason": "", "reason_src": ""})
+        reason, rsrc = str(getattr(r, "reason", "") or ""), str(getattr(r, "reason_src", "") or "")
+        if reason and (not cur["reason"] or
+                       ("чек-лист" in rsrc and "чек-лист" not in cur["reason_src"])):
+            cur["reason"], cur["reason_src"] = reason, rsrc
+        src = str(r.promise_src or "")
+        if not src:
+            continue
+        qty = float(r.promise_qty) if pd.notna(r.promise_qty) else None
+        p = cur["promise"]
+        if p is None:
+            cur["promise"] = {"qty": qty, "month": str(r.promise_month or ""),
+                              "src": src}
             continue
         if qty is not None:
-            cur["qty"] = (cur["qty"] or 0) + qty
-        cur["month"] = _later_ym(cur["month"], str(r.promise_month or ""))
-        if "чек-лист" in str(r.promise_src or ""):
-            cur["src"] = str(r.promise_src)
+            p["qty"] = (p["qty"] or 0) + qty
+        p["month"] = _later_ym(p["month"], str(r.promise_month or ""))
+        if "чек-лист" in src:
+            p["src"] = src
     return out
 
 
@@ -1698,6 +1717,60 @@ def _later_ym(a: str, b: str) -> str:
     if not b:
         return a
     return a if key(a) >= key(b) else b
+
+
+# Сколько причин показывать в своде; остальные собираются в строку «прочие».
+REASON_TOP_N = 8
+
+
+def _outflow_reasons(rows: list) -> tuple[list, int, float]:
+    """Свод по причинам ухода: на сколько человек ушли по каждой причине.
+
+    Считается по ВСЕМ организациям уровня, а не по пятнадцати показанным в списках:
+    свод отвечает на вопрос «из-за чего мы теряем портфель», и отвечать на него по
+    верхушке нельзя.
+
+    Организации без зафиксированной причины в свод не попадают, и поэтому рядом с
+    ним всегда стоит покрытие: сколько организаций и какая доля потерь объяснены.
+    Строки «причина не указана» в своде нет намеренно — это не причина ухода, а
+    отсутствие данных, и в таблице причин она читалась бы как самая массовая.
+    """
+    agg: dict = {}
+    known_n, known_kept = 0, 0.0
+    for r in rows:
+        name = str(r.get("out_reason") or "").strip()
+        if not name:
+            continue
+        known_n += 1
+        known_kept += r["kept"]
+        g = agg.setdefault(name, {"reason": name, "n": 0, "kept": 0.0, "gone": 0.0,
+                                  "n_promise": 0, "kept_promise": 0.0,
+                                  "n_worked": 0, "kept_worked": 0.0})
+        g["n"] += 1
+        g["kept"] += r["kept"]
+        g["gone"] += r["gone"]
+        if r.get("promise_broken"):
+            g["n_promise"] += 1
+            g["kept_promise"] += r["kept"]
+        elif r["tasks"] and r["ret"] <= 0:
+            g["n_worked"] += 1
+            g["kept_worked"] += r["kept"]
+    out = sorted(agg.values(), key=lambda g: -g["kept"])
+    if len(out) > REASON_TOP_N:
+        tail = out[REASON_TOP_N:]
+        out = out[:REASON_TOP_N]
+        out.append({"reason": f"прочие причины ({len(tail)})",
+                    "n": sum(g["n"] for g in tail),
+                    "kept": sum(g["kept"] for g in tail),
+                    "gone": sum(g["gone"] for g in tail),
+                    "n_promise": sum(g["n_promise"] for g in tail),
+                    "kept_promise": sum(g["kept_promise"] for g in tail),
+                    "n_worked": sum(g["n_worked"] for g in tail),
+                    "kept_worked": sum(g["kept_worked"] for g in tail),
+                    "tail": True})
+    for g in out:
+        g["share"] = g["kept"] / known_kept if known_kept else 0.0
+    return out, known_n, known_kept
 
 
 def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
@@ -1785,8 +1858,12 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
                 # «данных нет» и «задач не было» — разные утверждения, и путать их нельзя
                 "known": known,
                 "reason": ins.get("reason", ""), "action": ins.get("action", ""),
-                # обещание вернуть получателей из задачи по оттоку (или None)
-                "promise": pidx.get(k),
+                # что сказано в задачах по оттоку: обещание вернуть получателей
+                # (или None) и причина ухода. Ключ "reason" выше уже занят выводом
+                # аудита по комментариям — это разные величины
+                "promise": (pidx.get(k) or {}).get("promise"),
+                "out_reason": (pidx.get(k) or {}).get("reason", ""),
+                "out_reason_src": (pidx.get(k) or {}).get("reason_src", ""),
             })
     rows.sort(key=lambda x: x["kept"], reverse=True)
     top = rows[:top_n]
@@ -1816,8 +1893,11 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
     promised = [r for r in rows if r["promise_broken"]]
     worked = [r for r in rows
               if not r["promise_broken"] and r["tasks"] and r["ret"] <= 0]
+    reasons, known_n, known_kept = _outflow_reasons(rows)
     return {
         "rows": top,
+        "reasons": reasons,
+        "reason_known_n": known_n, "reason_known_kept": known_kept,
         "top_promised": promised[:TOP_CLIENTS],
         "top_worked": worked[:TOP_CLIENTS],
         "n_all": len(rows), "n_shown": len(top),

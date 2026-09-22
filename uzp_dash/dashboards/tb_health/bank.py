@@ -180,15 +180,17 @@ def load(ctx) -> Bank:
 
 
 def _outflow_promises(engine, orgs_fc: pd.DataFrame, d: dict) -> pd.DataFrame:
-    """Обещания вернуть получателей — по организациям, у которых отток случился.
+    """Что сказано в задачах по оттоку: причина ухода и обещание вернуть людей.
 
-    Раздел «Отток» делит потери на две группы, и первая из них («обещали вернуться,
-    но не вернулись») держится на этом кадре. Обещание — не отдельное поле витрины:
-    оно лежит в тексте задачи по оттоку, в чек-листе или в комментарии сотрудника.
-    Разбирает текст `text_rules.promised_return`, здесь только запрос и свёртка.
+    Раздел «Отток» держится на этом кадре целиком: по обещанию собирается группа
+    «обещали вернуться, но не вернулись», по причине — свод по причинам ухода и
+    подпись в каждой строке. Ни того, ни другого отдельным полем в витринах нет:
+    оба живут в тексте задачи — в чек-листе («Причина оттока», «Ожидаемый возврат
+    получателей») или в комментарии сотрудника. Разбирают текст правила
+    `text_rules`, здесь только запрос и свёртка.
 
     Грейн результата — (ГОСБ, организация): по одной паре задач за окно бывает
-    несколько, и обещания в них разные. Берём самое СИЛЬНОЕ: числовое обещание
+    несколько, и сказано в них разное. Берём самое СИЛЬНОЕ: числовое обещание
     важнее ответа «да», чек-лист важнее свободного комментария, а из месяцев —
     самый поздний названный срок.
     """
@@ -202,27 +204,39 @@ def _outflow_promises(engine, orgs_fc: pd.DataFrame, d: dict) -> pd.DataFrame:
                   {"inns": inns, "out_from": d["out_from"],
                    "ref_funnel": d["ref_funnel"]})
     if df.empty:
-        progress.done("Задач по оттоку с текстом за окно ухода не нашлось — группа "
-                      "«обещали вернуться» в разделе «Отток» будет пустой")
+        progress.done("Задач по оттоку с текстом за окно ухода не нашлось — свода по "
+                      "причинам и группы «обещали вернуться» в разделе не будет")
         return pd.DataFrame()
     ref = (pd.Timestamp(d["ref_cur"]).year, pd.Timestamp(d["ref_cur"]).month)
     best: dict = {}
     for r in df.dropna(subset=["new_gosb_id"]).itertuples():
-        p = text_rules.promised_return(getattr(r, "task_questionnaire", None),
-                                       getattr(r, "task_comment", None), ref)
-        if not p:
+        quest = getattr(r, "task_questionnaire", None)
+        comment = getattr(r, "task_comment", None)
+        is_out = bool(getattr(r, "is_outflow_task", True))
+        # Обещание вернуть людей читаем ТОЛЬКО из задач по оттоку: в задаче о
+        # расширении «вернутся» относится к другому. Причину — из задачи любого
+        # типа, заведённой в месяцы ухода: сотрудник называет её там, где пишет.
+        p = text_rules.promised_return(quest, comment, ref) if is_out else None
+        reason, reason_src = text_rules.outflow_reason_label(quest, comment)
+        if not p and not reason:
             continue
         k = (int(r.new_gosb_id), int(r.inn))
+        cur = best.setdefault(k, {"rank": (0, 0), "qty": None, "month": "", "src": "",
+                                  "n": 0, "reason": "", "reason_src": "",
+                                  "reason_rank": (0, 0)})
+        # причина: чек-лист сильнее комментария, задача по оттоку сильнее прочих
+        if reason:
+            rank_r = (2 if "чек-лист" in reason_src else 1, 2 if is_out else 1)
+            if rank_r > cur["reason_rank"]:
+                cur["reason"], cur["reason_src"] = reason, reason_src
+                cur["reason_rank"] = rank_r
+        if not p:
+            continue
+        cur["n"] += 1
         qty = p.get("qty")
         # сила обещания: названное число важнее ответа «да», чек-лист важнее
         # свободного комментария
         rank = (2 if qty else 1, 2 if "чек-лист" in p["source"] else 1)
-        cur = best.get(k)
-        if cur is None:
-            best[k] = {"rank": rank, "qty": qty, "month": p.get("month", ""),
-                       "src": p["source"], "n": 1}
-            continue
-        cur["n"] += 1
         # срок берём самый поздний из всех задач пары, даже если сама задача слабее
         cur["month"] = _later_month(cur["month"], p.get("month", ""))
         if rank > cur["rank"]:
@@ -230,16 +244,28 @@ def _outflow_promises(engine, orgs_fc: pd.DataFrame, d: dict) -> pd.DataFrame:
         elif qty and (cur["qty"] or 0) < qty:
             cur["qty"] = qty
     if not best:
-        progress.done(f"Обещаний вернуть получателей в задачах по оттоку не найдено "
-                      f"({len(df)} задач с текстом) — группа «обещали вернуться» пуста")
+        progress.done(f"Ни причины ухода, ни обещаний возврата в задачах по оттоку не "
+                      f"нашлось ({len(df)} задач с текстом) — раздел останется без "
+                      f"свода по причинам")
         return pd.DataFrame()
     out = pd.DataFrame([{"new_gosb_id": k[0], "inn": k[1], "promise_qty": v["qty"],
                          "promise_month": v["month"], "promise_src": v["src"],
-                         "promise_tasks": v["n"]} for k, v in best.items()])
+                         "promise_tasks": v["n"], "reason": v["reason"],
+                         "reason_src": v["reason_src"]} for k, v in best.items()])
+    n_prom = int((out["promise_src"].astype(str) != "").sum())
     with_qty = int(out["promise_qty"].notna().sum())
-    progress.done(f"Обещания вернуть получателей: {len(out)} пар (ГОСБ, организация) "
-                  f"из {len(df)} задач по оттоку с текстом · с названным числом "
-                  f"получателей — {with_qty} · остальные обещали возврат без цифры")
+    n_reason = int((out["reason"].astype(str) != "").sum())
+    n_out_task = int(df["is_outflow_task"].fillna(False).astype(bool).sum())
+    from_check = int((out["reason_src"].astype(str) == "чек-лист задачи").sum())
+    progress.done(f"Задачи с текстом за месяцы ухода: {len(df)}, из них по оттоку "
+                  f"{n_out_task}. Причина ухода зафиксирована у {n_reason} пар "
+                  f"(ГОСБ, организация) — {from_check} из чек-листа, остальные по "
+                  f"формулировке в комментарии. Обещание вернуть получателей — "
+                  f"у {n_prom} пар, из них с названным числом {with_qty}")
+    top = out.loc[out["reason"].astype(str) != "", "reason"].value_counts().head(5)
+    if len(top):
+        progress.done("Причины ухода в задачах: "
+                      + " · ".join(f"{name} — {n}" for name, n in top.items()))
     return out
 
 
