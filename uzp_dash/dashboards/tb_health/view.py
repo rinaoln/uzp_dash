@@ -810,7 +810,7 @@ def _why_size(r: dict) -> str:
     return " · ".join(parts)
 
 
-def _out_group(g: dict, open_: bool = False) -> str:
+def _out_group(g: dict) -> str:
     """Группа оттока: шапка с причиной и итогом, внутри — список организаций.
 
     Нативный `<details>`: клик и клавиатура работают без JS, а печать раскрывает
@@ -822,19 +822,19 @@ def _out_group(g: dict, open_: bool = False) -> str:
     """
     work = (f'можно работать: {g["work_n"]} орг (−{C.fmt_num(g["work_fl"])})'
             if g["work_n"] else "работать не с кем — вне зоны влияния")
-    return _group_html(g, open_, work, "out", _why_out, with_emp=True)
+    return _group_html(g, work, "out", _why_out, with_emp=True)
 
 
-def _yoy_group(g: dict, open_: bool = False) -> str:
+def _yoy_group(g: dict) -> str:
     """Группа годового тренда. Тот же рендер, что у оттока, — меняется только то,
     что стоит в третьей строке шапки: у оттока это зона влияния, здесь — сколько
     организаций группы имеют зафиксированную причину."""
     work = (f'причина зафиксирована у {g["work_n"]} орг (−{C.fmt_num(g["work_fl"])})'
             if g["work_n"] else "причина не зафиксирована ни у одной")
-    return _group_html(g, open_, work, "yoy", _why_size, with_emp=True)
+    return _group_html(g, work, "yoy", _why_size, with_emp=True)
 
 
-def _group_html(g: dict, open_: bool, work: str, key: str, why,
+def _group_html(g: dict, work: str, key: str, why,
                 with_emp: bool = False) -> str:
     """Группа: шапка с причиной и итогом, внутри — список организаций.
 
@@ -842,12 +842,18 @@ def _group_html(g: dict, open_: bool, work: str, key: str, why,
     содержимое сама. Шапка размечена теми же тремя колонками, что и строка
     организации, — числа групп и числа организаций стоят в одной вертикали.
 
+    ВСЕ группы свёрнуты. Раньше первая (крупнейшая) открывалась сама, и читатель
+    видел её список раньше, чем сами группы: остальные причины оказывались под
+    длинной таблицей, и до них не доходили. Свёрнутый вид показывает сразу все
+    причины с их весом — выбор, что разворачивать, остаётся за читателем. На
+    печати и в выгрузке PDF группы раскрываются целиком, там прятать нечего.
+
     Покрытие внутри списка не подписываем: сколько организаций в группе и сколько
     в них человек, уже сказано в шапке — повторять это строкой ниже незачем.
     """
     sub = f'{g["sub"]} · {g["share"] * 100:.0f}% блока · {work}'
     return (
-        f'<details class="gd-grp"{" open" if open_ else ""} '
+        f'<details class="gd-grp" '
         f'style="--share:{g["share"] * 100:.0f}%">'
         f'<summary><span class="gd-gt">{C.esc(g["title"])}'
         f'<i>{g["n"]} орг</i></span>'
@@ -883,6 +889,10 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
     разбор по сегментам. Отток разложен на группы (см. `_out_group`) и покрыт целиком;
     в остальных блоках имена показываются только материальные, поэтому у них стоит
     подпись о покрытии.
+
+    Группы в блоках «Отток по причинам» и «Портфель год к году» свёрнуты все до
+    одной: карточка открывается перечнем причин с их весом, а список организаций
+    читатель разворачивает сам — по той причине, которая его интересует.
     """
     if not det:
         return ""
@@ -891,16 +901,17 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
     wf_html = _wf_lines(pf, d, det["conv"], det.get("conv_diag"),
                         det.get("conv_is_tb", False))
     yoy = det["yoy_total"]
-    # отток разложен по причине: первая (крупнейшая) группа раскрыта, иначе оверлей
-    # встречает читателя четырьмя закрытыми строками без единого имени
+    # Отток разложен по причине, все группы свёрнуты: сначала читатель видит
+    # перечень причин с их весом и сам решает, какую раскрывать. С раскрытой
+    # первой группой остальные причины уезжали под её список имён.
     groups = det.get("out_groups") or []
-    out_html = ("".join(_out_group(g, i == 0) for i, g in enumerate(groups)) if groups
+    out_html = ("".join(_out_group(g) for g in groups) if groups
                 else '<div class="gd-note">нет организаций с заметным вкладом</div>')
     n_out = det.get("out_n_all", 0)
     # в блоке только просевшие: он отвечает на «почему потеряли», и выросшие
     # организации ответа на этот вопрос не содержат
     yoy_groups = det.get("yoy_groups") or []
-    yoy_html = ("".join(_yoy_group(g, i == 0) for i, g in enumerate(yoy_groups))
+    yoy_html = ("".join(_yoy_group(g) for g in yoy_groups)
                 if yoy_groups else
                 '<div class="gd-note">просевших за год организаций нет</div>')
     yoy_head = (f'<h4>Портфель год к году: '
