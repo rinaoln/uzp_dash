@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
+import json
 import math
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -16,7 +18,7 @@ from ...registry import Context, dashboard
 from ...render import components as C
 from ...render import page
 from ... import progress
-from . import analyze, bank, prompts, segments
+from . import analyze, bank, prompts, segments, snapshot
 
 SEG_ORDER = segments.ORDER   # короткие названия сегментов (КСБ, РГС, …)
 
@@ -38,7 +40,10 @@ SEG_ORDER = segments.ORDER   # короткие названия сегмент�
 # перезаписью, переименовав в .js.txt. На готовый HTML это никак не влияет: скрипт
 # всё равно встраивается в документ текстом, отдельных .js-файлов отчёт не имеет.
 _ASSETS = Path(__file__).with_name("assets")
-TITLE = "Прогноз портфеля, причины невыполнения"
+TITLE = "Анализ портфеля получателей заработной платы"
+# Подзаголовок — часть названия отчёта, а не подпись конкретной сборки: месяц
+# прогноза и дата обновления стоят отдельной строкой ниже (см. `meta` в page).
+SUBTITLE = "Прогноз выполнения планов"
 
 # Легенда под шапкой — из дизайна пользователя; цвета подписаны границами, потому
 # что раскраска везде идёт по одному правилу (C.status_of) и по одному числу —
@@ -130,8 +135,12 @@ def build(ctx: Context) -> str:
     prompts.reset_gateway()
     b = bank.load(ctx)
 
-    levels_tb = [(int(r.tb_id), str(r.tb_short_name), str(r.tb_full_name))
-                 for r in b.tbs.itertuples()]
+    # Порядок вкладок — алфавитный, и сортируется он здесь, а не полагается на
+    # ORDER BY: сортировка строк в СУБД зависит от collation базы, и в закрытом
+    # контуре «СибБ» могло встать перед «СЗБ» просто из-за регистра.
+    levels_tb = sorted(((int(r.tb_id), str(r.tb_short_name), str(r.tb_full_name))
+                        for r in b.tbs.itertuples()),
+                       key=lambda x: analyze._ru_key(x[1]))
     preps = []
     for i, (tb_id, short, full) in enumerate(levels_tb, start=1):
         progress.step(f"═══ ТБ {short} ({i} из {len(levels_tb)}) ═══")
@@ -158,6 +167,20 @@ def build(ctx: Context) -> str:
     for c in sb.gosb_cards:
         c["lvl"] = lvl_of.get(c["gosb_id"])
 
+    # Динамика неделя к неделе. Недельного грейна в витрине нет (period_type —
+    # только m/q/qtd/y/ytd), поэтому сравнение идёт с ПРОШЛОЙ СБОРКОЙ отчёта:
+    # каждая сборка оставляет рядом с HTML снимок своих чисел. Подробнее — в
+    # snapshot.py. Отчёт от снимков не зависит: нет базы — нет строки сравнения.
+    ref_cur = str(b.dates.get("ref_cur", sb.ref_date))
+    base = snapshot.load_base(ctx.output_dir, ref_cur)
+    for a in [sb] + preps:
+        a.wow = snapshot.compare(base, a)
+    if not base:
+        progress.done("Сравнивать неделя к неделе не с чем: снимков прошлых сборок "
+                      "на этот прогнозный месяц нет — в плашке прогноза об этом "
+                      "сказано прямо")
+    snapshot.save(ctx.output_dir, ref_cur, [sb] + preps)
+
     # Выводы по разделам — по вызову LLM на уровень, и это основное время отчёта.
     # ПОСЛЕДОВАТЕЛЬНО: параллельный вариант пробовали, корпоративный шлюз отвечает на
     # него 429 и после ретраев роняет запрос — из 12 уровней доходил один, остальные
@@ -173,11 +196,18 @@ def build(ctx: Context) -> str:
         f'{_level_body(a, story, i)}</div>'
         for i, (a, story) in enumerate(levels))
     d = sb.dates or {}
+    # Дата обновления — время СБОРКИ отчёта, а не дата витрины: читатель открывает
+    # файл из почты и первым делом спрашивает, насколько он свежий. Месяц прогноза
+    # и закрытый месяц стоят рядом, в той же строке, — это и есть срез данных.
+    meta = (f'Прогноз на {C.esc(d.get("label", sb.ref_date))} · '
+            f'база — закрытый {C.esc(d.get("closed_label", ""))} · '
+            f'отчёт обновлён {datetime.now():%d.%m.%Y, %H:%M}')
     return page(
         title=TITLE,
-        subtitle=f"Прогноз на {C.esc(d.get('label', sb.ref_date))}",
+        subtitle=SUBTITLE,
+        meta=meta,
         body=(_BOOT_JS + _LEGEND + _tabs([a for a, _ in levels]) + bodies
-              + _GD_JS + _LVL_JS + _OF_JS),
+              + _cell_dialog() + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
         css=_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css"),
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
@@ -185,6 +215,9 @@ def build(ctx: Context) -> str:
         tail=(f'<script>{_asset("ux.js.txt")}</script>\n'
               # раскладка готова — снимаем маску, поставленную _BOOT_JS
               f'{_REVEAL_JS}\n'
+              # кнопки выгрузки — ПОСЛЕ скрипта дизайна: он переставляет блоки,
+              # и кнопка должна встать рядом с таблицей уже на новом месте
+              f'{_XLS_JS}\n'
               f'{_asset("help.html")}<script>\n{_asset("help.js.txt")}</script>\n'
               # прямой потомок <body> — на него ссылается печатный CSS в
               # ux-fix.css (скрывает всё, кроме этого блока, во время печати)
@@ -213,7 +246,7 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
         + _kpis(a)
         + _portfolio_block(a, story.get("forecast"))
         + _trend_section(a)
-        + _matrix(a, story.get("matrix"))
+        + _matrix(a, story.get("matrix"), idx)
         + _problem_gosb(a, story.get("gosb"), idx)
     )
     # список организаций живёт только на уровне ТБ: на уровне банка работают с ТБ,
@@ -289,8 +322,69 @@ def _hero(a: analyze.Analysis) -> str:
           f'<b style="color:{_col(fot["exec"])}">{_pct(fot["exec"])}</b> · '
           f'{_delta_html((fot["fact"] - fot["plan"]) / 1e6, "млн ₽")}</div>'
         + f'<div class="row2">{closed_txt}</div>'
+        + _wow_row(a)
     )
     return C.card(inner, cls="hero")
+
+
+def _wow_num(delta: float, unit: str = "", digits: int = 0,
+             eps: float = 0.5) -> str:
+    """Изменение величины к прошлой сборке: знак, цвет, единица.
+
+    Ноль в пределах округления пишем словами: «+0 чел» читалось бы как
+    настоящее изменение на ноль, а это отсутствие изменения.
+    """
+    if abs(delta) < eps:
+        return '<b style="color:var(--text-2)">без изменений</b>'
+    col = "var(--good)" if delta > 0 else "var(--bad)"
+    sign = "+" if delta > 0 else "−"
+    tail = f" {C.esc(unit)}" if unit else ""
+    return f'<b style="color:{col}">{sign}{C.fmt_num(abs(delta), digits=digits)}{tail}</b>'
+
+
+def _wow_pp(delta: float | None) -> str:
+    """Изменение выполнения плана — в процентных пунктах.
+
+    Именно в пунктах, а не в процентах: 95% → 97% это «+2 п.п.», а не «+2%».
+    Проценты от процентов в отчёте про выполнение плана читаются неверно.
+    """
+    if delta is None or abs(delta) < 0.0005:
+        return '<b style="color:var(--text-2)">без изменений</b>'
+    col = "var(--good)" if delta > 0 else "var(--bad)"
+    sign = "+" if delta > 0 else "−"
+    return f'<b style="color:{col}">{sign}{abs(delta) * 100:.1f} п.п.</b>'
+
+
+def _wow_row(a: analyze.Analysis) -> str:
+    """Строка «неделя к неделе» в плашке прогноза.
+
+    Сравнение идёт с прошлой СБОРКОЙ отчёта — в витрине недельного грейна нет
+    (см. snapshot.py), поэтому дата базовой сборки подписана прямо в строке: без
+    неё непонятно, за какой период показано изменение. Когда базы ещё нет, строка
+    не исчезает, а говорит об этом — иначе читатель решит, что изменений нет.
+    """
+    w = a.wow or {}
+    if not w.get("rcp"):
+        return ('<div class="row2 wow">Неделя к неделе: сравнивать пока не с чем — '
+                'снимок этой сборки сохранён, динамика появится в следующем отчёте.</div>')
+    rcp, fot = w["rcp"], w.get("fot") or {}
+    plan = (f' · план {_wow_num(rcp["plan"], "чел")}'
+            if abs(rcp.get("plan", 0)) >= 0.5 else "")
+    return (f'<div class="row2 wow">Неделя к неделе, к сборке от {C.esc(w["full"])}: '
+            f'прогноз получателей {_wow_num(rcp["fc"], "чел")}{plan} · '
+            f'выполнение {_wow_pp(rcp.get("exec"))} · '
+            f'прогноз ФОТ {_wow_num(fot.get("fc", 0) / 1e6, "млн ₽", 1, 0.05)}</div>')
+
+
+def _wow_unit(a: analyze.Analysis, unit_id: int, cls: str = "g-wow") -> str:
+    """То же сравнение по одной единице — для карточки и шапки её разбора."""
+    w = a.wow or {}
+    u = (w.get("units") or {}).get(unit_id)
+    if not u:
+        return ""
+    return (f'<div class="{cls}">Неделя к неделе (к {C.esc(w.get("label", ""))}): '
+            f'прогноз {_wow_num(u["fc"], "чел")} · '
+            f'выполнение {_wow_pp(u.get("exec"))}</div>')
 
 
 def _delta_html(delta: float, unit: str = "") -> str:
@@ -486,11 +580,15 @@ def _trend_section(a: analyze.Analysis) -> str:
              "устойчивой тенденции.")
 
 
-def _matrix(a: analyze.Analysis, ai: str | None = None) -> str:
+def _matrix(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
     m = a.matrix
     if m.empty:
         return ""
-    gg = a.gosb_gap.sort_values("nedobor", ascending=False)
+    # Порядок строк — алфавитный, как и карточки единиц: матрицу читают, отыскивая
+    # в ней конкретный ГОСБ. Ранжированный взгляд на те же данные даёт таблица
+    # «ТОП по невыполнению» справа.
+    gg = a.gosb_gap.assign(_ord=[analyze._ru_key(x) for x in a.gosb_gap["unit_name"]]) \
+                   .sort_values("_ord", kind="stable")
     present = set(m.unit_id)
     rows_id_label = [(int(r.unit_id), (r.unit_name or "")[:26])
                      for r in gg.itertuples() if int(r.unit_id) in present]
@@ -501,9 +599,20 @@ def _matrix(a: analyze.Analysis, ai: str | None = None) -> str:
              (row.execution_percent if analyze._failing_seg(row.nedobor) else
               max(float(row.execution_percent or 0), 1.0), row.nedobor)
              for row in m.itertuples()}
+    # Ранг есть только у ТБ — это величина витрины, считанная по закрытому месяцу.
+    # На уровне ТБ единицы строк — ГОСБ, и колонки ранга там нет.
+    ranks = a.ranks if a.level == "sb" else None
+    hint = ('<p class="sub" style="font-size:14px;margin:-4px 0 12px">'
+            'Клик по ячейке открывает организации этого '
+            f'{C.esc(a.unit_label)} и сегмента, у которых за год стало меньше '
+            'получателей.'
+            + (' Ранг — место ТБ в сети по выполнению плана за закрытый месяц '
+               f'{C.esc((a.dates or {}).get("closed_label", ""))}.' if ranks else "")
+            + '</p>')
     heat = C.card(
-        '<h3>Прогноз выполнения плана по получателям, %</h3>'
-        + C.heat_matrix(rows_id_label, segs, cells))
+        '<h3>Прогноз выполнения плана по получателям, %</h3>' + hint
+        + C.heat_matrix(rows_id_label, segs, cells, unit_head=a.unit_label,
+                        ranks=ranks, cell_click="cellOpen"))
     top = [(f'{r.unit_name} · {r.seg_name}',
             C.badge(_pct(r.execution_percent), C.status_of(r.execution_percent)),
             C.fmt_num(r.nedobor), f'{r.share*100:.0f}%') for r in a.top_cells.itertuples()]
@@ -512,8 +621,42 @@ def _matrix(a: analyze.Analysis, ai: str | None = None) -> str:
                      + C.table(["ГОСБ × сегмент", "Выполн.", "Отклонение, чел", "Доля отклонения"],
                                top, num_cols=[2, 3]))
     return C.section(f"Матрица выполнения {a.unit_label}/сегмент",
-                     f'<div class="grid cols-2">{heat}{top_tbl}</div>' + _ai(ai),
+                     f'<div class="grid cols-2">{heat}{top_tbl}</div>'
+                     + _cell_data(a, idx, cells) + _ai(ai),
                      eyebrow="Диагностика по прогнозу")
+
+
+def _cell_data(a: analyze.Analysis, idx: int, cells: dict) -> str:
+    """Состав ячеек матрицы — данными для скрипта, а не разметкой.
+
+    Ячеек на уровне до шестисот, и разложить каждую отдельным скрытым блоком
+    значило бы утроить вес файла ради содержимого, которое открывают у двух-трёх
+    ячеек. Поэтому в документ уезжает компактный словарь, а разметку строит
+    `cellOpen` в момент клика.
+
+    Ключ — «единица|сегмент» в пределах уровня; сам уровень скрипт узнаёт по
+    id блока, внутри которого лежит матрица: в одном файле тринадцать отчётов.
+    """
+    top = a.cell_top or {}
+    if not top:
+        return ""
+    payload = {}
+    for key in cells:
+        cell = top.get(key)
+        if not cell:
+            continue
+        uid, seg = key
+        payload[f"{uid}|{seg}"] = {
+            "n": cell["n"], "fl": round(cell["fl"]),
+            "top": round(cell.get("top_fl", 0)),
+            "rows": [[r["name"], round(r["yoy"]), round(r["cur"]), round(r["was"]),
+                      r["emp"]] for r in cell["rows"]],
+        }
+    if not payload:
+        return ""
+    js = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    return (f'<script>window.__CELLS=window.__CELLS||{{}};'
+            f'window.__CELLS["lvl-{idx}"]={js};</script>')
 
 
 def _gap_cell(v: float) -> str:
@@ -717,7 +860,7 @@ def _group_html(g: dict, open_: bool, work: str, key: str, why,
     )
 
 
-def _gd_help(*lines: str) -> str:
+def _gd_help(*lines: str, title: str = "Как считаем этот блок") -> str:
     """Подсказка «как считаем» под заголовком блока карточки.
 
     Нативный `<details>`: закрыта по умолчанию, открывается кликом и с клавиатуры,
@@ -727,12 +870,13 @@ def _gd_help(*lines: str) -> str:
     Язык подсказки — про смысл числа, а не про источник: названия таблиц и полей
     управляющему ничего не говорят и только удлиняют текст.
     """
-    body = "".join(f"<p>{x}</p>" for x in lines)
-    return ('<details class="gd-help"><summary>Как считаем этот блок</summary>'
+    body = "".join(f"<p>{x}</p>" for x in lines if x)
+    return (f'<details class="gd-help"><summary>{C.esc(title)}</summary>'
             f'<div class="gd-help-b">{body}</div></details>')
 
 
-def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГОСБ") -> str:
+def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГОСБ",
+                 wow: str = "") -> str:
     """Оверлей «почему прогноз такой» по одному ГОСБ.
 
     Порядок блоков: портфель → отток по группам → пайплайн → тренд портфеля →
@@ -771,7 +915,7 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
         f'<div class="gd-fc">Прогноз <b>{C.fmt_num(pf["forecast"])}</b> из плана '
         f'{C.fmt_num(pf["plan"])} · <b style="color:{_col(pf.get("exec"))}">'
         f'{_pct(pf.get("exec"))}</b> · {_delta_html(pf["forecast"] - pf["plan"], "чел")}'
-        f'</div></div>'
+        f'</div>{wow}</div>'
         f'<div class="gd-head-actions">'
         f'<button type="button" class="gd-export" onclick="event.stopPropagation();'
         f'exportCardPdf(\'{uid}\')" title="Экспорт карточки в PDF, все разделы развёрнуты">'
@@ -914,6 +1058,9 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
             + f'<div class="g-fc">{C.fmt_num(c["forecast"])} из '
               f'{C.fmt_num(c["plan"])} · {_delta_html(c["forecast"] - c["plan"], "чел")}'
               f'</div>'
+            # куда сдвинулся прогноз этой единицы с прошлой сборки: по карточкам
+            # видно, где неделя что-то изменила, а где всё стоит на месте
+            + _wow_unit(a, gid)
             + f'<div style="margin:2px 0 6px">{head_badge}</div>'
             + f'{seg_html}{do}{more}{drill}'
         )
@@ -923,10 +1070,136 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
                  f'{{event.preventDefault();gdOpen(\'{uid}\');}}"' if det else "")
         cards.append(f'<div class="card gcard {st}"{attrs}>{inner}</div>')
         if det:
-            dialogs.append(_gosb_dialog(c, det, d, uid, unit))
+            dialogs.append(_gosb_dialog(c, det, d, uid, unit,
+                                        _wow_unit(a, gid, "gd-wow")))
     grid = f'<div class="gcards">{"".join(cards)}</div>{"".join(dialogs)}'
     return C.section(f"Детализация по {unit}", grid + _ai(ai),
                      eyebrow=f"Детализация по {unit} · клик открывает разбор до организаций")
+
+
+def _cell_dialog() -> str:
+    """Оверлей раскрытой ячейки матрицы — ОДИН на весь документ.
+
+    Ячеек в отчёте шестьсот с лишним, и отдельный оверлей на каждую раздул бы
+    файл ради содержимого, которое смотрят точечно. Разметку наполняет скрипт из
+    словаря уровня (см. `_cell_data`), а заголовок собирает из самой таблицы —
+    названия единиц в данных не повторяются.
+    """
+    return (
+        '<dialog class="gd cd" id="cell-dlg"><div class="gd-sheet">'
+        '<div class="gd-head"><div>'
+        '<h3 style="margin:0" id="cd-title"></h3>'
+        '<div class="gd-fc" id="cd-sub"></div></div>'
+        '<div class="gd-head-actions">'
+        '<button type="button" class="gd-export" onclick="cellXls()" '
+        'title="Выгрузить список в Excel">Экспорт в Excel</button>'
+        '<button type="button" class="gd-close" onclick="cellClose()" '
+        'aria-label="Закрыть">×</button></div></div>'
+        '<div class="gd-block"><h4 id="cd-h4">Клиенты со снижением по получателям '
+        'за год</h4>'
+        + _gd_help(
+            '<b>Что за список.</b> Организации этой ячейки — то есть этого '
+            'подразделения и этого сегмента, — у которых получателей зарплаты '
+            'стало меньше, чем в том же месяце год назад. Снижение считается по '
+            'каждой организации отдельно: численность на конец закрытого месяца '
+            'минус численность на тот же месяц годом ранее.',
+            '<b>Кто в список не попадает.</b> Организации, где за год стало '
+            'больше или столько же: ячейку раскрывают, чтобы понять, где потеряли '
+            'людей, и выросшие клиенты на этот вопрос не отвечают. Отсекается '
+            'также снижение меньше одного человека — это округление витрины.',
+            '<b>Сколько показано.</b> Десять крупнейших снижений. Сколько '
+            'организаций в ячейке просело всего и на сколько человек — в строке '
+            'под заголовком, чтобы часть не принимали за целое.',
+            '<b>Как это связано с процентом в ячейке.</b> Никак не выводится одно '
+            'из другого: процент — выполнение ПРОГНОЗА на текущий месяц, а список — '
+            'ФАКТ за год. Список объясняет, откуда взялось падение базы, на которой '
+            'строится прогноз.',
+            '<b>Сегмент.</b> Берётся из справочника клиентов и закреплён за самой '
+            'организацией, поэтому в строке подразделения она стоит ровно в одной '
+            'ячейке.')
+        + '<div id="cd-rows"></div></div>'
+        '</div></dialog>'
+    )
+
+
+# Раскрытие ячейки матрицы: состав берётся из словаря уровня, разметка строится
+# на месте. Оверлей один на документ — см. `_cell_dialog`.
+_CELL_JS = """
+<script>
+window.__cdRows = null;
+function cellEsc(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+  });
+}
+function cellNum(n){ return Number(n).toLocaleString('ru-RU'); }
+function cellClose(){
+  var d = document.getElementById('cell-dlg');
+  if(d && d.open) d.close();
+}
+function cellOpen(td){
+  var dlg = document.getElementById('cell-dlg');
+  if(!dlg || !td) return;
+  var lvl = td.closest('.lvl');
+  var key = td.getAttribute('data-cell') || '';
+  var cell = ((window.__CELLS || {})[lvl ? lvl.id : ''] || {})[key];
+  var seg = key.split('|')[1] || '';
+  var tr = td.closest('tr');
+  var unit = (tr && tr.cells.length) ? tr.cells[0].textContent.trim() : '';
+  var pct = td.textContent.trim();
+
+  document.getElementById('cd-title').textContent = unit + ' · ' + seg;
+  var sub = 'Выполнение прогноза ' + pct;
+  if(cell){
+    sub += ' · за год просели ' + cellNum(cell.n) + ' орг на \\u2212'
+        + cellNum(cell.fl) + ' чел';
+  }
+  document.getElementById('cd-sub').textContent = sub;
+
+  var rows = (cell && cell.rows) || [];
+  /* формулировки без согласования с числом: «1 крупнейших» в отчёте правления
+     выглядело бы опечаткой, а склонять числительные в скрипте незачем */
+  var head = document.getElementById('cd-h4');
+  head.textContent = rows.length
+    ? ('Клиенты со снижением по получателям за год: ' + rows.length
+       + (cell.n > rows.length ? ' из ' + cellNum(cell.n) : ''))
+    : 'Клиенты со снижением по получателям за год';
+
+  var host = document.getElementById('cd-rows');
+  if(!rows.length){
+    host.innerHTML = '<div class="gd-note">В этой ячейке организаций со снижением '
+      + 'по получателям за год нет.</div>';
+    window.__cdRows = null;
+  } else {
+    host.innerHTML = rows.map(function(r){
+      var emp = r[4] ? '<span class="gd-emp">' + cellEsc(r[4]) + '</span>' : '';
+      return '<div class="gd-row"><span>' + cellEsc(r[0]) + emp + '</span>'
+        + '<span>\\u2212' + cellNum(Math.abs(r[1])) + '</span>'
+        + '<span class="gd-why">сейчас ' + cellNum(r[2]) + ' чел, год назад '
+        + cellNum(r[3]) + ' чел</span></div>';
+    }).join('');
+    if(cell.n > rows.length){
+      host.innerHTML += '<div class="gd-note">Эти строки объясняют \\u2212'
+        + cellNum(cell.top) + ' чел из \\u2212' + cellNum(cell.fl)
+        + ' чел снижения ячейки.</div>';
+    }
+    window.__cdRows = [['Организация', 'Ответственный', 'Изменение за год, чел',
+                        'Сейчас, чел', 'Год назад, чел']].concat(
+      rows.map(function(r){ return [r[0], r[4] || '', r[1], r[2], r[3]]; }));
+    window.__cdName = unit + ' ' + seg + ' — снижение за год';
+  }
+  dlg.showModal();
+}
+(function(){
+  var d = document.getElementById('cell-dlg');
+  if(d) d.addEventListener('click', function(e){ if(e.target === d) d.close(); });
+})();
+function cellXls(){
+  if(!window.__cdRows || typeof window.xlsxDownload !== 'function') return;
+  window.xlsxDownload(window.__cdName || 'Ячейка матрицы', window.__cdRows);
+}
+</script>
+"""
 
 
 # Открытие/закрытие оверлея. Нативный <dialog>: Esc работает сам, фокус
@@ -955,7 +1228,7 @@ function exportCardPdf(uid){
   root.innerHTML = '';
 
   var mainClone = mainSheet.cloneNode(true);
-  mainClone.querySelectorAll('.gd-close, .mgmt-trigger').forEach(function(el){ el.remove(); });
+  mainClone.querySelectorAll('.gd-close, .mgmt-trigger, .xls-bar').forEach(function(el){ el.remove(); });
   var mainHead = mainClone.querySelector(':scope > .gd-head');
   if(mainHead) root.appendChild(mainHead);
 
@@ -1003,7 +1276,7 @@ function exportLevelPdf(idx){
   clone.querySelectorAll('dialog').forEach(function(el){ el.remove(); });
   /* интерактивная обвязка на бумаге бессмысленна */
   clone.querySelectorAll('.lvl-pdf, .lvl-up, .forecast-toggle, .mgmt-trigger, '
-    + '.gd-export, .gd-close, .gosb-finder, .ts-dropdown').forEach(function(el){
+    + '.gd-export, .gd-close, .gosb-finder, .ts-dropdown, .xls-bar').forEach(function(el){
     el.remove();
   });
   clone.querySelectorAll('details').forEach(function(d){ d.open = true; });
@@ -1022,6 +1295,253 @@ window.addEventListener('afterprint', function(){
 });
 </script>
 """
+
+# Выгрузка таблиц в Excel.
+#
+# Файл .xlsx собирается ПРЯМО В БРАУЗЕРЕ: отчёт уезжает в закрытый контур одним
+# документом без сети, подключить SheetJS или любую другую библиотеку нельзя.
+# Внутри .xlsx — обычный zip из пяти маленьких XML, и пишется он без сжатия
+# (метод store): Excel такой архив открывает штатно, а deflate потребовал бы
+# реализовать сжатие руками ради файла в пару десятков килобайт.
+#
+# CSV сознательно не выбран: русские заголовки и разделитель зависят от локали
+# Windows, и «экспорт в Excel» у половины читателей открывался бы одной колонкой
+# с кракозябрами.
+_XLS_JS = """
+<script>
+(function(){
+  var CRC = (function(){
+    var t = new Uint32Array(256), c, n, k;
+    for(n = 0; n < 256; n++){
+      c = n;
+      for(k = 0; k < 8; k++){ c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); }
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(buf){
+    var c = 0xFFFFFFFF;
+    for(var i = 0; i < buf.length; i++){ c = CRC[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); }
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  var enc = new TextEncoder();
+
+  /* zip без сжатия: локальные заголовки, центральный каталог, хвост */
+  function zip(files){
+    var parts = [], central = [], offset = 0, cdSize = 0;
+    files.forEach(function(f){
+      var name = enc.encode(f.name), data = f.data;
+      var crc = crc32(data), size = data.length;
+      var lh = new Uint8Array(30 + name.length), dv = new DataView(lh.buffer);
+      dv.setUint32(0, 0x04034b50, true);
+      dv.setUint16(4, 20, true);
+      dv.setUint16(6, 0x0800, true);   /* имена в UTF-8 */
+      dv.setUint32(14, crc, true);
+      dv.setUint32(18, size, true);
+      dv.setUint32(22, size, true);
+      dv.setUint16(26, name.length, true);
+      lh.set(name, 30);
+      parts.push(lh, data);
+
+      var ch = new Uint8Array(46 + name.length), cv = new DataView(ch.buffer);
+      cv.setUint32(0, 0x02014b50, true);
+      cv.setUint16(4, 20, true);
+      cv.setUint16(6, 20, true);
+      cv.setUint16(8, 0x0800, true);
+      cv.setUint32(16, crc, true);
+      cv.setUint32(20, size, true);
+      cv.setUint32(24, size, true);
+      cv.setUint16(28, name.length, true);
+      cv.setUint32(42, offset, true);
+      ch.set(name, 46);
+      central.push(ch);
+      cdSize += ch.length;
+      offset += lh.length + size;
+    });
+    var end = new Uint8Array(22), ev = new DataView(end.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(8, files.length, true);
+    ev.setUint16(10, files.length, true);
+    ev.setUint32(12, cdSize, true);
+    ev.setUint32(16, offset, true);
+    return new Blob(parts.concat(central, [end]),
+                    {type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  }
+
+  function xesc(s){
+    return String(s == null ? '' : s)
+      .replace(/[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f]/g, '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+  function colName(i){
+    var s = '';
+    do { s = String.fromCharCode(65 + (i % 26)) + s; i = Math.floor(i / 26) - 1; }
+    while(i >= 0);
+    return s;
+  }
+  /* «12 345» и «−1 234» в выгрузке должны быть ЧИСЛАМИ, иначе в Excel по ним
+     не построить ни сумму, ни сортировку. Проценты остаются текстом: «107%» —
+     это подпись, а не доля, и превращать её в 1.07 значило бы менять смысл. */
+  function cellVal(v){
+    if(typeof v === 'number') return isFinite(v) ? v : '';
+    var t = String(v == null ? '' : v)
+      .replace(/\\u2212/g, '-').replace(/[\\s\\u00a0\\u2009]/g, '');
+    if(/^-?\\d+(?:[.,]\\d+)?$/.test(t)) return Number(t.replace(',', '.'));
+    return String(v == null ? '' : v);
+  }
+  function sheetXml(rows){
+    var out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+      + '<sheetData>'];
+    rows.forEach(function(row, ri){
+      out.push('<row r="' + (ri + 1) + '">');
+      row.forEach(function(v, ci){
+        var ref = colName(ci) + (ri + 1), val = cellVal(v);
+        if(typeof val === 'number'){
+          out.push('<c r="' + ref + '"><v>' + val + '</v></c>');
+        } else if(val !== ''){
+          out.push('<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">'
+            + xesc(val) + '</t></is></c>');
+        }
+      });
+      out.push('</row>');
+    });
+    out.push('</sheetData></worksheet>');
+    return out.join('');
+  }
+  function sheetName(title){
+    var s = String(title || 'Лист1').replace(/[\\[\\]:*?\\/\\\\]/g, ' ').trim();
+    return s.slice(0, 28) || 'Лист1';
+  }
+  function fileName(title){
+    var s = String(title || 'Выгрузка').replace(/[\\\\/:*?"<>|]/g, '-')
+      .replace(/\\s+/g, ' ').trim();
+    return s.slice(0, 90) + '.xlsx';
+  }
+
+  /* Публичная точка: массив массивов -> .xlsx в загрузки браузера */
+  window.xlsxDownload = function(title, rows){
+    if(!rows || !rows.length) return;
+    var files = [
+      {name: '[Content_Types].xml', data: enc.encode(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        + '<Default Extension="xml" ContentType="application/xml"/>'
+        + '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        + '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        + '</Types>')},
+      {name: '_rels/.rels', data: enc.encode(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        + '</Relationships>')},
+      {name: 'xl/workbook.xml', data: enc.encode(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        + '<sheets><sheet name="' + xesc(sheetName(title)) + '" sheetId="1" r:id="rId1"/></sheets>'
+        + '</workbook>')},
+      {name: 'xl/_rels/workbook.xml.rels', data: enc.encode(
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        + '</Relationships>')},
+      {name: 'xl/worksheets/sheet1.xml', data: enc.encode(sheetXml(rows))}
+    ];
+    var blob = zip(files);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = fileName(title);
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+  };
+
+  /* Текст ячейки таблицы: подписи второй строкой (ответственный, «Орг. N»)
+     склеиваем через « · », иначе в выгрузке они слипались бы с названием. */
+  function cellText(td){
+    var c = td.cloneNode(true);
+    /* фильтры в шапке таблицы — это управление, а не заголовок: в выгрузке от
+       них остался бы список всех вариантов вместо названия колонки */
+    Array.prototype.forEach.call(c.querySelectorAll('select,input,button'),
+      function(el){ el.remove(); });
+    Array.prototype.forEach.call(c.querySelectorAll('div,p,br'), function(el){
+      el.parentNode.insertBefore(document.createTextNode(' \\u00b7 '), el);
+    });
+    return (c.textContent || '').replace(/\\s+/g, ' ')
+      .replace(/(\\s*\\u00b7\\s*)+/g, ' \\u00b7 ')
+      .replace(/^\\s*\\u00b7\\s*|\\s*\\u00b7\\s*$/g, '').trim();
+  }
+  function tableRows(t){
+    var out = [];
+    Array.prototype.forEach.call(t.rows, function(tr){
+      if(!tr.cells.length) return;
+      out.push(Array.prototype.map.call(tr.cells, cellText));
+    });
+    return out;
+  }
+  function tableTitle(t){
+    var box = t.closest('.card, .gd-sheet, .section-body, section');
+    var h = box ? box.querySelector('h2, h3, h4') : null;
+    var name = h ? h.textContent.trim() : 'Таблица';
+    var lvl = t.closest('.lvl');
+    var who = lvl ? lvl.querySelector('.lvl-name') : null;
+    return (who ? who.textContent.trim() + ' — ' : '') + name;
+  }
+  function exportTable(t){
+    /* у интерактивного списка организаций своя выгрузка: в файл уходят ВСЕ
+       отобранные фильтром строки, а не видимая страница из пятнадцати */
+    var hook = (window.__xlsRows || {})[t.id];
+    var rows = hook ? hook() : tableRows(t);
+    window.xlsxDownload(tableTitle(t), rows);
+  }
+  function addButtons(){
+    Array.prototype.forEach.call(document.querySelectorAll('table'), function(t){
+      if(t.dataset.xlsReady === '1') return;
+      t.dataset.xlsReady = '1';
+      /* кнопку ставим вплотную к таблице: если таблица завёрнута в контейнер
+         прокрутки (и он больше ничего не держит) — перед контейнером, иначе
+         перед самой таблицей. Иначе кнопка уезжала бы выше заголовка карточки */
+      var host = t, p = t.parentElement;
+      if(p && p.children.length === 1
+         && (p.classList.contains('tbl-scroll')
+             || (p.style && p.style.overflowX === 'auto'))){
+        host = p;
+      }
+      if(!host.parentNode) return;
+      var bar = document.createElement('div');
+      bar.className = 'xls-bar';
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'xls-btn';
+      btn.textContent = 'Экспорт в Excel';
+      btn.title = 'Выгрузить таблицу в файл .xlsx';
+      btn.addEventListener('click', function(e){
+        e.preventDefault();
+        e.stopPropagation();
+        exportTable(t);
+      });
+      bar.appendChild(btn);
+      /* таблица может назвать своё место для кнопки: у списка организаций это
+         строка с целью и поиском — иначе выгрузка занимала бы отдельный ряд */
+      var into = t.getAttribute('data-xls-into');
+      var slot = into ? document.getElementById(into) : null;
+      if(slot){ slot.appendChild(bar); }
+      else { host.parentNode.insertBefore(bar, host); }
+    });
+  }
+  addButtons();
+  /* уровни переключаются, карточки открываются — таблицы в них те же, но
+     разметку двигает скрипт дизайна, поэтому проверяем ещё раз после кликов */
+  document.addEventListener('click', function(){ setTimeout(addButtons, 0); });
+  window.addEventListener('hashchange', function(){ setTimeout(addButtons, 0); });
+})();
+</script>
+"""
+
 
 # Переключение уровней. Адрес страницы пишем в hash: тогда работает кнопка «назад»
 # браузера и на конкретный уровень можно дать ссылку. Открытый оверлей перед
@@ -1121,7 +1641,8 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
             "reason": reason, "action": ins.get("action", ""),
             "needk": float(getattr(r, "need_k", 0.0)),
         })
-    gosb_opts = sorted({row["gosb"] for row in rows})
+    # фильтр по ГОСБ — в алфавитном порядке, как и карточки со строками матрицы
+    gosb_opts = sorted({row["gosb"] for row in rows}, key=analyze._ru_key)
     seg_opts = [s for s in SEG_ORDER if s in {row["seg"] for row in rows}]
     cut = min_fl > 0 and len(rows) < n_all
     if cut:
@@ -1140,36 +1661,56 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
     bad_segs = sorted({s["seg"] for c in a.gosb_cards for s in c["segs_bad"]},
                       key=lambda x: SEG_ORDER.index(x) if x in SEG_ORDER else 99)
     n_ret = sum(1 for r in rows if r["lever"] == "Вернуть")
-    hold = (f' · из них «Вернуть» — <b>{n_ret}</b>: люди ушли и не вернулись, а отток '
-            f'в месяц ухода не отработан' if n_ret else "")
-    # хвост не прячем молча: сказано, сколько кандидатов есть всего, по какому правилу
-    # часть из них в файл не попала и сколько среди скрытых нужных под план — иначе
-    # заголовок «N закрывают план» выглядел бы расходящимся с таблицей без объяснения
-    plan_hidden = (f' · из них нужных под план — {C.fmt_num(n_hidden_plan)}: '
-                   f'на отбор и на карточки ГОСБ порог не влияет' if n_hidden_plan else "")
-    cand = (f'в списке {C.fmt_num(len(rows))} из {C.fmt_num(n_all)} кандидатов — '
-            f'остальные мельче {C.fmt_num(min_fl)} чел{plan_hidden}' if cut
-            else f'всего кандидатов {C.fmt_num(len(rows))}')
+    # Подпись под заголовком — ОДНА фраза: что за список и сколько в нём строк.
+    # Раньше здесь висел абзац из пяти оговорок через точку с запятой — правила
+    # отбора, порог видимости, скрытые кандидаты, смысл рычага «Вернуть», — и
+    # читать его никто не начинал. Всё это никуда не делось, но переехало в
+    # свёрнутую подсказку «Как собран список»: объяснение нужно один раз.
+    cand = (f'В таблице {C.fmt_num(len(rows))} из {C.fmt_num(n_all)} кандидатов'
+            if cut else f'В таблице {C.fmt_num(len(rows))} '
+                        f'{_plural(len(rows), "организация", "организации", "организаций")}')
+    # хвост не прячем молча: в подсказке сказано, сколько кандидатов есть всего,
+    # по какому правилу часть из них не попала в файл и сколько среди скрытых
+    # нужных под план — иначе заголовок «N закрывают план» расходился бы с таблицей
+    help_html = _gd_help(
+        f'<b>Как отобраны.</b> Внутри каждого сегмента с невыполнением плана '
+        f'({C.esc(", ".join(bad_segs)) or "—"}) организации берутся по убыванию '
+        f'эффекта, пока отклонение сегмента не закрыто. Переключатель «Цель» '
+        f'вверху меняет задачу отбора: выполнить план или перевыполнить его.',
+        (f'<b>Почему строк меньше, чем кандидатов.</b> Организации с эффектом '
+         f'мельче {C.fmt_num(min_fl)} чел в файл не попадают — их тысячи, и отчёт '
+         f'стал бы неподъёмным. На сам отбор порог не влияет: заголовок '
+         f'«{sim["k"]} организаций закрывают план» и числа в карточках '
+         f'{C.esc(a.unit_label)} считаются по полному набору. Нужных под план '
+         f'среди скрытых — {C.fmt_num(n_hidden_plan)}.' if cut else ""),
+        (f'<b>Рычаг «Вернуть» — {n_ret} '
+         f'{_plural(n_ret, "организация", "организации", "организаций")}.</b> Люди ушли и не '
+         f'вернулись, а отток в месяц ухода не отработан. Остальные строки — '
+         f'«Привлечь»: организации, которых в портфеле ещё нет.' if n_ret else ""),
+        '<b>Фильтры.</b> Рычаг, ГОСБ и сегмент выбираются в шапке таблицы, поиск '
+        'идёт по названию, номеру организации, сотруднику и причине.',
+        title="Как собран список")
     head = (f'<h3>С кем работать — {sim["k"]} организаций закрывают план</h3>'
-            f'<p class="sub" style="font-size:14px;margin:-4px 0 14px">'
-            f'отбор идёт внутри сегментов с невыполнением плана каждого ГОСБ '
-            f'({C.esc(", ".join(bad_segs)) or "—"}), по величине эффекта, пока отклонение '
-            f'сегмента не закрыто · переключатель «Цель» задаёт перевыполнение · '
-            f'{cand}{hold}</p>')
+            f'<p class="sub" style="font-size:14px;margin:-4px 0 10px">'
+            f'Организации, за счёт которых закрывается отклонение от плана. '
+            f'{cand}.</p>{help_html}')
     return C.section("Потенциал организаций", C.card(head + explorer) + _ai(ai),
                      eyebrow="Потенциал организаций")
 
 
 def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
-    """Раздел «Отток»: где потеряли больше всего и что там делали.
+    """Раздел «Отток»: два списка по результату отработки.
 
     Остальной отчёт смотрит вперёд — кого брать в работу, чтобы закрыть план. Этот
-    раздел смотрит назад: люди уже ушли, и вопрос в том, была ли по ним работа. Одно
-    без другого не читается — по половине крупнейших потерь задач не заводили вовсе,
-    и видно это только рядом с именами.
+    раздел смотрит назад: люди уже ушли, и вопрос в том, чем закончилась работа по
+    ним. Отсюда и деление на два списка:
 
-    Порядок колонок повторяет вопрос: кто ушёл → сколько → когда → кто вёл →
-    что делали.
+      «обещали вернуться, но не вернулись» — договорённость зафиксирована в задаче,
+      а возврата нет: есть предмет разговора с клиентом и с исполнителем;
+      «отработали, но без результата» — работа велась, обещаний не давали, не
+      вернулся никто: вопрос не к исполнению, а к самому подходу.
+
+    Порядок колонок повторяет вопрос: кто ушёл → сколько → когда → чем закончилось.
     """
     o = a.outflow or {}
     if not o or not o.get("rows"):
@@ -1177,35 +1718,55 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
     unit = a.unit_label
     ret_pct = (o["tot_ret"] / o["tot_gone"] * 100) if o["tot_gone"] else 0
     head = (
-        f'<h3>Крупнейшие потери портфеля и их отработка</h3>'
-        f'<p class="sub" style="font-size:15px;margin:-4px 0 14px">'
+        f'<h3>Крупнейшие потери портфеля и чем закончилась работа по ним</h3>'
+        f'<p class="sub" style="font-size:15px;margin:-4px 0 10px">'
         f'За {C.esc((a.dates or {}).get("out_label", "три закрытых месяца"))} отток '
         f'составил <b>{C.fmt_num(o["tot_gone"])}</b> чел по '
         f'{C.fmt_num(o["n_all"])} организациям, возврат — '
         f'{C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%). Безвозвратные потери: '
         f'<b>{C.fmt_num(o["tot_kept"])}</b> чел.</p>'
+        + _gd_help(
+            '<b>Что за списки.</b> Оба — про один и тот же отток за три закрытых '
+            'месяца, но отвечают на разные вопросы. «Обещали вернуться» — там, где '
+            'договорённость о возврате была зафиксирована, а возврата нет. '
+            '«Отработали без результата» — там, где по клиенту велась работа в месяцы '
+            'ухода, обещаний не давали и не вернулся никто. Сколько задач было и '
+            'сколько из них именно по оттоку, видно в строке таблицы.',
+            '<b>Откуда известно про обещание.</b> Из задачи по оттоку: в её '
+            'чек-листе есть пункты «Ожидаемый возврат получателей» и «Ожидаемый '
+            'месяц возврата», а если чек-лист не заполнен — из прямой формулировки '
+            'в комментарии сотрудника («сотрудники вернутся в августе»). Ответы '
+            '«нет» и «пункт не актуален» обещанием не считаются.',
+            '<b>Когда обещание считается невыполненным.</b> Названо число — '
+            'вернулось меньше обещанного. Названо без числа — не вернулся никто. '
+            'Возврат берётся из витрины возвратов, а не со слов.',
+            '<b>Почему клиент может не попасть ни в один список.</b> Часть людей '
+            'вернулась — результат есть, пусть и неполный; либо месяц ухода старше '
+            'окна, за которое мы видим работу по клиентам, и сказать о ней нечего.',
+            title="Как собраны эти списки")
     )
     groups = []
-    for rows_src, title, lead in (
-        (o.get("top_worked") or [], "Отработка проведена, возврат не состоялся",
-         "Задачи по этим клиентам заводились, люди в портфель не вернулись. "
-         "Разбор нужен по существу работы, а не по факту её наличия."),
-        (o.get("top_silent") or [], "Отток на контроль",
-         "Крупнейшие потери, по которым отработка в воронке не отражена. "
-         "Требуют решения по дальнейшим действиям."),
+    for rows_src, title, lead, kind in (
+        (o.get("top_promised") or [], "Обещали вернуться, но не вернулись",
+         "Договорённость о возврате зафиксирована в задаче по оттоку, а люди "
+         "не вернулись. Предмет разговора — и с клиентом, и с исполнителем.", "promise"),
+        (o.get("top_worked") or [], "Отработали, но без результата",
+         "Работа в месяцы ухода велась, возврат никто не обещал, и не вернулся "
+         "никто. Вопрос к подходу, а не к исполнению договорённости.", "worked"),
     ):
         if not rows_src:
             continue
         groups.append({"title": title,
                        "n": len(rows_src),
                        "kept": sum(r["kept"] for r in rows_src),
-                       "html": _outflow_group(rows_src, unit, title, lead)})
+                       "html": _outflow_group(rows_src, unit, title, lead, kind,
+                                              (a.dates or {}).get("label", ""))})
     return C.section(
         "Отток", C.card(head + _outflow_tabs(groups)) + _ai(ai),
         eyebrow="Безвозвратные потери портфеля",
-        desc="Кого потеряли за три закрытых месяца и что по этим клиентам "
-             "делали — чтобы отделить случаи, где работа велась и не дала "
-             "результата, от тех, где нужно принимать решение.")
+        desc="Кого потеряли за три закрытых месяца и чем закончилась работа по "
+             "ним: отдельно невыполненные обещания вернуть получателей, отдельно "
+             "отработка, которая результата не дала.")
 
 
 def _outflow_tabs(groups: list) -> str:
@@ -1238,12 +1799,54 @@ def _outflow_tabs(groups: list) -> str:
             f'<div class="of-tabs" role="tablist">{tabs}</div>{panes}</div>')
 
 
-def _outflow_group(rows_src: list, unit: str, title: str, lead: str) -> str:
+def _promise_cell(r: dict, cur_label: str) -> str:
+    """Что именно обещали по этому клиенту и сдвинулся ли срок.
+
+    Число обещанных получателей стоит первым: с ним разговор предметный. Срок
+    помечается как прошедший, если названный месяц уже закрыт, — это и есть повод
+    вернуться к клиенту сейчас, а не «когда-нибудь».
+    """
+    p = r.get("promise") or {}
+    parts = []
+    qty = p.get("qty")
+    if qty:
+        parts.append(f'обещали вернуть <b>{C.fmt_num(qty)}</b> чел')
+    else:
+        parts.append("обещали вернуть получателей")
+    month = str(p.get("month") or "")
+    if month:
+        past = _month_passed(month, cur_label)
+        col = "var(--bad)" if past else "var(--text-2)"
+        parts.append(f'<span style="color:{col}">срок {C.esc(month)}'
+                     f'{" — прошёл" if past else ""}</span>')
+    if r.get("ret"):
+        parts.append(f'вернулись {C.fmt_num(r["ret"])}')
+    src = str(p.get("src") or "")
+    if src:
+        parts.append(f'<span style="color:var(--text-2)">{C.esc(src)}</span>')
+    return " · ".join(parts)
+
+
+def _month_passed(month: str, cur_label: str) -> bool:
+    """Месяц «MM.YYYY» уже закончился относительно прогнозного месяца отчёта."""
+    def key(m):
+        try:
+            mm, yy = str(m).split(".")
+            return (int(yy), int(mm))
+        except (ValueError, AttributeError):
+            return None
+    a, b = key(month), key(cur_label)
+    return bool(a and b and a < b)
+
+
+def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
+                   kind: str = "worked", cur_label: str = "") -> str:
     """Одна группа раздела «Отток»: заголовок, пояснение и таблица клиентов.
 
-    Колонка отработки показывается только там, где есть что показать. У группы без
-    задач она была бы колонкой из одинаковых прочерков и говорила бы ровно то, что
-    в этом отчёте проговаривать не нужно: состав группы и так задан её заголовком.
+    Последняя колонка зависит от группы и отвечает на её собственный вопрос: в
+    группе обещаний — что именно обещали и когда, в группе отработки — сколько
+    было задач и чем они закончились. Одна общая колонка на оба списка была бы
+    наполовину пустой в каждом.
 
     Вывода по комментариям в таблице нет: он занимал половину ширины строки текстом
     разной длины, из-за чего числа — а таблица про них — расползались по вертикали.
@@ -1253,14 +1856,17 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str) -> str:
     if not rows_src:
         return ""
     has_emp = any(r["emp"] for r in rows_src)
-    has_work = any(r["tasks"] for r in rows_src)
+    is_promise = kind == "promise"
+    has_work = is_promise or any(r["tasks"] for r in rows_src)
     tot = sum(r["kept"] for r in rows_src)
     rows = []
     for r in rows_src:
         when = ", ".join(r["months"][:3]) + (f" и ещё {len(r['months']) - 3}"
                                              if len(r["months"]) > 3 else "")
         work = ""
-        if has_work:
+        if is_promise:
+            work = _promise_cell(r, cur_label)
+        elif has_work:
             if r["worked"]:
                 work = (f'<span style="color:var(--good)">задача закрыта</span> · '
                         f'всего {r["tasks"]}, по оттоку {r["out_tasks"]}')
@@ -1289,7 +1895,7 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str) -> str:
     cols = [f"Организация · {unit}" + (" · ответственный" if has_emp else ""),
             "отток", "возврат", "потери", "период оттока"]
     if has_work:
-        cols.append("отработка")
+        cols.append("что обещали" if is_promise else "отработка")
     return (
         f'<h4 style="margin-top:22px">{C.esc(title)} — {len(rows)} клиентов на '
         f'{C.fmt_num(tot)} чел</h4>'
@@ -1328,6 +1934,19 @@ def _ai(text: str | None) -> str:
         return ""
     return C.card('<div class="ai-head">Вывод</div>'
                   + C.narrative_html(str(text)), cls="ai")
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Склонение существительного при числе: 21 организация, 22 организации,
+    25 организаций. Отчёт читает правление — «21 организаций» в нём быть не должно."""
+    a, b = abs(int(n)) % 100, abs(int(n)) % 10
+    if 10 < a < 20:
+        return many
+    if b == 1:
+        return one
+    if 1 < b < 5:
+        return few
+    return many
 
 
 def _col(exec_pct):

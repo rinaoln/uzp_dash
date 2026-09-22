@@ -114,13 +114,30 @@ def heat_bg(exec_pct: float | None) -> str:
     return f"color-mix(in srgb, var(--bad) {int(40 * (1 - x)) + 14}%, transparent)"
 
 
-def heat_matrix(rows_id_label: list[tuple], seg_names: list[str], cells: dict) -> str:
-    """Тепловая карта ГОСБ×сегмент.
-    rows_id_label — [(row_key, label), ...]; cells[(row_key, seg)] = (exec, nedobor)."""
-    head = '<th>ГОСБ</th>' + "".join(f'<th class="num">{esc(s)}</th>' for s in seg_names)
+def heat_matrix(rows_id_label: list[tuple], seg_names: list[str], cells: dict,
+                unit_head: str = "ГОСБ", ranks: dict | None = None,
+                cell_click: str = "") -> str:
+    """Тепловая карта единица×сегмент.
+
+    rows_id_label — [(row_key, label), ...]; cells[(row_key, seg)] = (exec, nedobor).
+
+    `ranks` — {row_key: (место, всего)}: колонка ранга ТБ в сети. Есть только там,
+    где единица строки — ТБ; у ГОСБ ранга в витрине нет, и колонка не рисуется.
+
+    `cell_click` — имя JS-функции, открывающей разбор ячейки. Задано — ячейка с
+    числом становится кнопкой и получает ключ «уровень|единица|сегмент».
+    """
+    rank_head = '<th class="num" title="место ТБ в сети по выполнению плана за ' \
+                'закрытый месяц">ранг</th>' if ranks else ""
+    head = (f'<th>{esc(unit_head)}</th>{rank_head}'
+            + "".join(f'<th class="num">{esc(s)}</th>' for s in seg_names))
     rows = []
     for key, label in rows_id_label:
         tds = [f'<td>{esc(label)}</td>']
+        if ranks:
+            rk = ranks.get(key)
+            tds.append(f'<td class="num rank">{rk[0]}<i>/{rk[1]}</i></td>' if rk
+                       else '<td class="num" style="color:var(--text-2)">—</td>')
         for s in seg_names:
             cell = cells.get((key, s))
             if not cell or cell[0] is None:
@@ -134,9 +151,26 @@ def heat_matrix(rows_id_label: list[tuple], seg_names: list[str], cells: dict) -
                 pct = (f"{math.floor(ex * 1000) / 10:.1f}%"
                        if (0.995 <= ex < 1) or (0.945 <= ex < 0.95)
                        else f"{ex*100:.0f}%")
+                # клик открывает состав ячейки; клавиатура работает наравне с мышью
+                # подсказка при наведении: «−5» у выполненного плана читалось бы
+                # как отклонение, хотя это перевыполнение
+                gap = (f"отклонение от плана −{ned:.0f} чел" if ned > 0.5
+                       else f"план выполняется с запасом {abs(ned):.0f} чел"
+                       if ned < -0.5 else "план выполняется")
+                if cell_click:
+                    ck = f"{key}|{s}"
+                    act = (f' role="button" tabindex="0" '
+                           f'onclick="{cell_click}(this)" '
+                           f'onkeydown="if(event.key===\'Enter\'||event.key===\' \')'
+                           f'{{event.preventDefault();{cell_click}(this);}}" '
+                           f'data-cell="{esc(ck)}"')
+                    cls = "num heat hit"
+                    hint = f"{gap} · клик — клиенты со снижением за год"
+                else:
+                    act, cls, hint = "", "num heat", gap
                 tds.append(
-                    f'<td class="num heat" style="background:{bg}" title="отклонение от плана {ned:.0f}">'
-                    f'{pct}</td>'
+                    f'<td class="{cls}" style="background:{bg}" '
+                    f'title="{esc(hint)}"{act}>{pct}</td>'
                 )
         rows.append(f'<tr>{"".join(tds)}</tr>')
     return (f'<div style="overflow-x:auto"><table class="matrix">'
@@ -484,6 +518,12 @@ def orgs_explorer(table_id: str, rows: list[dict], gosb_options: list[str],
     """Интерактивная таблица организаций: цель по плану + поиск + фильтры (ГОСБ,
     сегмент, рычаг) + пагинация. Самодостаточный инлайн-JS (работает офлайн).
 
+    ФИЛЬТРЫ ИЗМЕРЕНИЙ ЖИВУТ В ШАПКЕ ТАБЛИЦЫ, а не отдельной строкой над ней.
+    Раньше над таблицей стояли «Все ГОСБ», «Все сегменты», «Все рычаги», а прямо
+    под ними — колонки «ГОСБ», «Сегмент», «Рычаг»: два ряда подписей об одном и
+    том же. Теперь название колонки и есть подпись её фильтра. Наверху остаётся
+    только то, что колонкой не является: цель по плану, поиск и выгрузка.
+
     rows: [{inn, lever, gosb, seg, emp, fl, fot, reason, action, needk}, ...]
     emp — ФИО закреплённого за организацией сотрудника (пусто → прочерк).
     Фильтр «Цель»: needk — минимальная цель (1.0/1.2/1.5), при которой организация
@@ -503,21 +543,29 @@ def orgs_explorer(table_id: str, rows: list[dict], gosb_options: list[str],
     tid = esc(table_id)
     return f"""
 <div class="filters">
-  <select id="{tid}-k">
-    <option value="1">Выполнить план</option>
-    <option value="1.2">Перевыполнить на 20%</option>
-    <option value="1.5">Перевыполнить на 50%</option>
-    <option value="0">{esc(all_label)}</option>
-  </select>
+  <label class="flt-lab">Цель
+    <select id="{tid}-k">
+      <option value="1">Выполнить план</option>
+      <option value="1.2">Перевыполнить на 20%</option>
+      <option value="1.5">Перевыполнить на 50%</option>
+      <option value="0">{esc(all_label)}</option>
+    </select>
+  </label>
   <input id="{tid}-q" placeholder="Поиск: номер, название, ГОСБ, сотрудник, сегмент, причина…">
-  <select id="{tid}-g"><option value="">Все ГОСБ</option>{gopts}</select>
-  <select id="{tid}-s"><option value="">Все сегменты</option>{sopts}</select>
-  <select id="{tid}-l"><option value="">Все рычаги</option>
-    <option value="Привлечь">Привлечь</option><option value="Вернуть">Вернуть</option></select>
+  <span class="xls-slot" id="{tid}-xls"></span>
 </div>
-<div class="tbl-scroll"><table id="{tid}-t">
+<div class="tbl-scroll"><table id="{tid}-t" data-xls-into="{tid}-xls">
   <thead><tr>
-    <th>Организация</th><th>Рычаг</th><th>ГОСБ</th><th>Сотрудник</th><th>Сегмент</th>
+    <th>Организация</th>
+    <th class="flt-col">Рычаг<select class="tbl-flt" id="{tid}-l" aria-label="Фильтр по рычагу">
+      <option value="">все</option>
+      <option value="Привлечь">Привлечь</option>
+      <option value="Вернуть">Вернуть</option></select></th>
+    <th class="flt-col">ГОСБ<select class="tbl-flt" id="{tid}-g" aria-label="Фильтр по ГОСБ">
+      <option value="">все</option>{gopts}</select></th>
+    <th>Сотрудник</th>
+    <th class="flt-col">Сегмент<select class="tbl-flt" id="{tid}-s" aria-label="Фильтр по сегменту">
+      <option value="">все</option>{sopts}</select></th>
     <th class="num">Эффект, чел</th><th class="num">ФОТ, млн</th><th>Причина / действие</th>
   </tr></thead><tbody></tbody>
 </table></div>
@@ -562,6 +610,8 @@ def orgs_explorer(table_id: str, rows: list[dict], gosb_options: list[str],
         +'<td class="num">'+fmt(r.fl)+'</td><td class="num">'+fmt(r.fot)+'</td>'
         +'<td>'+esc(r.reason)+act+'</td></tr>';
     }}).join('')||'<tr><td colspan="8" style="color:var(--text-2)">Ничего не найдено</td></tr>';
+    /* какой фильтр включён, видно по самой шапке — не раскрывая список */
+    ['g','s','l'].forEach(k=>$(k).classList.toggle('on', !!$(k).value));
     const sumFl=rows.reduce((a,r)=>a+Number(r.fl||0),0);
     $('i').textContent='Показано '+slice.length+' из '+rows.length+' орг · суммарный эффект +'
       +fmt(sumFl)+' чел · стр. '+(page+1)+'/'+pages;
@@ -571,6 +621,18 @@ def orgs_explorer(table_id: str, rows: list[dict], gosb_options: list[str],
   ['k','q','g','s','l'].forEach(k=>$(k).addEventListener('input',()=>{{page=0;render();}}));
   $('p').addEventListener('click',()=>{{page--;render();}});
   $('n').addEventListener('click',()=>{{page++;render();}});
+  /* Выгрузка в Excel отдаёт ВСЕ отобранные строки, а не видимую страницу:
+     на экране их пятнадцать, а работать идут со всем списком фильтра. */
+  window.__xlsRows = window.__xlsRows || {{}};
+  window.__xlsRows["{tid}-t"] = function(){{
+    var out=[["Организация","Орг. N","Рычаг","ГОСБ","Сотрудник","Сегмент",
+              "Эффект, чел","ФОТ, млн","Причина","Действие"]];
+    filtered().forEach(function(r){{
+      out.push([r.company||('Орг. '+r.inn), r.inn, r.lever, r.gosb, r.emp||'',
+                r.seg, r.fl, r.fot, r.reason, r.action||'']);
+    }});
+    return out;
+  }};
   render();
 }})();
 </script>

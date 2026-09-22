@@ -20,7 +20,7 @@ import pandas as pd
 
 from ... import progress
 from ...db import read_sql
-from . import forecast, queries as Q, segments
+from . import forecast, queries as Q, segments, text_rules
 
 RUB_TO_MLN = 1e6
 PIPE_MONTHS = 12                 # закрытых месяцев сделок для коэффициента реализуемости
@@ -61,6 +61,12 @@ class Bank:
     fmonths: pd.DataFrame             # активности по месяцам (ГОСБ, ИНН, месяц)
     orgs_fc: pd.DataFrame             # отток и пайплайн на грейне (ГОСБ, ИНН)
     conv: dict                        # коэффициенты реализуемости трёх уровней
+    # организация -> сегмент. Сегмент приходит справочником клиентов и от
+    # подразделения не зависит, поэтому на уровне банка (где в кадре организаций
+    # колонки сегмента нет вовсе) он подтягивается по одной этой связи.
+    seg_by_inn: dict = field(default_factory=dict)
+    # (ГОСБ, организация) -> обещание вернуть получателей из задачи по оттоку
+    promises: pd.DataFrame = field(default_factory=pd.DataFrame)
     params: dict = field(default_factory=dict)     # параметры запуска (ctx.params)
     fc_stats: dict = field(default_factory=dict)   # диагностика оттока и пайплайна
 
@@ -158,12 +164,98 @@ def load(ctx) -> Bank:
     orgs = _outflow_worked(orgs, fmonths)
     orgs_fc = _outflow_worked(orgs_fc, fmonths)
     _log_outflow_worked(orgs)
+    promises = _outflow_promises(e, orgs_fc, d)
+
+    # связь «организация → сегмент» считается один раз на весь отчёт: её просит
+    # каждый уровень, а строк организаций на проме сотни тысяч
+    seg_by_inn = ({int(i): s for i, s in zip(orgs["inn"], orgs["seg_name"])}
+                  if not orgs.empty and "seg_name" in orgs else {})
 
     return Bank(dates=d, tbs=tbs, apparat=apparat, tb_of=tb_of, gosb_name=gosb_name,
                 verdict=verdict, trend=trend, unit_seg=unit_seg, unit_tot=unit_tot,
                 orgs=orgs, orgs_tb=orgs_tb, fagg=fagg, act_tot=act_tot, act_brk=act_brk,
-                fmonths=fmonths, orgs_fc=orgs_fc, conv=conv,
+                fmonths=fmonths, orgs_fc=orgs_fc, conv=conv, seg_by_inn=seg_by_inn,
+                promises=promises,
                 params=dict(ctx.params or {}), fc_stats=stats)
+
+
+def _outflow_promises(engine, orgs_fc: pd.DataFrame, d: dict) -> pd.DataFrame:
+    """Обещания вернуть получателей — по организациям, у которых отток случился.
+
+    Раздел «Отток» делит потери на две группы, и первая из них («обещали вернуться,
+    но не вернулись») держится на этом кадре. Обещание — не отдельное поле витрины:
+    оно лежит в тексте задачи по оттоку, в чек-листе или в комментарии сотрудника.
+    Разбирает текст `text_rules.promised_return`, здесь только запрос и свёртка.
+
+    Грейн результата — (ГОСБ, организация): по одной паре задач за окно бывает
+    несколько, и обещания в них разные. Берём самое СИЛЬНОЕ: числовое обещание
+    важнее ответа «да», чек-лист важнее свободного комментария, а из месяцев —
+    самый поздний названный срок.
+    """
+    if orgs_fc is None or orgs_fc.empty or "out_kept" not in orgs_fc:
+        return pd.DataFrame()
+    kept = forecast.num(orgs_fc, "out_kept")
+    inns = sorted({int(x) for x in orgs_fc.loc[kept > 0, "inn"].dropna()})
+    if not inns:
+        return pd.DataFrame()
+    df = read_sql(engine, Q.OUTFLOW_TASK_TEXT,
+                  {"inns": inns, "out_from": d["out_from"],
+                   "ref_funnel": d["ref_funnel"]})
+    if df.empty:
+        progress.done("Задач по оттоку с текстом за окно ухода не нашлось — группа "
+                      "«обещали вернуться» в разделе «Отток» будет пустой")
+        return pd.DataFrame()
+    ref = (pd.Timestamp(d["ref_cur"]).year, pd.Timestamp(d["ref_cur"]).month)
+    best: dict = {}
+    for r in df.dropna(subset=["new_gosb_id"]).itertuples():
+        p = text_rules.promised_return(getattr(r, "task_questionnaire", None),
+                                       getattr(r, "task_comment", None), ref)
+        if not p:
+            continue
+        k = (int(r.new_gosb_id), int(r.inn))
+        qty = p.get("qty")
+        # сила обещания: названное число важнее ответа «да», чек-лист важнее
+        # свободного комментария
+        rank = (2 if qty else 1, 2 if "чек-лист" in p["source"] else 1)
+        cur = best.get(k)
+        if cur is None:
+            best[k] = {"rank": rank, "qty": qty, "month": p.get("month", ""),
+                       "src": p["source"], "n": 1}
+            continue
+        cur["n"] += 1
+        # срок берём самый поздний из всех задач пары, даже если сама задача слабее
+        cur["month"] = _later_month(cur["month"], p.get("month", ""))
+        if rank > cur["rank"]:
+            cur["rank"], cur["qty"], cur["src"] = rank, qty, p["source"]
+        elif qty and (cur["qty"] or 0) < qty:
+            cur["qty"] = qty
+    if not best:
+        progress.done(f"Обещаний вернуть получателей в задачах по оттоку не найдено "
+                      f"({len(df)} задач с текстом) — группа «обещали вернуться» пуста")
+        return pd.DataFrame()
+    out = pd.DataFrame([{"new_gosb_id": k[0], "inn": k[1], "promise_qty": v["qty"],
+                         "promise_month": v["month"], "promise_src": v["src"],
+                         "promise_tasks": v["n"]} for k, v in best.items()])
+    with_qty = int(out["promise_qty"].notna().sum())
+    progress.done(f"Обещания вернуть получателей: {len(out)} пар (ГОСБ, организация) "
+                  f"из {len(df)} задач по оттоку с текстом · с названным числом "
+                  f"получателей — {with_qty} · остальные обещали возврат без цифры")
+    return out
+
+
+def _later_month(a: str, b: str) -> str:
+    """Из двух месяцев «MM.YYYY» — более поздний (пустые строки игнорируются)."""
+    def key(m):
+        try:
+            mm, yy = str(m).split(".")
+            return (int(yy), int(mm))
+        except (ValueError, AttributeError):
+            return (0, 0)
+    if not a:
+        return b or ""
+    if not b:
+        return a
+    return a if key(a) >= key(b) else b
 
 
 def audit_texts(engine, b: Bank, inns: list) -> pd.DataFrame:
@@ -230,6 +322,10 @@ def dates(engine, params: dict) -> dict:
     # ТРИ ЗАКРЫТЫХ МЕСЯЦА под фактический отток: T-1, T-2, T-3. Текущий сюда не
     # входит намеренно — он не закрыт, и отток по нему был бы неполным.
     out_months = [(p_closed - k).to_timestamp("M").date() for k in range(OUT_MONTHS)]
+    # начало САМОГО РАННЕГО месяца оттока: от него ищем задачи по оттоку с текстом
+    # (обещание вернуть получателей). Задачу заводят в месяц ухода или следующим
+    # отчётным, поэтому окно тянется до конца прогнозного месяца.
+    out_from = (p_closed - (OUT_MONTHS - 1)).to_timestamp().date()
     # окно помесячных активностей под вопрос «отрабатывали ли отток тогда»: та же
     # глубина, что у годового тренда портфеля, плюс ещё один месяц вперёд — задачу
     # на отток заводят и в СЛЕДУЮЩЕМ отчётном месяце
@@ -273,6 +369,7 @@ def dates(engine, params: dict) -> dict:
             "fresh_from": fresh_from, "plan_from": plan_from,
             "months_from": months_from, "trend_from": trend_from,
             "out_months": out_months, "out_label": out_lbl,
+            "out_from": out_from,
             "m_out1": out_months[0], "m_out2": out_months[1], "m_out3": out_months[2],
             "cur_month": int(cur.month),
             "today": today, "days_left": int(days_left),

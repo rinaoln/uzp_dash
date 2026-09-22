@@ -17,7 +17,7 @@ def sanitize(text: str) -> str:
 
 
 def page(title: str, subtitle: str, body: str, footer: str = "",
-         css: str | None = None, tail: str = "") -> str:
+         css: str | None = None, tail: str = "", meta: str = "") -> str:
     """Каркас страницы.
 
     `css` — свой стиль вместо общего `BASE_CSS`: у tb_health он свой, собранный
@@ -25,8 +25,12 @@ def page(title: str, subtitle: str, body: str, footer: str = "",
     `tail` — разметка ПОСЛЕ `.wrap`, прямо перед `</body>`. Туда встаёт скрипт, который
     перестраивает страницу (он двигает содержимое `.wrap` и сам в нём жить не должен),
     и всплывающая памятка.
+    `meta` — служебная строка под подзаголовком: на какой месяц отчёт и когда
+    обновлён. Отдельной строкой, а не внутри подзаголовка: подзаголовок — часть
+    названия отчёта и меняться от сборки к сборке не должен.
     """
     footer_html = f'<div class="footer">{footer}</div>' if footer else ""
+    meta_html = f'<div class="rep-meta">{meta}</div>' if meta else ""
     html = f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -41,6 +45,7 @@ def page(title: str, subtitle: str, body: str, footer: str = "",
 <div class="eyebrow">УЗП · Дэшборд</div>
 <h1>{title}</h1>
 <p class="sub">{subtitle}</p>
+{meta_html}
 </header>
 {body}
 {footer_html}

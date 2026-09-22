@@ -530,6 +530,37 @@ WHERE f.inn = ANY(:inns)
 ORDER BY f.inn, g.new_gosb_id, f.last_active_dttm DESC NULLS LAST
 """
 
+# Задачи ПО ОТТОКУ с текстом — по организациям, у которых отток уже случился.
+#
+# Нужны разделу «Отток»: он делит потери на две группы — «обещали вернуться, но не
+# вернулись» и «отработали, но без результата», — а обещание возврата живёт ТОЛЬКО
+# в тексте задачи. В чек-листе задачи типа «Отток» для него есть отдельные пункты
+# («Ожидаемый возврат получателей», «Ожидаемый месяц возврата»), а в свободном
+# комментарии оно встречается формулировкой («сотрудники вернутся в августе»).
+# Разбор текста — в text_rules.promised_return: правила должны быть видны глазами,
+# а не спрятаны в SQL.
+#
+# ОТБОР УЗКИЙ, и это принципиально: воронка — самая большая таблица профиля
+# (~12 млн строк). Берём только задачи типа «Отток», только по организациям с
+# фактическим оттоком (:inns) и только за окно самого оттока плюс текущий месяц:
+# задачу на уход заводят в месяц ухода или следующим отчётным.
+OUTFLOW_TASK_TEXT = """
+WITH gmap AS (""" + _GMAP + """)
+SELECT g.new_gosb_id, f.tb_id, f.inn, f.task_create_dt,
+       f.is_task_closed_success, f.task_text_status,
+       f.task_questionnaire, f.task_comment
+FROM {schema}.uzp_dwh_sale_funnel_task f
+LEFT JOIN gmap g ON g.old_gosb_id = f.gosb_id
+WHERE f.inn = ANY(:inns)
+  AND f.task_type = 'Отток'
+  AND f.task_create_dt >= CAST(:out_from AS date)
+  AND f.task_create_dt <= CAST(:ref_funnel AS date)
+  AND (COALESCE(btrim(f.task_questionnaire), '') <> ''
+       OR COALESCE(btrim(f.task_comment), '') <> '')
+ORDER BY f.inn, g.new_gosb_id, f.task_create_dt
+"""
+
+
 # ==================== Отток и пайплайн ===================================== #
 
 # ФАКТИЧЕСКИЙ отток, который НЕ ВЕРНУЛСЯ, за три ЗАКРЫТЫХ месяца (T-1, T-2, T-3).

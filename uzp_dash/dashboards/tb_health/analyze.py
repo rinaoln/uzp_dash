@@ -53,6 +53,18 @@ MIN_SEG_GAP = 1.0
 OUTFLOW_TOP_N = 25
 # Сколько клиентов показывать в каждой из двух групп раздела «Отток».
 TOP_CLIENTS = 15
+# Сколько организаций показывать в раскрытой ячейке матрицы (единица × сегмент).
+CELL_TOP_N = 10
+
+
+def _ru_key(name) -> str:
+    """Ключ сортировки по алфавиту для русских названий.
+
+    Порядок в отчёте — алфавитный, и считается он по строке как есть, без учёта
+    регистра. «ё» приравнивается к «е»: в Юникоде она стоит ПОСЛЕ «я», и ГОСБ на
+    «Ё» уезжал бы в самый конец списка.
+    """
+    return str(name or "").strip().lower().replace("ё", "е")
 
 
 def _failing_seg(nedobor) -> bool:
@@ -95,6 +107,11 @@ class Analysis:
     unit_label: str = "ГОСБ"
     unit_src: str = "new_gosb_id"     # колонка грейна организаций = единица разбора
     gosb_cards: list = field(default_factory=list)   # карточки единиц уровня
+    # (единица, сегмент) -> организации со снижением по ФЛ год к году: то, что
+    # открывается кликом по ячейке матрицы
+    cell_top: dict = field(default_factory=dict)
+    ranks: dict = field(default_factory=dict)        # единица -> (ранг, всего ТБ)
+    wow: dict = field(default_factory=dict)          # динамика к прошлой сборке
     # Рабочие кадры уровня. Живут в объекте, потому что уровень собирается в два
     # шага: `prepare` (без БД и LLM) и `finish` (разбор текста) — между ними одним
     # запросом читаются тексты воронки сразу по всем уровням.
@@ -206,6 +223,10 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
     # единой зафиксированной причины
     a.insights = _insights_by_tb(per_tb, b.tb_of)
     a.trend = _trend_rows(b.trend, "sb")
+    # Ранги ТБ — в матрицу выполнения: место банка в сети живёт в витрине рядом с
+    # планом и фактом (окно rank() в METRICS_VERDICT) и считается по ЗАКРЫТОМУ
+    # месяцу. Своего ранга у ГОСБ нет, поэтому на уровне ТБ колонки ранга тоже нет.
+    a.ranks = _tb_ranks(b.verdict, d["ref_closed"])
 
     progress.step("Уровень СБ: карточки ТБ + детализация прогноза")
     a.gosb_cards = _unit_cards(a.gosb_gap, a.matrix, pd.DataFrame(), pd.DataFrame(),
@@ -221,7 +242,7 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
                                  fc_stats["conv_by_gosb"], d,
                                  unit_src="tb_id", unit_label="ТБ",
                                  funnel_months=b.fmonths, trend=b.trend)
-    a.outflow = _outflow_top(a, b.fmonths)
+    a.outflow = _outflow_top(a, b.fmonths, b.promises, b.tb_of)
     _log_outflow_section(a)
     return a
 
@@ -292,7 +313,7 @@ def finish(ctx, b: Bank, a: Analysis, text_df) -> Analysis:
                                  a.fc_stats.get("conv", {}),
                                  a.fc_stats.get("conv_by_gosb", {}), d,
                                  funnel_months=fmonths, trend=b.trend)
-    a.outflow = _outflow_top(a, fmonths)
+    a.outflow = _outflow_top(a, fmonths, b.promises, b.tb_of)
     _log_outflow_section(a)
     n_named = sum(sum(len(g["rows"]) for g in v["out_groups"]) + len(v["top_pipe"])
                   for v in a.gosb_detail.values())
@@ -366,7 +387,59 @@ def _assemble(b: Bank, tb_short: str, tb_id: int, tb_full: str, ref_date: str,
         level=level, unit_label=unit_label, unit_src=unit_src,
     )
     a.orgs, a.orgs_fc, a.detail, a.seg_gaps = orgs, orgs_fc, detail, seg_gaps
+    a.cell_top = _cell_top(detail, unit_src, b.seg_by_inn)
     return a
+
+
+def _cell_top(detail: pd.DataFrame, unit_src: str, seg_by_inn: dict,
+              top_n: int = CELL_TOP_N) -> dict:
+    """Организации со снижением по ФЛ год к году в каждой ячейке (единица × сегмент).
+
+    Это содержимое раскрытой ячейки матрицы: ячейка говорит, что сегмент не
+    дотягивает, а список — у кого именно за год стало меньше получателей.
+
+    Источник тот же, что и у блока «Портфель год к году» в карточке единицы, —
+    справочник организаций на грейне ЕДИНИЦЫ уровня (у ТБ это (ГОСБ, организация),
+    у банка (ТБ, организация)), поэтому числа двух мест отчёта сходятся между собой.
+    Берутся только снижения: ячейка отвечает на вопрос «где потеряли», и выросшие
+    организации ответа на него не содержат.
+
+    Сегмент — свойство САМОЙ ОРГАНИЗАЦИИ (из справочника клиентов), а не пары с
+    подразделением: на уровне банка в кадре его нет вовсе, и он подтягивается по
+    организации. Поэтому организация всегда попадает ровно в одну ячейку строки.
+    """
+    out: dict = {}
+    if detail is None or detail.empty:
+        return out
+    src = unit_src if unit_src in detail else "new_gosb_id"
+    if src not in detail or "fl_yoy" not in detail:
+        return out
+    has_seg = "seg_name" in detail
+    has_emp = "emp_fio" in detail
+    for r in detail.dropna(subset=[src]).itertuples():
+        yoy = float(getattr(r, "fl_yoy", 0) or 0)
+        # порог в одного человека: −0.4 чел — это округление витрины, а не потеря
+        if yoy > -1:
+            continue
+        inn = int(r.inn)
+        seg = (getattr(r, "seg_name", None) if has_seg else None) \
+            or seg_by_inn.get(inn) or "—"
+        key = (int(getattr(r, src)), str(seg))
+        cur = float(getattr(r, "current_fl_qty", 0) or 0)
+        cell = out.setdefault(key, {"n": 0, "fl": 0.0, "rows": []})
+        cell["n"] += 1
+        cell["fl"] += -yoy
+        cell["rows"].append({
+            "inn": inn,
+            "name": str(getattr(r, "company_name", "") or "").strip() or f"Орг. {inn}",
+            "emp": (str(getattr(r, "emp_fio", "") or "").strip() if has_emp else ""),
+            "yoy": yoy, "cur": cur, "was": cur - yoy,
+        })
+    for cell in out.values():
+        cell["rows"].sort(key=lambda x: x["yoy"])
+        cell["rows"] = cell["rows"][:top_n]
+        cell["top_fl"] = float(sum(-x["yoy"] for x in cell["rows"]))
+    return out
 
 
 def _units(df: pd.DataFrame, end_dt, apparat: set, tb_id: int,
@@ -417,6 +490,21 @@ def _insights_by_tb(per_tb: list, tb_of: dict) -> dict:
             if key not in out or (v.get("reason") and not out[key].get("reason")):
                 out[key] = v
     return out
+
+
+def _tb_ranks(v: pd.DataFrame, end_dt) -> dict:
+    """Ранг каждого ТБ по выполнению плана за закрытый месяц: tb_id -> (ранг, всего).
+
+    Берётся готовым из витрины (окно rank() в METRICS_VERDICT) — тем же числом,
+    что стоит в плашке прогноза строкой «ранг ТБ N из M». Считать его заново по
+    своим цифрам нельзя: сравнение ТБ между собой — величина витрины, а не наша.
+    """
+    if v is None or v.empty:
+        return {}
+    sub = v[(v["level_name"] == "tb") & (v["end_dt"] == end_dt)
+            & (v["metric_id"] == Q.METRIC_RECIPIENTS)]
+    return {int(r.level_id): (int(r.rnk), int(r.n_tb))
+            for r in sub.itertuples() if pd.notna(r.rnk)}
 
 
 def _verdict(v: pd.DataFrame, level: str, end_dt, level_id: int | None = None
@@ -1559,13 +1647,61 @@ def _log_outflow_section(a: "Analysis") -> None:
         f"(ушло {o['tot_gone']:.0f}, вернулось {o['tot_ret']:.0f}) · "
         f"в разделе показаны {o['n_shown']} крупнейших на {o['top_kept']:.0f} чел")
     progress.done(
-        f"Отработка оттока: успешно закрытая задача есть у {o['n_worked']} орг "
-        f"({o['kept_worked']:.0f} чел) · ни одной задачи у {o['n_silent']} "
-        f"({o['kept_silent']:.0f} чел) · месяц ухода вне окна воронки у "
-        f"{o['n_unknown']} — по ним отработка неизвестна")
+        f"Группы раздела: обещали вернуться, но не вернулись — {o['n_promised']} орг "
+        f"({o['kept_promised']:.0f} чел) · отработали без результата — "
+        f"{o['n_worked']} орг ({o['kept_worked']:.0f} чел) · месяц ухода вне окна "
+        f"воронки у {o['n_unknown']} — по ним отработка неизвестна")
+
+
+def _promise_index(promises: pd.DataFrame | None, unit_src: str,
+                   tb_of: dict | None = None) -> dict:
+    """Обещания вернуть получателей на грейне ЕДИНИЦЫ уровня: (единица, орг) -> …
+
+    Кадр приходит на грейне (ГОСБ, организация) — там же, где живёт работа с
+    клиентом. На уровне банка единица разбора ТБ, и обещания его ГОСБ по одной
+    организации складываются: строка оттока там тоже свёрнута по ТБ, и обещание
+    должно сравниваться с тем же объёмом.
+    """
+    if promises is None or promises.empty:
+        return {}
+    out: dict = {}
+    for r in promises.itertuples():
+        gid = int(r.new_gosb_id)
+        uid = gid if unit_src == "new_gosb_id" else (tb_of or {}).get(gid)
+        if uid is None:
+            continue
+        qty = float(r.promise_qty) if pd.notna(r.promise_qty) else None
+        k = (int(uid), int(r.inn))
+        cur = out.get(k)
+        if cur is None:
+            out[k] = {"qty": qty, "month": str(r.promise_month or ""),
+                      "src": str(r.promise_src or "")}
+            continue
+        if qty is not None:
+            cur["qty"] = (cur["qty"] or 0) + qty
+        cur["month"] = _later_ym(cur["month"], str(r.promise_month or ""))
+        if "чек-лист" in str(r.promise_src or ""):
+            cur["src"] = str(r.promise_src)
+    return out
+
+
+def _later_ym(a: str, b: str) -> str:
+    """Более поздний месяц «MM.YYYY» из двух (пустые игнорируются)."""
+    def key(m):
+        try:
+            mm, yy = str(m).split(".")
+            return (int(yy), int(mm))
+        except (ValueError, AttributeError):
+            return (0, 0)
+    if not a:
+        return b or ""
+    if not b:
+        return a
+    return a if key(a) >= key(b) else b
 
 
 def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
+                 promises: pd.DataFrame | None = None, tb_of: dict | None = None,
                  top_n: int = OUTFLOW_TOP_N) -> dict:
     """Крупнейшие оттоки уровня и что по ним делали.
 
@@ -1606,6 +1742,7 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
             names[k] = str(getattr(r, "company_name", "") or "") or f"Орг. {int(r.inn)}"
             emp_of[k] = str(getattr(r, "emp_fio", "") or "").strip()
     fidx, fwindow = month_index(funnel_months, src)
+    pidx = _promise_index(promises, src, tb_of)
 
     rows = []
     # Свёртка до грейна ЕДИНИЦЫ уровня обязательна перед ранжированием. Прогноз лежит
@@ -1648,28 +1785,50 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
                 # «данных нет» и «задач не было» — разные утверждения, и путать их нельзя
                 "known": known,
                 "reason": ins.get("reason", ""), "action": ins.get("action", ""),
+                # обещание вернуть получателей из задачи по оттоку (или None)
+                "promise": pidx.get(k),
             })
     rows.sort(key=lambda x: x["kept"], reverse=True)
     top = rows[:top_n]
-    # Две группы раздела. Деление идёт по тому, была ли по организации хоть какая-то
-    # работа: в первой отработка велась и возврата не дала, во второй следов работы
-    # в воронке нет. Организации с незакрытой задачей относим к первой — работа по
-    # ним шла, результата не случилось, и это тот же разговор.
-    worked = [r for r in rows if r["tasks"]]
-    silent = [r for r in rows if r["known"] and not r["tasks"]]
+    # ДВЕ ГРУППЫ РАЗДЕЛА. Обе про один и тот же факт — люди ушли и не вернулись, —
+    # но отвечают на разные вопросы руководителя.
+    #
+    #   «Обещали вернуться» — в задаче по оттоку зафиксировано обещание возврата
+    #   (чек-лист или прямая формулировка в комментарии), а по витрине возвратов
+    #   вернулось меньше обещанного. Это невыполненная договорённость: есть с кого
+    #   и за что спросить, и есть к кому вернуться в разговоре.
+    #
+    #   «Отработали, но без результата» — по клиенту ЕСТЬ ЗАДАЧИ в месяц ухода или
+    #   следующий за ним, обещания возврата нет, и не вернулся никто. Здесь вопрос
+    #   не к исполнению договорённости, а к самому подходу.
+    #
+    # Считаются задачи ЛЮБОГО типа, но только в месяцы ухода: контакт с клиентом
+    # ровно тогда, когда люди уходили, — это и есть работа по оттоку, даже если
+    # задача заведена как контактная. Сколько из задач типа «Отток», видно в строке
+    # таблицы, и по ней же понятно, закрыта работа или ещё идёт.
+    # Организации с частичным возвратом во вторую группу не попадают: результат там
+    # всё-таки есть, и «без результата» было бы неправдой.
+    for r in rows:
+        p = r.get("promise") or {}
+        qty = p.get("qty")
+        r["promise_broken"] = bool(p) and (
+            (r["ret"] + 0.5 < qty) if qty else r["ret"] <= 0)
+    promised = [r for r in rows if r["promise_broken"]]
+    worked = [r for r in rows
+              if not r["promise_broken"] and r["tasks"] and r["ret"] <= 0]
     return {
         "rows": top,
+        "top_promised": promised[:TOP_CLIENTS],
         "top_worked": worked[:TOP_CLIENTS],
-        "top_silent": silent[:TOP_CLIENTS],
         "n_all": len(rows), "n_shown": len(top),
         "tot_gone": sum(r["gone"] for r in rows),
         "tot_ret": sum(r["ret"] for r in rows),
         "tot_kept": sum(r["kept"] for r in rows),
         "top_kept": sum(r["kept"] for r in top),
+        "n_promised": len(promised),
+        "kept_promised": sum(r["kept"] for r in promised),
         "n_worked": len(worked),
         "kept_worked": sum(r["kept"] for r in worked),
-        "n_silent": len(silent),
-        "kept_silent": sum(r["kept"] for r in silent),
         "n_unknown": sum(1 for r in rows if not r["known"]),
     }
 
@@ -1849,11 +2008,16 @@ def _unit_cards(gosb_gap: pd.DataFrame, matrix: pd.DataFrame, to_work: pd.DataFr
                             "success": float(g.n_success.sum() / n_tasks) if n_tasks else 0.0,
                             "worked_orgs": int(g.inn.nunique())}
     # Карточки строим по ВСЕМ единицам, включая выполняющие план: управляющему нужно
-    # видеть и за счёт чего план вытягивается, а не только где провал. Сортировка по
-    # недобору оставляет проблемные сверху.
+    # видеть и за счёт чего план вытягивается, а не только где провал.
+    #
+    # Порядок — АЛФАВИТНЫЙ, как и везде в отчёте. Раньше карточки шли по величине
+    # отклонения, и найти нужный ГОСБ в списке из пятнадцати можно было только
+    # поиском: у читателя в голове алфавит, а не рейтинг. Кто именно не дотягивает,
+    # отвечают цвет карточки и раздел «ТОП по невыполнению» — он ранжированный.
     is_fail = (matrix["is_failing"] if "is_failing" in matrix
                else matrix["nedobor"] > 0)
-    order = gosb_gap.sort_values("nedobor", ascending=False)
+    order = (gosb_gap.assign(_ord=[_ru_key(x) for x in gosb_gap["unit_name"]])
+             .sort_values("_ord", kind="stable"))
 
     cards = []
     for r in order.itertuples():
