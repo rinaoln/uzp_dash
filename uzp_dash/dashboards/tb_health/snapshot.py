@@ -40,6 +40,11 @@ def save(output_dir, ref_cur: str, levels: list) -> Path | None:
     data = {
         "built_at": datetime.now().isoformat(timespec="seconds"),
         "ref_cur": str(ref_cur),
+        # ЧТО ИМЕННО ЛЕЖИТ В СНИМКЕ. Сравнение неделя к неделе идёт по ПРОГНОЗУ:
+        # и в этой сборке, и в базовой берётся prediction_amt витрины на один и
+        # тот же месяц. Факт закрытого месяца в снимок не попадает намеренно — он
+        # за неделю не меняется, и дельта по нему всегда была бы нулевой.
+        "source": "uzp_dwh_metrics.prediction_amt",
         "levels": {str(a.tb_id): _level_snap(a) for a in levels},
     }
     d = _dir(output_dir)
@@ -72,8 +77,15 @@ def _level_snap(a) -> dict:
 
 
 def _mk(v: dict) -> dict:
+    """Числа уровня для снимка.
+
+    `fact` в вердикте уровня — это ПРОГНОЗ витрины на отчётный месяц (см.
+    analyze._portfolio: verdict["rcp"]["fact"] = prediction_amt), поэтому в
+    снимке оно и называется `fc`. Ключ `src` пишется рядом со значением, чтобы
+    происхождение числа было видно в самом файле снимка.
+    """
     return {"fc": float(v.get("fact") or 0), "plan": float(v.get("plan") or 0),
-            "exec": float(v.get("exec") or 0)}
+            "exec": float(v.get("exec") or 0), "src": "prediction_amt"}
 
 
 def _rotate(d: Path) -> None:
@@ -142,6 +154,10 @@ def compare(base: dict | None, a) -> dict:
     built = base["_built"] if isinstance(base.get("_built"), datetime) else None
     out = {
         "label": f"{built:%d.%m}" if built else "",
+        # абсолютные числа базовой сборки — чтобы дельту можно было проверить,
+        # не открывая снимок: они уходят в подсказку строки динамики
+        "was": {"rcp": float((lvl.get("rcp") or {}).get("fc") or 0),
+                "fot": float((lvl.get("fot") or {}).get("fc") or 0)},
         "full": f"{built:%d.%m.%Y}" if built else "",
         "days": (max(0, int((datetime.now() - built).total_seconds() // 86400))
                  if built else None),
@@ -155,6 +171,7 @@ def compare(base: dict | None, a) -> dict:
         if not was:
             continue
         out["units"][c["gosb_id"]] = {
+            "was": float(was.get("fc") or 0),
             "fc": float(c["forecast"]) - float(was.get("fc") or 0),
             "plan": float(c["plan"]) - float(was.get("plan") or 0),
             "exec": float(c["exec"] or 0) - float(was.get("exec") or 0),

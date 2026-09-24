@@ -4,10 +4,11 @@
 есть только за закрытый месяц, а управляющему нужно понимать, выполняется ли план
 СЕЙЧАС, пока на него ещё можно повлиять.
 
-    прогноз = факт закрытого месяца − ожидаемый отток + приход из пайплайна
-
-Математика прогноза вынесена в forecast.py; здесь она сшивается с планом текущего
-месяца, разрывом по (ГОСБ, сегмент) и списком организаций к работе.
+Прогноз приходит из витрины метрик готовым (prediction_amt); здесь он сшивается
+с планом текущего месяца, разрывом по (ГОСБ, сегмент) и списком организаций к
+работе. Фактический отток и приход по сделкам считает forecast.py: в отчёте
+приход по сделкам не показывается, но в отборе организаций он вычитается из
+потенциала привлечения.
 
 Грейн работы с клиентом — (ГОСБ, ИНН): одна организация может обслуживаться в
 нескольких ГОСБ, и в каждом своя история отработки. Все агрегаты воронки считаются
@@ -315,7 +316,7 @@ def finish(ctx, b: Bank, a: Analysis, text_df) -> Analysis:
                                  funnel_months=fmonths, trend=b.trend)
     a.outflow = _outflow_top(a, fmonths, b.promises, b.tb_of)
     _log_outflow_section(a)
-    n_named = sum(sum(len(g["rows"]) for g in v["out_groups"]) + len(v["top_pipe"])
+    n_named = sum(sum(len(g["rows"]) for g in v["out_groups"])
                   for v in a.gosb_detail.values())
     n_grp = sum(len(v["out_groups"]) for v in a.gosb_detail.values())
     progress.done(f"Карточек ГОСБ: {len(a.gosb_cards)} (все, включая выполняющие план) · "
@@ -695,7 +696,8 @@ def _portfolio(closed: dict, plan_cur: dict, orgs_fc: pd.DataFrame, d: dict) -> 
     ЭТО НЕ ФОРМУЛА. Раньше здесь был водопад, где база минус отток плюс пайплайн
     обязаны были дать прогноз, и сходимость проверялась в ноль. Теперь прогноз
     приходит из витрины и с этими слагаемыми арифметически не связан: перед
-    управляющим три независимых факта — что есть, что потеряли и что ждём.
+    управляющим независимые факты — что есть и что потеряли (приход по сделкам из
+    отчёта убран, в расчёте отбора он остался).
 
     Складывать их обратно в прогноз нельзя: витрина считает его своей моделью, и
     подогнанное равенство было бы выдумкой.
@@ -975,8 +977,6 @@ def _facts(r) -> dict:
     `out_returned` — сколько вернулось, `out_kept` — сколько потеряли насовсем.
     Разделение существенно: организация, откуда ушли и вернулись, отработана, а
     ровно та же цифра ухода без возврата означает потерю.
-    `pipe_np_cur` снимает ложное «нужна активность»: организация с планом на текущий
-    месяц уже в работе.
     """
     return {
         "potential": int(getattr(r, "emp_potential_qty", 0) or 0),
@@ -991,7 +991,6 @@ def _facts(r) -> dict:
         "out_tasks": int(getattr(r, "out_tasks", 0) or 0),
         "out_tasks_outflow": int(getattr(r, "out_tasks_outflow", 0) or 0),
         "out_worked": bool(getattr(r, "out_worked", False)),
-        "pipe_np_cur": float(getattr(r, "pipe_np_raw", 0) or 0),
         "lever": str(getattr(r, "lever", "") or ""),
         "deal_expected": bool(getattr(r, "deal_expected", False)),
         "plan_deal_old": int(getattr(r, "plan_deal_old", 0) or 0),
@@ -1400,9 +1399,12 @@ def _material(rows: list, key: str, cap: int = DETAIL_MAX_ROWS,
 def _portfolio_unit(t, g: pd.DataFrame) -> dict:
     """Числа блока «Управление портфелем» для ОДНОЙ единицы разбора.
 
-    Портфель, план и прогноз — из строки витрины по этой единице (`t`), отток и
-    пайплайн — свёртка её организаций (`g`). Формулы, связывающей их, нет: см.
-    `_portfolio`.
+    Портфель, план и прогноз — из строки витрины по этой единице (`t`), отток —
+    свёртка её организаций (`g`). Формулы, связывающей их, нет: см. `_portfolio`.
+
+    Приход по сделкам (pipe_*) здесь по-прежнему считается: в отчёте его больше
+    нет, но отбор организаций вычитает его из потенциала привлечения, чтобы не
+    посчитать одних и тех же людей дважды.
     """
     num = forecast.num
     pipe = float(num(g, "pipe_np").sum())
@@ -1927,9 +1929,9 @@ def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
     организаций, по которой они группируются.
 
     Отвечает на вопрос «что с портфелем»: числа этой единицы, затем отток по
-    причинам (см. `_out_groups`), крупнейшие организации в пайплайне и тренд портфеля
-    год к году. Отток покрыт группами целиком; в пайплайне именами объясняется только
-    материальная часть (см. `_material`), поэтому там показывается покрытие.
+    причинам (см. `_out_groups`) и тренд портфеля год к году. Отток покрыт
+    группами целиком; в годовом тренде именами объясняется только материальная
+    часть (см. `_material`), поэтому там показывается покрытие.
     У строки остаётся признак `zone` (можно работать / влиять
     нечем / вне эталонной базы) — он помечает организации, которые в список к работе не
     попадут, чтобы их не пытались распределять.
@@ -1986,7 +1988,7 @@ def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
     totals = {int(r.unit_id): r for r in gosb_gap.itertuples()}
     fmonths, fwindow = month_index(funnel_months, unit_src)
     # строки блоков собираются на грейне ЕДИНИЦЫ, а суммы портфеля — по сырым
-    # строкам оттока и пайплайна
+    # строкам оттока
     by_unit = {int(k): v for k, v in _unit_grain(orgs_fc, unit_src)}
 
     skipped_no_base, group_mismatch = [], []
@@ -2009,11 +2011,10 @@ def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
                 "inn": int(r.inn), "name": names.get(k, f"Орг. {int(r.inn)}"),
                 # ФИО закреплённого сотрудника: тем же ключом, что и у годового
                 # тренда. Показывать его или нет, решает уже view — этими строками
-                # живут ДВА блока (отток и пайплайн), а подпись нужна одному
+                # живут ДВА блока (отток и годовой тренд), а подпись нужна одному
                 "emp": emp_of.get(k, ""),
                 "out": float(r.out_kept), "ret": float(r.ret_qty),
                 "gone": float(r.out_qty),
-                "pipe": float(r.pipe_np_raw), "pipe_adj": float(r.pipe_np),
                 "action": ins.get("action", ""),
                 "yoy": yoy.get(k, 0.0), "cur": cur.get(k, 0.0),
                 "months": list(getattr(r, "out_months", None) or []),
@@ -2028,7 +2029,6 @@ def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
         # порог > 0, а не >= 1: организации с долей человека тоже должны попасть
         # в хвост, иначе «названные + хвост» не сойдутся с итогом блока
         out_rows = [r for r in rows if r["out"] > 0]
-        pipe_rows = [r for r in rows if r["pipe"] > 0]
         out_groups = _out_groups(out_rows, (dates or {}).get("closed_label", ""),
                                  (dates or {}).get("out_label", ""))
         # Группы «не вернулись» и «вернулись частично» ВМЕСТЕ обязаны покрывать блок
@@ -2040,7 +2040,6 @@ def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
         blk_fl = sum(r["out"] for r in out_rows)
         if abs(g_fl - blk_fl) > 0.5 or g_n != len(out_rows):
             group_mismatch.append((nid, g_n, len(out_rows), g_fl, blk_fl))
-        top_pipe, pipe_n, pipe_fl, pipe_cov = _material(pipe_rows, "pipe")
         # выросшие за год не показываем: блок отвечает на «почему просели»
         yoy_rows = _yoy_rows(nid, det_by_unit.get(nid, ()), rows, names, yoy, cur, ref,
                              insights, work, nopt, emp_of)
@@ -2053,8 +2052,6 @@ def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
             "conv_diag": conv_diag or {},
             "out_tot": float(sum(r["out"] for r in rows)),
             "out_n_all": len(out_rows), "out_groups": out_groups,
-            "top_pipe": top_pipe, "pipe_tail_n": pipe_n, "pipe_tail_fl": pipe_fl,
-            "pipe_cov": pipe_cov, "pipe_n_all": len(pipe_rows),
             "yoy_total": float(yoy_tot.get(nid, 0.0)), "yoy_groups": yoy_groups,
             "yoy_n_all": len(yoy_rows),
             "yoy_down_tot": float(sum(r["yoy"] for r in yoy_rows)),

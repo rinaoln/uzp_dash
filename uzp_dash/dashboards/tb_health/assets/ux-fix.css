@@ -120,6 +120,10 @@ html.js-boot .app-layout { visibility: hidden; }
 /* --- Матрица: ранг ТБ и раскрытие ячейки --- */
 td.rank { font-weight: 620; font-variant-numeric: tabular-nums; }
 td.rank i { font-style: normal; font-weight: 400; color: var(--text-2); font-size: 12px; }
+/* тот же ранг в обычной таблице (плашка «Портфель по всем ТБ»): там колонка
+   собирается общим компонентом таблицы, и класс живёт на содержимом ячейки */
+.rk { font-weight: 620; font-variant-numeric: tabular-nums; }
+.rk i { font-style: normal; font-weight: 400; color: var(--text-2); font-size: 12px; }
 /* ячейка-кнопка: курсор и обводка при наведении. Цвет заливки остаётся
    единственным носителем статуса, подсказка при наведении говорит про клик */
 td.heat.hit { cursor: pointer; }
@@ -184,6 +188,67 @@ th.flt-col { vertical-align: top; }
 .ch-tbl > summary::before { content: "▸ "; display: inline-block; }
 .ch-tbl[open] > summary::before { content: "▾ "; }
 .ch-tbl table { font-size: 13px; }
+
+/* --- Вторая кнопка под плашкой прогноза: портфель по всем ТБ ---
+   Стоит рядом с «Управлением портфелем» и намеренно тише его: то действие —
+   про область, которую читатель открыл, это — про сеть целиком, и спорить за
+   внимание две одинаково яркие кнопки не должны. */
+.forecast-panel .tbdyn-trigger {
+  margin-left: 0;
+  background: var(--surface-solid);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--separator));
+  box-shadow: none;
+}
+.forecast-panel .tbdyn-trigger:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-solid));
+}
+
+/* --- Пошаговая инструкция (памятка) ---
+   Шаги — наши: help.css остаётся копией макета, поэтому всё, что относится к
+   ленте шагов и навигации, живёт здесь. Один шаг на экране, остальные скрыты
+   атрибутом hidden — без скрипта (если его вырежет почтовый фильтр) видно
+   первый шаг и ленту, а не пустое окно. */
+.hlp-rail {
+  display: flex; gap: 6px; overflow-x: auto; padding: 0 26px 12px;
+  border-bottom: 1px solid var(--separator); scrollbar-width: thin;
+}
+.hlp-chip {
+  flex: none; display: inline-flex; align-items: center; gap: 7px;
+  font: inherit; font-size: 12.5px; font-weight: 600; white-space: nowrap;
+  color: var(--text-2); background: var(--surface-solid); cursor: pointer;
+  border: 1px solid var(--separator); border-radius: 999px; padding: 5px 13px 5px 5px;
+}
+.hlp-chip:hover { color: var(--text); border-color: var(--accent); }
+.hlp-chip i {
+  font-style: normal; flex: none; width: 19px; height: 19px; border-radius: 50%;
+  background: var(--separator); color: var(--text-2); font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.hlp-chip.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+.hlp-chip.on i { background: rgba(255, 255, 255, 0.28); color: #fff; }
+.hlp-step[hidden] { display: none !important; }
+.hlp-step-lead {
+  margin: 0 0 14px; font-size: 14.5px; line-height: 1.5; color: var(--text);
+  font-weight: 560;
+}
+.hlp-walk { display: flex; align-items: center; gap: 14px; }
+.hlp-count {
+  font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hlp-back {
+  border: 1px solid var(--separator); background: var(--surface-solid);
+  color: var(--text); border-radius: 980px; padding: 8px 18px; cursor: pointer;
+  font: inherit; font-size: 14px; font-weight: 600;
+}
+.hlp-back:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.hlp-back:disabled { opacity: 0.35; cursor: default; }
+@media (max-width: 720px) {
+  .hlp-rail { padding: 0 16px 10px; }
+  .hlp-walk { gap: 8px; }
+}
 
 /* --- Памятка: блок «Новое в отчёте» ---
    Селекторы с двумя классами: help.css подключается ПОСЛЕ этого файла, и по
@@ -307,5 +372,166 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
   .of-tabs { display: none !important; }
   .of-pane[hidden] { display: block !important; }
   .of-wrap.tabbed > .of-pane > h4 { display: block !important; }
+  /* экран выбора раздела — способ навигации, а не содержание: на бумаге
+     разделы идут подряд, плашки и строка возврата не печатаются */
+  .hub-wrap, .hub-back { display: none !important; }
+  .lvl[data-hub-view] > section { display: block !important; }
   @page { margin: 12mm; }
+}
+
+/* ============================================================
+   Экран выбора раздела: плашки вместо длинной прокрутки
+   ============================================================
+   Разделы отчёта развёрнуты в полный разбор, и страница была свитком, который
+   листали вслепую. Теперь под плашкой прогноза стоит набор плашек — по одной на
+   раздел, с главным числом каждого, — а открытый раздел показывается один.
+
+   Состояние держит атрибут data-hub-view на уровне, и ставит его только скрипт:
+   без скрипта (почтовый фильтр, печать) атрибута нет, и страница остаётся
+   прежней — все разделы на месте, плашки просто ни на что не переключают. */
+.hub-lead {
+  font-size: 13px; font-weight: 600; color: var(--text-2);
+  margin: 2px 2px 12px; letter-spacing: 0.01em;
+}
+.hub {
+  display: grid; gap: 14px; margin-bottom: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 258px), 1fr));
+}
+/* Плашки — главный вход в отчёт, и выглядеть они должны как кнопки, а не как
+   очередные карточки с текстом: акцентный кант сверху, лёгкая подложка того же
+   цвета и заметная тень. Цвет здесь ОДИН на все плашки и означает «сюда можно
+   нажать» — зелёным и красным в отчёте кодируется только выполнение плана, и
+   раздавать эти цвета разделам нельзя. */
+.hub-tile {
+  position: relative; overflow: hidden;
+  display: flex; flex-direction: column; gap: 7px;
+  text-align: left; font: inherit; color: var(--text); cursor: pointer;
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--accent) 10%, var(--surface-solid)) 0%,
+      var(--surface-solid) 62%);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--separator));
+  border-radius: var(--radius);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--accent) 10%, transparent),
+              0 10px 26px color-mix(in srgb, var(--accent) 12%, transparent);
+  padding: 18px 18px 15px;
+  transition: border-color var(--spring), transform var(--spring),
+              box-shadow var(--spring), background var(--spring);
+}
+/* кант сверху: он и делает ряд плашек заметным издалека */
+.hub-tile::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 4px;
+  background: var(--accent);
+}
+.hub-tile:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--accent) 16%, var(--surface-solid)) 0%,
+      var(--surface-solid) 68%);
+  box-shadow: 0 4px 10px color-mix(in srgb, var(--accent) 16%, transparent),
+              0 16px 34px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.hub-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* стрелка стоит в строке заголовка, а не отдельной строкой «Открыть»: плашек на
+   экране до пяти, и каждая лишняя строка уводит нижний ряд под сгиб */
+.hub-h {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  font-size: 18px; font-weight: 700; line-height: 1.2; letter-spacing: -0.015em;
+}
+/* стрелка — залитый кружок: главный признак того, что плашка нажимается */
+.hub-h i {
+  flex: none; font-style: normal; font-size: 13px; font-weight: 700;
+  width: 26px; height: 26px; border-radius: 999px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); color: #fff;
+  transition: transform var(--spring);
+}
+.hub-tile:hover .hub-h i { transform: translateX(3px); }
+.hub-d { font-size: 13px; line-height: 1.45; color: var(--text-2); }
+/* числа прижаты к низу плашки: у разных разделов разной длины описание, а
+   ряд чисел должен стоять на одной линии во всех плашках ряда */
+.hub-nums {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: auto; padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--accent) 20%, var(--separator));
+}
+.hub-n { display: flex; align-items: baseline; gap: 7px; }
+.hub-n b {
+  font-size: 19px; font-weight: 700; color: var(--text);
+  letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
+  /* число не переносим: «0 из 12» разрывалось между колонками плашек */
+  white-space: nowrap;
+}
+.hub-n b.bad { color: var(--bad); }
+.hub-n i { font-style: normal; font-size: 12.5px; line-height: 1.3; color: var(--text-2); }
+/* --- Подвал уровня: к кому идти с вопросами ---
+   Набран тише всего на странице: это служебная подпись, а не раздел отчёта.
+   Верхняя линия отделяет его от последнего блока, чтобы он не читался как
+   продолжение содержания. */
+.rep-foot {
+  margin: 26px 0 4px; padding: 16px 18px;
+  background: var(--surface-solid);
+  border: 1px solid var(--separator); border-radius: var(--radius);
+  border-top: 3px solid color-mix(in srgb, var(--accent) 35%, var(--separator));
+}
+.rep-foot-main { font-size: 14.5px; color: var(--text); }
+.rep-foot-main b { font-weight: 650; }
+.rep-foot-sub { font-size: 12.5px; color: var(--text-2); margin-top: 4px; line-height: 1.45; }
+
+/* Строка возврата: видна только при открытом разделе. Липкая — из середины
+   длинной таблицы возврат к выбору разделов не должен требовать прокрутки. */
+.hub-back { display: none; }
+.lvl[data-hub-view="sec"] > .hub-back {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 6;
+  margin: 0 0 14px; padding: 10px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--separator);
+}
+.hub-home {
+  font: inherit; font-size: 13.5px; font-weight: 600; cursor: pointer;
+  padding: 7px 14px; border-radius: 980px;
+  border: 1px solid var(--separator); background: var(--surface-solid);
+  color: var(--text);
+  transition: border-color var(--spring), color var(--spring);
+}
+.hub-home:hover { border-color: var(--accent); color: var(--accent); }
+.hub-back-t { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+.hub-back-fc {
+  margin-left: auto; font-size: 13px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Боковой колонки «Разделы страницы» больше нет: по разделам ходят плашками, и
+   держать рядом второй список тех же разделов — дублирование. Сама колонка
+   остаётся в разметке (её строит скрипт дизайна, и в ней же лежит панель уровней,
+   из которой скрипт читает названия банков) — она только не показывается, а место
+   отдаётся содержанию. */
+.app-sidebar { display: none; }
+.app-layout { display: block; }
+.app-main { width: 100%; }
+
+/* Что скрыто в каком состоянии */
+.lvl[data-hub-view="home"] > section { display: none; }
+/* Пояснение под плашкой прогноза («итоговый прогноз … — ключевая цифра для
+   оценки состояния портфеля») пересказывает её же заголовок, а место занимает
+   там, где важен каждый десяток пикселей: из-за него нижний ряд плашек уезжал
+   под сгиб экрана. Текст ставит скрипт дизайна, поэтому убираем стилем — в
+   выгрузке в PDF (там состояния нет) он остаётся на месте. */
+.lvl[data-hub-view] .section-desc-hero { display: none; }
+.lvl[data-hub-view="sec"] > .hub-wrap,
+.lvl[data-hub-view="sec"] > .forecast-panel,
+.lvl[data-hub-view="sec"] > .card.hero,
+.lvl[data-hub-view="sec"] > .grid.cols-2 { display: none; }
+.lvl[data-hub-view="sec"] > section:not(.hub-on) { display: none; }
+/* у открытого раздела заголовок и так стоит в строке возврата — подсказка
+   «Нажмите, чтобы развернуть» рядом с уже развёрнутым разделом только путает */
+.lvl[data-hub-view="sec"] > section.hub-on .section-hint { display: none; }
+
+@media (max-width: 720px) {
+  .hub { grid-template-columns: 1fr; }
+  .hub-tile { min-height: 0; }
+  .hub-back-fc { margin-left: 0; width: 100%; }
 }

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -175,6 +176,14 @@ def build(ctx: Context) -> str:
     base = snapshot.load_base(ctx.output_dir, ref_cur)
     for a in [sb] + preps:
         a.wow = snapshot.compare(base, a)
+    if sb.wow.get("rcp"):
+        # называем ОБА числа вслух: сравниваются прогнозы витрины на один и тот же
+        # месяц, и это должно быть видно в логе сборки, а не только в коде
+        progress.done(
+            f"Динамика неделя к неделе — по прогнозу витрины на {ref_cur}: "
+            f"{sb.wow['was']['rcp']:,.0f} в сборке от {sb.wow['full']} → "
+            f"{sb.verdict['rcp']['fact']:,.0f} сейчас "
+            f"({sb.wow['rcp']['fc']:+,.0f} чел)".replace(",", " "))
     if not base:
         progress.done("Сравнивать неделя к неделе не с чем: снимков прошлых сборок "
                       "на этот прогнозный месяц нет — в плашке прогноза об этом "
@@ -207,18 +216,25 @@ def build(ctx: Context) -> str:
         subtitle=SUBTITLE,
         meta=meta,
         body=(_BOOT_JS + _LEGEND + _tabs([a for a, _ in levels]) + bodies
-              + _cell_dialog() + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS),
+              + _cell_dialog() + _tb_portfolio_dialog(sb, preps, b)
+              + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _TBDYN_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
         css=_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css"),
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
         # оборачивает gdOpen, поэтому идёт после всех остальных скриптов
         tail=(f'<script>{_asset("ux.js.txt")}</script>\n'
+              # экран выбора раздела — сразу после скрипта дизайна и ДО снятия
+              # маски: разделы прячутся под ней, а не на глазах у читателя
+              f'{_HUB_JS}\n'
               # раскладка готова — снимаем маску, поставленную _BOOT_JS
               f'{_REVEAL_JS}\n'
               # кнопки выгрузки — ПОСЛЕ скрипта дизайна: он переставляет блоки,
               # и кнопка должна встать рядом с таблицей уже на новом месте
               f'{_XLS_JS}\n'
               f'{_asset("help.html")}<script>\n{_asset("help.js.txt")}</script>\n'
+              # шаги памятки — наш скрипт ПОСЛЕ help.js: он оборачивает hlpOpen,
+              # чтобы каждое открытие начиналось с первого шага
+              f'{_HELP_STEPS_JS}\n'
               # прямой потомок <body> — на него ссылается печатный CSS в
               # ux-fix.css (скрывает всё, кроме этого блока, во время печати)
               f'<div id="print-root" aria-hidden="true"></div>'),
@@ -239,22 +255,181 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
 
     `idx` уходит в id элементов: в одном документе живут 13 отчётов, и повторяющийся
     id сломал бы и оверлеи, и списки организаций (по id их находит скрипт).
+
+    Разделы собираются СПИСКОМ, а не склейкой строк: по этому же списку строится
+    экран выбора раздела (плашки под плашкой прогноза), и состав у них обязан
+    совпадать. Раздела, которого на уровне нет (у банка — списка организаций, у
+    единицы без истории — динамики), не должно быть и среди плашек.
     """
-    body = (
+    secs = [
+        ("trend", _trend_section(a)),
+        ("matrix", _matrix(a, story.get("matrix"), idx)),
+        ("gosb", _problem_gosb(a, story.get("gosb"), idx)),
+    ]
+    # список организаций живёт только на уровне ТБ: на уровне банка работают с ТБ,
+    # а имена — один переход вниз (и это сотни тысяч строк, которые никто не листает)
+    if a.level != "sb":
+        secs.append(("orgs", _orgs(a, story.get("orgs"), idx)))
+    secs.append(("outflow", _outflow_section(a, story.get("outflow"))))
+    secs = [(key, html) for key, html in secs if html]
+    return (
         _lvl_head(a, idx)
         + _hero(a)
         + _kpis(a)
         + _portfolio_block(a, story.get("forecast"))
-        + _trend_section(a)
-        + _matrix(a, story.get("matrix"), idx)
-        + _problem_gosb(a, story.get("gosb"), idx)
+        + _hub(a, idx, secs)
+        + "".join(_with_id(html, f"sec-{idx}-{key}") for key, html in secs)
+        + _contacts()
     )
-    # список организаций живёт только на уровне ТБ: на уровне банка работают с ТБ,
-    # а имена — один переход вниз (и это сотни тысяч строк, которые никто не листает)
-    if a.level != "sb":
-        body += _orgs(a, story.get("orgs"), idx)
-    body += _outflow_section(a, story.get("outflow"))
-    return body
+
+
+# К кому идти с вопросами по отчёту. Стоит НА КАЖДОМ уровне, а не один раз внизу
+# документа: уровни переключаются вкладками, и до «общего низа» читатель просто не
+# доходит. По той же причине блок лежит внутри уровня — тогда он попадает и в
+# выгрузку уровня в PDF, где контакт нужнее всего: распечатанный отчёт уходит
+# дальше по почте, и найти автора по файлу иначе нельзя.
+def _contacts() -> str:
+    return (
+        '<div class="rep-foot">'
+        '<div class="rep-foot-main">По вопросам работы с отчётом обращайтесь '
+        'к <b>Прохоровой Арине</b></div>'
+        '<div class="rep-foot-sub">Замечания и предложения по доработке '
+        'принимаются там же. Как устроен отчёт — в памятке по кнопке «?» '
+        'в правом нижнем углу.</div>'
+        '</div>'
+    )
+
+
+def _with_id(html: str, sid: str) -> str:
+    """Проставить разделу id, по которому его открывает плашка экрана выбора.
+
+    Заменяется первый тег `<section>` строки — именно его отдаёт `C.section`, и
+    разделы приходят сюда по одному. Параметр в самом компоненте не заводим:
+    id нужен только этому отчёту и только для навигации по плашкам.
+    """
+    return html.replace("<section>", f'<section id="{sid}">', 1)
+
+
+def _sec_title(html: str) -> str:
+    """Заголовок раздела — из его же разметки.
+
+    Берём h2 самого раздела, а не пишем название плашки отдельной строкой: на
+    плашке и в разделе читатель должен видеть одно и то же имя, а заголовки
+    зависят от единицы разбора («Детализация по ТБ» и «по ГОСБ»).
+    """
+    m = re.search(r"<h2>(.*?)</h2>", html, flags=re.S)
+    return m.group(1) if m else ""
+
+
+# Что написано на плашке раздела: строка «что внутри» и два-три числа из самого
+# раздела. Числа считаются здесь из тех же полей разбора, по которым строится
+# раздел, — плашка не должна обещать одно, а раздел показывать другое.
+def _hub_facts(a: analyze.Analysis) -> dict:
+    unit = a.unit_label
+    out: dict = {}
+
+    if a.trend:
+        n_miss = sum(1 for r in a.trend if r["fact"] < r["plan"])
+        grew = a.trend[-1]["fact"] - a.trend[0]["fact"]
+        out["trend"] = (
+            "Портфель месяц за месяцем: в каких месяцах план не выполнялся.",
+            [(f'{n_miss} из {len(a.trend)}', "месяцев без выполнения плана",
+              "bad" if n_miss else ""),
+             (f'{"+" if grew >= 0 else "−"}{C.fmt_num(abs(grew))}',
+              "чел к началу периода", "")],
+        )
+
+    if not a.matrix.empty:
+        n_units = a.matrix["unit_id"].nunique()
+        n_segs = a.matrix["seg_name"].nunique()
+        n_bad = int(a.matrix["is_failing"].sum()) if "is_failing" in a.matrix else 0
+        out["matrix"] = (
+            f"Где именно не выполняется план: {unit} в разрезе сегментов.",
+            [(C.fmt_num(n_bad), "ячеек с невыполнением плана", "bad" if n_bad else ""),
+             (f'{n_units} × {n_segs}', f'{unit} и сегментов', "")],
+        )
+
+    cards = a.gosb_cards or []
+    if cards:
+        n_bad = sum(1 for c in cards
+                    if c.get("exec") is not None and c["exec"] < 1)
+        out["gosb"] = (
+            f"Карточка на каждый {unit}: прогноз, сегменты, кого брать в работу.",
+            [(C.fmt_num(len(cards)), f'{unit} в разборе', ""),
+             (C.fmt_num(n_bad), "с прогнозом ниже плана", "bad" if n_bad else "")],
+        )
+
+    if a.level != "sb" and a.sim:
+        bad_segs = {s["seg"] for c in cards for s in c["segs_bad"]}
+        out["orgs"] = (
+            "Организации, за счёт которых закрывается отклонение от плана.",
+            [(C.fmt_num(a.sim.get("k", 0)), "организаций закрывают план", ""),
+             (C.fmt_num(len(bad_segs)), "сегментов с невыполнением плана",
+              "bad" if bad_segs else "")],
+        )
+
+    o = a.outflow or {}
+    if o.get("rows"):
+        out["outflow"] = (
+            "Кого потеряли за три месяца, из-за чего и с каким результатом.",
+            [(C.fmt_num(o.get("tot_kept", 0)), "чел безвозвратных потерь", "bad"),
+             (C.fmt_num(len(o.get("top_promised") or [])),
+              "обещали вернуться, но не вернулись", ""),
+             (C.fmt_num(len(o.get("top_worked") or [])),
+              "отработали без результата", "")],
+        )
+    return out
+
+
+def _hub(a: analyze.Analysis, idx: int, secs: list) -> str:
+    """Экран выбора раздела: плашки вместо длинной прокрутки.
+
+    Разделы отчёта развёрнуты в полный разбор и стоят друг под другом — страницу
+    приходилось листать вслепую, чтобы понять, что в ней вообще есть. Плашки
+    показывают состав отчёта целиком, на одном экране, и называют главное число
+    каждого раздела: выбор, что открывать, делается до прокрутки, а не в процессе.
+
+    Открытый раздел показывается ОДИН, остальные прячутся (см. _HUB_JS) — поэтому
+    у плашек и разделов общий список и общие заголовки. Без скрипта страница
+    остаётся прежней: плашки — обычные кнопки, все разделы на месте.
+    """
+    facts = _hub_facts(a)
+    tiles = []
+    for key, html in secs:
+        lead, nums = facts.get(key, ("", []))
+        title = _sec_title(html)
+        if not title:
+            continue
+        rows = "".join(
+            f'<span class="hub-n">'
+            f'<b{f" class=\"{st}\"" if st else ""}>{val}</b>'
+            f'<i>{C.esc(lbl)}</i></span>'
+            for val, lbl, st in nums)
+        tiles.append(
+            f'<button type="button" class="hub-tile" data-sec="sec-{idx}-{key}">'
+            f'<span class="hub-h">{title}<i>→</i></span>'
+            f'<span class="hub-d">{C.esc(lead)}</span>'
+            f'<span class="hub-nums">{rows}</span>'
+            f'</button>')
+    if not tiles:
+        return ""
+    r = a.verdict["rcp"]
+    d = a.dates or {}
+    # Строка возврата заодно держит на экране главное число уровня: плашка
+    # прогноза при открытом разделе убрана, а выполнение плана нужно видеть и
+    # там — без него раздел читается в отрыве от того, ради чего его открыли.
+    back = (
+        '<div class="hub-back">'
+        '<button type="button" class="hub-home">← Все разделы</button>'
+        '<span class="hub-back-t"></span>'
+        f'<span class="hub-back-fc">прогноз на {C.esc(d.get("label", ""))}: '
+        f'<b style="color:{_col(r["exec"])}">{_pct(r["exec"])}</b> плана</span>'
+        '</div>'
+    )
+    return (f'<div class="hub-wrap">'
+            f'<div class="hub-lead">Разделы отчёта — откройте нужный, '
+            f'страница покажет только его</div>'
+            f'<div class="hub">{"".join(tiles)}</div></div>{back}')
 
 
 def _lvl_head(a: analyze.Analysis, idx: int) -> str:
@@ -370,9 +545,17 @@ def _wow_row(a: analyze.Analysis) -> str:
     rcp, fot = w["rcp"], w.get("fot") or {}
     plan = (f' · план {_wow_num(rcp["plan"], "чел")}'
             if abs(rcp.get("plan", 0)) >= 0.5 else "")
-    return (f'<div class="row2 wow">Неделя к неделе, к сборке от {C.esc(w["full"])}: '
-            f'прогноз получателей {_wow_num(rcp["fc"], "чел")}{plan} · '
-            f'выполнение {_wow_pp(rcp.get("exec"))} · '
+    # Подсказка называет ОБА прогноза — базовый и текущий. Сравнение идёт по
+    # прогнозу витрины на один и тот же месяц, и это должно проверяться на месте,
+    # без открытия снимка прошлой сборки.
+    was = (w.get("was") or {}).get("rcp")
+    now = float(a.verdict["rcp"]["fact"] or 0)
+    tip = (f' title="прогноз получателей на {C.esc((a.dates or {}).get("label", ""))}: '
+           f'{C.fmt_num(was)} в сборке от {C.esc(w["full"])} → {C.fmt_num(now)} сейчас"'
+           if was else "")
+    return (f'<div class="row2 wow"{tip}>Неделя к неделе, к сборке от '
+            f'{C.esc(w["full"])}: прогноз получателей {_wow_num(rcp["fc"], "чел")}'
+            f'{plan} · выполнение {_wow_pp(rcp.get("exec"))} · '
             f'прогноз ФОТ {_wow_num(fot.get("fc", 0) / 1e6, "млн ₽", 1, 0.05)}</div>')
 
 
@@ -382,7 +565,9 @@ def _wow_unit(a: analyze.Analysis, unit_id: int, cls: str = "g-wow") -> str:
     u = (w.get("units") or {}).get(unit_id)
     if not u:
         return ""
-    return (f'<div class="{cls}">Неделя к неделе (к {C.esc(w.get("label", ""))}): '
+    tip = (f' title="прогноз в сборке от {C.esc(w.get("full", ""))}: '
+           f'{C.fmt_num(u["was"])} чел"' if u.get("was") else "")
+    return (f'<div class="{cls}"{tip}>Неделя к неделе (к {C.esc(w.get("label", ""))}): '
             f'прогноз {_wow_num(u["fc"], "чел")} · '
             f'выполнение {_wow_pp(u.get("exec"))}</div>')
 
@@ -454,26 +639,13 @@ def _wf_lines(pf: dict, d: dict, conv: float, conv_diag: dict | None = None,
     """Строки блока портфеля. Общие для уровня и для оверлея по единице — числа
     и порядок одни и те же, меняется только срез данных.
 
-    `conv` — коэффициент ИМЕННО ЭТОГО уровня (у ГОСБ свой), `conv_is_tb` — что он
-    подменён коэффициентом ТБ из-за малого объёма истории.
+    Пайплайна здесь больше нет — ни строкой, ни подписью: по решению заказчика
+    ожидаемый приход по сделкам из отчёта убран на всех уровнях. Расчёт он не
+    покинул (в отборе организаций приход по сделкам вычитается из потенциала,
+    чтобы не посчитать одних и тех же людей дважды), но читателю не показывается.
+    `conv`, `conv_diag` и `conv_is_tb` остаются в сигнатуре — это диагностика
+    коэффициента реализуемости, она нужна вызывающим местам и логу сборки.
     """
-    # если фактическая конверсия ниже пола, показываем и её: иначе в отчёте стоит
-    # ровно «0.20» и не отличить настоящую конверсию от сработавшей границы
-    raw = (conv_diag or {}).get("tb_raw")
-    if (conv_diag or {}).get("tb_clipped") and raw is not None and conv_is_tb:
-        conv_txt = f'коэф. ТБ {raw:.2f} → поднят до пола {conv:.2f}, своей истории мало'
-    elif conv_is_tb:
-        conv_txt = f'коэф. ТБ {conv:.2f} — своей истории мало'
-    else:
-        conv_txt = f'коэф. {conv:.2f}'
-    # Время у пайплайна меряется в КАЛЕНДАРНЫХ днях от реальной даты — показываем
-    # именно дни, а не проценты: «осталось 1 из 31 дн.» читается однозначно, а «3%»
-    # можно спутать с долей отыгранных выплат в строке оттока выше.
-    dl, dm = int(d.get("days_left", 0)), int(d.get("days_in_month", 0) or 1)
-    pipe_hint = (f'заявлено {C.fmt_num(pf.get("pipe_raw", 0))} · '
-                 f'пришло {C.fmt_num(pf.get("pipe_fact", 0))} · '
-                 f'остаток {C.fmt_num(pf.get("pipe_rest", 0))} × {conv_txt} × '
-                 f'осталось {dl} из {dm} дн. → +{C.fmt_num(pf.get("pipe_expect", 0))}')
     out_lbl = C.esc(d.get("out_label", ""))
     rows = [
         (f'Портфель — {C.esc(d.get("closed_label", ""))} закрыт', pf["base"], 0, ""),
@@ -483,7 +655,6 @@ def _wf_lines(pf: dict, d: dict, conv: float, conv_diag: dict | None = None,
          # а условие отбора объясняет
          f'{out_lbl} · организации от {bank.OUT_MIN_QTY} чел '
          f'за вычетом вернувшихся' if out_lbl else ""),
-        ("Пайплайн на месяц", pf["pipe"], 1, pipe_hint),
     ]
     # подсказка идёт классом g-hint, а НЕ .sub: .sub — это стиль подзаголовка
     # страницы (19px), внутри строки блока он выглядит крупнее самой строки
@@ -496,13 +667,12 @@ def _wf_lines(pf: dict, d: dict, conv: float, conv_diag: dict | None = None,
 
 
 def _portfolio_block(a: analyze.Analysis, ai: str | None = None) -> str:
-    """Управление портфелем: что есть, что потеряли, что ждём.
+    """Управление портфелем: что есть и что потеряли.
 
     Это НЕ разложение прогноза на слагаемые. Прогноз берётся готовым из витрины
-    метрик и с этими тремя числами арифметически не связан — складывать их и
-    сверять с прогнозом бессмысленно. Здесь три независимых факта, каждый со своим
-    действием: портфель — что защищаем, невозвращённый отток — что уже потеряли,
-    пайплайн — что придёт само.
+    метрик и с этими числами арифметически не связан — складывать их и сверять с
+    прогнозом бессмысленно. Здесь два независимых факта, каждый со своим
+    действием: портфель — что защищаем, невозвращённый отток — что уже потеряли.
     """
     pf = a.pf or {}
     if not pf:
@@ -516,21 +686,15 @@ def _portfolio_block(a: analyze.Analysis, ai: str | None = None) -> str:
         f'<b>{C.fmt_num(pf["forecast"])}</b> при плане {C.fmt_num(pf["plan"])} → '
         + C.badge(f"{_pct(pf.get('exec'))} плана", st) + '</div>'
     )
-    upside = ""
-    if pf.get("pipe_upside", 0) >= 1:
-        upside = (f'<div class="g-act">Если пайплайн отработают на 100%, придёт на '
-                  f'<b>+{C.fmt_num(pf["pipe_upside"])} фл</b> больше, чем заложено '
-                  f'с поправкой на реализуемость.</div>')
-    # Пояснение нужно: без него три строки ниже принимают за слагаемые прогноза и
+    # Пояснение нужно: без него строки ниже принимают за слагаемые прогноза и
     # начинают сверять их сумму с ним. Но объяснять методику двумя фразами с тире
     # и тройкой однородных — значит писать не читателю, а в протокол.
     note = ('<p class="sub" style="font-size:14px;margin:-4px 0 12px">'
             'Показатели ниже в прогноз не суммируются. Прогноз поступает из '
             'витрины готовым, а это независимые факты управления портфелем: '
-            'текущая база, безвозвратные потери и ожидаемый приход по сделкам.</p>')
+            'текущая база и безвозвратные потери.</p>')
     return C.section("Управление портфелем",
-                     C.card('<h3>Портфель, потери и приход</h3>' + note + body
-                            + total + upside)
+                     C.card('<h3>Портфель и потери</h3>' + note + body + total)
                      + _ai(ai),
                      eyebrow="Справочно")
 
@@ -671,7 +835,7 @@ def _seg_badge(s: dict) -> str:
     return C.badge(f'{s["seg"]} {_pct(s["exec"])}', C.status_of(s["exec"]))
 
 
-def _gosb_table(c: dict, wide: bool = False) -> str:
+def _gosb_table(c: dict) -> str:
     """Таблица карточки: строка «Всего» по ГОСБ + строки ВСЕХ сегментов.
 
     Одни и те же колонки на обоих уровнях — итог и сегменты сравниваются по вертикали.
@@ -679,32 +843,27 @@ def _gosb_table(c: dict, wide: bool = False) -> str:
     вытягивает план, но взгляд по-прежнему цепляется за проблемные.
     У строки «Всего» бейджа нет — процент уже стоит крупно в шапке карточки.
 
-    wide=True (в оверлее) добавляет колонку пайплайна. Оттока по сегментам здесь
-    нет: фактический отток лежит на грейне (ГОСБ, ИНН) и в разрез витрины по
-    сегментам не раскладывается — разносить его пропорционально было бы выдумкой.
+    Колонки пайплайна в таблице больше нет — ожидаемый приход по сделкам убран
+    из отчёта. Оттока по сегментам здесь нет: фактический отток лежит на грейне (ГОСБ, ИНН)
+    и в разрез витрины по сегментам не раскладывается — разносить его
+    пропорционально было бы выдумкой.
     """
     def row(label, d, cls=""):
-        pipe = d.get("pipe_np", 0)
-        extra = (f'<span>{"+" + C.fmt_num(pipe) if pipe >= 1 else "—"}</span>'
-                 if wide else "")
         return (f'<div class="g-row {cls}"><span>{label}</span>'
                 f'<span>{C.fmt_num(d["forecast"])}</span>'
                 f'<span>{C.fmt_num(d["plan"])}</span>'
                 f'<span>{_gap_cell(d["nedobor"])}</span>'
-                f'{extra}<span>{d.get("n_need") or "—"}</span></div>')
+                f'<span>{d.get("n_need") or "—"}</span></div>')
 
-    cols = ('<span>пайплайн</span>' if wide else "")
-    head = (f'<div class="g-row head"><span>сегмент</span><span>прогноз</span>'
-            f'<span>план</span><span>отклонение</span>{cols}<span>орг</span></div>')
+    head = ('<div class="g-row head"><span>сегмент</span><span>прогноз</span>'
+            '<span>план</span><span>отклонение</span><span>орг</span></div>')
     tot = {"forecast": c["forecast"], "plan": c["plan"], "nedobor": c["gap"],
-           "n_need": c["n_need"],
-           "pipe_np": sum(s.get("pipe_np", 0) for s in c["segs"])}
+           "n_need": c["n_need"]}
     rows = [row(_seg_badge(s), s, "" if s["failing"] else "ok") for s in c["segs"]]
     if not rows:
         rows.append('<div class="g-row"><span>нет данных по сегментам</span></div>')
     rest = row("прочие", c["rest"], "rest") if c.get("rest") else ""
-    cls_w = " wide" if wide else ""
-    return (f'<div class="g-tbl{cls_w}">{head}{row("Всего", tot, "total")}'
+    return (f'<div class="g-tbl">{head}{row("Всего", tot, "total")}'
             f'{"".join(rows)}{rest}</div>')
 
 
@@ -717,8 +876,8 @@ def _org_rows(rows: list, key: str, tail_n: int, tail_fl: float,
     закреплённого сотрудника (`emp`).
 
     `with_emp` — показывать ли ФИО. Флагом, а не «есть ли поле в строке»: строками
-    одного и того же кадра живут два блока (отток и пайплайн), поле несут оба, а
-    подпись нужна только оттоку. Кто её показывает, видно по вызовам.
+    одного и того же кадра живут два блока (отток и годовой тренд), поле несут
+    оба, а подпись нужна только оттоку. Кто её показывает, видно по вызовам.
 
     Хвост не прячем, и покрытие тоже: подпись всегда говорит, сколько организаций из
     общего числа показано и какую долю блока они объясняют. На проме в блоке бывает
@@ -727,8 +886,8 @@ def _org_rows(rows: list, key: str, tail_n: int, tail_fl: float,
     """
     if not rows:
         return '<div class="gd-note">нет организаций с заметным вкладом</div>'
-    # пояснение зависит от блока: причина оттока к пайплайну и к годовому тренду
-    # отношения не имеет, поэтому текст задаётся вызывающим
+    # пояснение зависит от блока: причина оттока к годовому тренду отношения не
+    # имеет, поэтому текст задаётся вызывающим
     why_fn = why or (lambda r: " · ".join(x for x in (r.get("note"), r.get("action")) if x))
     out = []
     if cover and n_all > len(rows):
@@ -776,11 +935,6 @@ def _why_out(r: dict) -> str:
     if zone and zone != "можно работать":
         parts.insert(0, zone)
     return " · ".join(parts) if parts else "причина не зафиксирована"
-
-
-def _why_pipe(r: dict) -> str:
-    """Пояснение к строке пайплайна: сколько из заявленного дошло до прогноза."""
-    return f'в прогнозе {C.fmt_num(r["pipe_adj"], "фл")} — с поправкой на реализуемость'
 
 
 def _why_size(r: dict) -> str:
@@ -885,7 +1039,7 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
                  wow: str = "") -> str:
     """Оверлей «почему прогноз такой» по одному ГОСБ.
 
-    Порядок блоков: портфель → отток по группам → пайплайн → тренд портфеля →
+    Порядок блоков: портфель → отток по группам → тренд портфеля →
     разбор по сегментам. Отток разложен на группы (см. `_out_group`) и покрыт целиком;
     в остальных блоках имена показываются только материальные, поэтому у них стоит
     подпись о покрытии.
@@ -955,12 +1109,8 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
         + out_html
         + '</div>'
 
-        f'<div class="gd-block"><h4>Пайплайн на месяц: заявлено '
-        f'{C.fmt_num(pf["pipe_raw"])}, в прогнозе {C.fmt_num(pf["pipe"])}</h4>'
-        + _org_rows(det["top_pipe"], "pipe", det["pipe_tail_n"], det["pipe_tail_fl"],
-                    "— хвост", 1, _why_pipe, cover=det.get("pipe_cov", 0.0),
-                    n_all=det.get("pipe_n_all", 0))
-        + '</div>'
+        # блока пайплайна здесь больше нет: ожидаемый приход по сделкам убран из
+        # отчёта на всех уровнях — см. _wf_lines
 
         f'<div class="gd-block">{yoy_head}'
         + _gd_help(
@@ -985,7 +1135,7 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
         + _trend_block(det.get("trend") or [], "Динамика за 12 месяцев")
         + '</div>'
 
-        + f'<div class="gd-block"><h4>Разбор по сегментам</h4>{_gosb_table(c, wide=True)}</div>'
+        + f'<div class="gd-block"><h4>Разбор по сегментам</h4>{_gosb_table(c)}</div>'
         f'</div></dialog>'
     )
 
@@ -1086,6 +1236,393 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
     grid = f'<div class="gcards">{"".join(cards)}</div>{"".join(dialogs)}'
     return C.section(f"Детализация по {unit}", grid + _ai(ai),
                      eyebrow=f"Детализация по {unit} · клик открывает разбор до организаций")
+
+
+def _rank_by_exec(units: list) -> dict:
+    """Места ТБ по прогнозному выполнению плана: tb_id -> (место, всего).
+
+    Равные проценты получают одно место (1, 2, 2, 4) — иначе два банка с одним и
+    тем же выполнением стояли бы на разных строчках рейтинга по случайности
+    сортировки. Банки без выполнения в рейтинг не попадают: место «последний»
+    означало бы худший результат, а не отсутствующий.
+    """
+    vals = [(a.tb_id, a.verdict.get("rcp", {}).get("exec")) for a in units]
+    vals = [(tb, float(ex)) for tb, ex in vals if ex is not None]
+    total = len(vals)
+    out, place = {}, 0
+    prev = None
+    for i, (tb, ex) in enumerate(sorted(vals, key=lambda x: -x[1]), start=1):
+        if prev is None or abs(ex - prev) > 1e-9:
+            place = i
+            prev = ex
+        out[tb] = (place, total)
+    return out
+
+
+def _rank_cell(rk: tuple | None) -> str:
+    """Ячейка ранга: место и через дробь — из скольких. Формат тот же, что в матрице."""
+    if not rk:
+        return '<span style="color:var(--text-2)">—</span>'
+    return f'<span class="rk">{rk[0]}<i>/{rk[1]}</i></span>'
+
+
+def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str:
+    """Плашка «Портфель по всем ТБ»: прогноз, закрытый месяц и помесячная динамика.
+
+    Отдельное окно рядом с «Управлением портфелем», потому что отвечает на вопрос
+    другого масштаба: не «что с портфелем этой области», а «как выглядит сеть
+    целиком». Одно на весь документ — содержимое от уровня не зависит, и держать
+    по копии на каждой из тринадцати вкладок незачем.
+
+    Три таблицы отвечают на три разных вопроса: что будет по прогнозу, что уже
+    случилось в закрытом месяце и как выполнение шло месяц за месяцем. Числа —
+    те же, что в плашках уровней: прогноз берётся из витрины (prediction_amt),
+    факт закрытого месяца — из факта витрины, свой расчёт здесь не появляется.
+    """
+    if not preps:
+        return ""
+    d = sb.dates or {}
+    units = sorted(preps, key=lambda a: analyze._ru_key(a.tb_full))
+
+    # Ранг в таблице прогноза — НАШ порядок по прогнозному выполнению: витрина
+    # ранжирует банки только по закрытому месяцу (окно rank() в METRICS_VERDICT),
+    # прогнозного ранга в ней нет. Числа, по которым строится порядок, остаются
+    # витринными — сортируется их же колонка «выполнение», и место в ней читатель
+    # может пересчитать глазами прямо по таблице.
+    fc_rank = _rank_by_exec(units)
+    # Ранг закрытого месяца берётся у витрины и совпадает с рангом в плашке
+    # прогноза («ранг ТБ N из M за закрытый месяц») — свой здесь не считаем.
+    cl_rank = {tb: rk for tb, rk in (sb.ranks or {}).items()}
+
+    def money_rows(src: str) -> list:
+        """Строки таблицы: ранг, план, значение, отклонение и выполнение по ТБ."""
+        ranks = fc_rank if src == "forecast" else cl_rank
+        out = []
+        for a in units + [sb]:
+            v = (a.verdict if src == "forecast" else a.closed).get("rcp", {})
+            plan, val = float(v.get("plan") or 0), float(v.get("fact") or 0)
+            ex = v.get("exec")
+            name = C.esc(a.tb_full if a is not sb else "Сбербанк — итог")
+            out.append([
+                (f'<b>{name}</b>' if a is sb else name),
+                # у банка ранга нет — сравнивать его не с кем
+                _rank_cell(None if a is sb else ranks.get(a.tb_id)),
+                C.fmt_num(plan), C.fmt_num(val),
+                _delta_html(val - plan, "чел"),
+                C.badge(_pct(ex), C.status_of(ex)),
+            ])
+        return out
+
+    fc_tbl = C.table(["Территориальный банк", "ранг", "план, чел", "прогноз, чел",
+                      "отклонение от плана", "выполнение"],
+                     money_rows("forecast"), num_cols=[1, 2, 3])
+    cl_tbl = C.table(["Территориальный банк", "ранг", "план, чел", "факт, чел",
+                      "отклонение от плана", "выполнение"],
+                     money_rows("closed"), num_cols=[1, 2, 3])
+
+    # Помесячная динамика: выполнение плана по каждому ТБ за закрытые месяцы.
+    # Берём ту же историю, по которой строится раздел «Динамика за 12 месяцев»,
+    # поэтому числа сходятся с графиком уровня.
+    rows_id_label, cells, month_dt = [], {}, {}
+    for a in units:
+        tr = analyze._trend_rows(b.trend, "tb", a.tb_id)
+        if not tr:
+            continue
+        rows_id_label.append((int(a.tb_id), a.tb_short))
+        for r in tr:
+            lbl = r["short"]
+            # порядок столбцов — по дате, а не по порядку обхода: у части банков
+            # история в витрине короче, и месяц, который встретился только у
+            # последнего из них, иначе встал бы в конец таблицы
+            month_dt[lbl] = r["dt"]
+            ex = (r["fact"] / r["plan"]) if r["plan"] else None
+            cells[(a.tb_id, lbl)] = (ex, r["plan"] - r["fact"])
+    months = sorted(month_dt, key=lambda x: month_dt[x])
+    dyn = ""
+    if rows_id_label and months:
+        dyn = ('<div class="gd-block"><h4>Динамика выполнения плана по месяцам</h4>'
+               '<p class="g-act" style="margin:0 0 10px">Выполнение плана по '
+               'получателям за закрытые месяцы: строка — территориальный банк, '
+               'столбец — месяц. Цвет тот же, что везде в отчёте. Ранг — место '
+               'в сети по выполнению плана за закрытый месяц '
+               f'{C.esc(d.get("closed_label", ""))}.</p>'
+               + C.heat_matrix(rows_id_label, months, cells, unit_head="ТБ",
+                               ranks=sb.ranks or None)
+               + '</div>')
+
+    return (
+        '<dialog class="gd" id="tb-dyn"><div class="gd-sheet">'
+        '<div class="gd-head"><div>'
+        '<h3 style="margin:0">Портфель по территориальным банкам</h3>'
+        f'<div class="gd-note">план, факт и выполнение по всей сети · '
+        f'прогноз на {C.esc(d.get("label", ""))}, база — закрытый '
+        f'{C.esc(d.get("closed_label", ""))}</div></div>'
+        '<div class="gd-head-actions">'
+        '<button type="button" class="gd-close" onclick="tbDynClose()" '
+        'aria-label="Закрыть">×</button></div></div>'
+        f'<div class="gd-block"><h4>Прогноз на {C.esc(d.get("label", ""))}</h4>'
+        '<p class="g-act" style="margin:0 0 10px">Прогноз берётся из витрины '
+        'готовым — это то же число, что стоит в плашке каждого банка. Ранг — '
+        'место по прогнозному выполнению плана: витрина ранжирует банки только '
+        'по закрытому месяцу, поэтому здесь банки упорядочены по колонке '
+        '«выполнение» этой же таблицы.</p>'
+        f'{fc_tbl}</div>'
+        f'<div class="gd-block"><h4>Закрытый месяц '
+        f'{C.esc(d.get("closed_label", ""))} — факт</h4>'
+        '<p class="g-act" style="margin:0 0 10px">Твёрдая цифра: ведомость '
+        'закрыта, пересчёту не подлежит. Ранг — витринный: то же место, что '
+        'стоит в плашке прогноза строкой «ранг ТБ».</p>'
+        f'{cl_tbl}</div>'
+        f'{dyn}'
+        '</div></dialog>'
+    )
+
+
+# Пошаговая инструкция: один шаг на экране, список шагов сверху, «Назад»/«Далее»
+# внизу. Разметка шагов лежит в help.html (наш файл), навигацию делает этот скрипт.
+#
+# Скрипт ОБОРАЧИВАЕТ hlpOpen из help.js.txt (файл дизайнера, его не трогаем) — так
+# каждое открытие инструкции начинается с первого шага, а не с того, на котором её
+# закрыли в прошлый раз. Сам help.js при загрузке открывает окно раньше, чем сюда
+# доходит очередь, поэтому первый показ выставляет шаг инициализация ниже.
+_HELP_STEPS_JS = """
+<script>
+(function(){
+  var dlg = document.getElementById('hlp');
+  var steps = dlg ? Array.prototype.slice.call(dlg.querySelectorAll('.hlp-step')) : [];
+  if(!dlg || steps.length < 2) return;
+  var rail = document.getElementById('hlp-rail');
+  var prev = document.getElementById('hlp-prev');
+  var next = document.getElementById('hlp-next');
+  var count = document.getElementById('hlp-count');
+  var body = dlg.querySelector('.hlp-body');
+  var cur = 0;
+
+  steps.forEach(function(s, i){
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'hlp-chip';
+    b.setAttribute('role', 'tab');
+    b.innerHTML = '<i>' + (i + 1) + '</i>';
+    b.appendChild(document.createTextNode(s.dataset.title || ('Шаг ' + (i + 1))));
+    b.addEventListener('click', function(){ show(i); });
+    if(rail) rail.appendChild(b);
+  });
+
+  function show(i){
+    cur = Math.max(0, Math.min(i, steps.length - 1));
+    steps.forEach(function(s, k){ s.hidden = (k !== cur); });
+    if(rail){
+      Array.prototype.forEach.call(rail.children, function(b, k){
+        b.classList.toggle('on', k === cur);
+        b.setAttribute('aria-selected', k === cur ? 'true' : 'false');
+      });
+      var on = rail.querySelector('.hlp-chip.on');
+      if(on && on.scrollIntoView) on.scrollIntoView({block: 'nearest', inline: 'nearest'});
+    }
+    if(count) count.textContent = 'Шаг ' + (cur + 1) + ' из ' + steps.length;
+    if(prev) prev.disabled = (cur === 0);
+    if(next) next.textContent = (cur === steps.length - 1) ? 'Понятно' : 'Далее →';
+    if(body) body.scrollTop = 0;
+  }
+
+  /* На последнем шаге «Далее» превращается в «Понятно» и закрывает окно */
+  window.hlpStep = function(delta){
+    if(delta > 0 && cur === steps.length - 1){ window.hlpClose(); return; }
+    show(cur + delta);
+  };
+
+  var origOpen = window.hlpOpen;
+  window.hlpOpen = function(){
+    show(0);
+    if(typeof origOpen === 'function') origOpen();
+  };
+
+  dlg.addEventListener('keydown', function(e){
+    if(e.key === 'ArrowRight'){ e.preventDefault(); show(cur + 1); }
+    else if(e.key === 'ArrowLeft'){ e.preventDefault(); show(cur - 1); }
+  });
+
+  show(0);
+})();
+</script>
+"""
+
+
+# Экран выбора раздела: плашки вместо прокрутки.
+#
+# Прячет разделы НЕ атрибутом hidden, а состоянием уровня (data-hub-view) и
+# правилами в ux-fix.css: раздел — обычный блок, но плашка прогноза и сами
+# разделы приходят из чужого скрипта со своими display, и атрибут они бы
+# перебили. Состояние ставит только скрипт: без него страница остаётся прежней —
+# все разделы на месте, плашки просто ни на что не переключают.
+#
+# Запускается после ux.js и по тем же событиям: раскладку уровня тот строит
+# лениво, при первом показе, и до него разделов в нужном виде ещё нет.
+_HUB_JS = """
+<script>
+(function(){
+  function activeLvl(){
+    var all = document.querySelectorAll('.lvl');
+    for(var i = 0; i < all.length; i++){ if(!all[i].hidden) return all[i]; }
+    return null;
+  }
+  function sections(lvl){ return lvl.querySelectorAll(':scope > section'); }
+
+  /* Оверлеи карточек ТБ/ГОСБ разложены по своим разделам, а на экране выбора
+     раздел скрыт. Модальное окно, открытое внутри скрытого блока, браузер не
+     рисует вовсе: showModal() срабатывает, окно приходит нулевого размера, а
+     страница при этом становится недоступной для кликов — именно так ломался
+     переход к ГОСБ из поиска в шапке (и вместе с ним все кнопки страницы,
+     включая «Скачать PDF»). Поэтому переносим оверлеи в body: находят их по id,
+     от места в разметке они не зависят, а body не скрывается никогда. */
+  function freeDialogs(){
+    document.querySelectorAll('.lvl section dialog.gd').forEach(function(d){
+      document.body.appendChild(d);
+    });
+  }
+  freeDialogs();
+
+  /* экран выбора: плашки видны, разделы скрыты */
+  function hubHome(lvl, scroll){
+    if(!lvl) return;
+    sections(lvl).forEach(function(s){ s.classList.remove('hub-on'); });
+    lvl.dataset.hubView = 'home';
+    if(scroll !== false) window.scrollTo({top: 0, behavior: 'instant'});
+  }
+
+  /* открыт ровно один раздел; остальные и плашка прогноза убраны с экрана */
+  function hubOpen(lvl, sec){
+    if(!lvl || !sec) return;
+    sections(lvl).forEach(function(s){ s.classList.toggle('hub-on', s === sec); });
+    var det = sec.querySelector('.section-details');
+    if(det) det.open = true;                 /* раздел открывают, чтобы читать */
+    var title = sec.querySelector('h2');
+    var back = lvl.querySelector(':scope > .hub-back .hub-back-t');
+    if(back) back.textContent = title ? title.textContent : '';
+    lvl.dataset.hubView = 'sec';
+    window.scrollTo({top: 0, behavior: 'instant'});
+  }
+  window.hubHome = function(){ hubHome(activeLvl()); };
+
+  function wire(lvl){
+    if(lvl.dataset.hubWired === '1') return;
+    lvl.querySelectorAll(':scope > .hub-wrap .hub-tile').forEach(function(t){
+      t.addEventListener('click', function(){
+        hubOpen(lvl, document.getElementById(t.dataset.sec));
+      });
+    });
+    var home = lvl.querySelector(':scope > .hub-back .hub-home');
+    if(home) home.addEventListener('click', function(){ hubHome(lvl); });
+    lvl.dataset.hubWired = '1';
+  }
+
+  /* Разделы в боковой колонке — чужой список (его строит ux.js), и ведёт он
+     прокруткой к разделу. В режиме плашек прокручивать не к чему: раздел скрыт,
+     поэтому сначала открываем его, а прокрутка чужого обработчика уже попадает
+     в видимый блок. Слушаем на перехвате — до обработчика самой кнопки. */
+  document.addEventListener('click', function(e){
+    var pill = e.target.closest ? e.target.closest('.qn-pill') : null;
+    if(!pill) return;
+    var lvl = activeLvl();
+    if(!lvl) return;
+    if(pill.hasAttribute('data-forecast')){ hubHome(lvl); return; }
+    var i = parseInt(pill.getAttribute('data-sec-idx'), 10);
+    var det = lvl.querySelectorAll(':scope > section > .section-details')[i];
+    if(det) hubOpen(lvl, det.closest('section'));
+  }, true);
+
+  /* Карточки показателей на экране выбора свёрнуты: главное число уровня стоит
+     в плашке прогноза строкой выше, а закрытый месяц и год к году нужны не
+     каждый раз — из-за них плашки разделов уезжали под сгиб экрана. Сворачиваем
+     кнопкой самого дизайна, а не своим display: у неё своя подпись и своё
+     состояние. Один раз на уровень — дальше решает читатель. */
+  function foldKpis(lvl){
+    if(lvl.dataset.hubFolded === '1') return;
+    var panel = lvl.querySelector(':scope > .forecast-panel');
+    var grid = panel ? panel.querySelector(':scope > .grid.cols-2') : null;
+    var toggle = panel ? panel.querySelector('.forecast-toggle') : null;
+    if(!grid || !toggle) return;              /* ux.js ещё не перестроил уровень */
+    if(grid.style.display !== 'none') toggle.click();
+    lvl.dataset.hubFolded = '1';
+  }
+
+  var lastId = null;
+  function apply(){
+    var lvl = activeLvl();
+    if(!lvl || !lvl.querySelector(':scope > .hub-wrap')) return;
+    wire(lvl);
+    foldKpis(lvl);
+    /* смена уровня возвращает на экран выбора: другой банк — другой отчёт,
+       и начинать его с раздела, открытого в предыдущем, незачем */
+    if(!lvl.dataset.hubView || lvl.id !== lastId) hubHome(lvl, lvl.id !== lastId);
+    lastId = lvl.id;
+  }
+  apply();
+  document.addEventListener('click', function(){ setTimeout(apply, 0); });
+  window.addEventListener('hashchange', function(){ setTimeout(apply, 0); });
+})();
+</script>
+"""
+
+
+# Кнопка «Портфель по всем ТБ» рядом с «Управлением портфелем».
+#
+# Ставится СКРИПТОМ, а не разметкой: саму кнопку управления портфелем создаёт
+# ux.js, перекладывая уровень, и появляется она только у того уровня, который
+# читатель открыл. Поэтому кнопку добавляем после него и повторяем проверку на
+# тех же событиях, что и он, — иначе на второй вкладке её бы не было.
+_TBDYN_JS = """
+<script>
+function tbDynOpen(){
+  var d = document.getElementById('tb-dyn');
+  if(d && !d.open) d.showModal();
+}
+function tbDynClose(){
+  var d = document.getElementById('tb-dyn');
+  if(d && d.open) d.close();
+}
+(function(){
+  var dlg = document.getElementById('tb-dyn');
+  if(dlg) dlg.addEventListener('click', function(e){ if(e.target === dlg) dlg.close(); });
+  /* Подпись окна «Управление портфелем» ставит скрипт дизайна, и в ней перечислен
+     пайплайн, которого в отчёте больше нет. Файл дизайна не правим — поправляем
+     готовую разметку здесь же, где добавляем соседнюю кнопку. */
+  function fixMgmtNote(){
+    document.querySelectorAll('dialog.gd[id^="mgmt-lvl-"] .gd-note').forEach(function(n){
+      if(n.textContent.indexOf('пайплайн') !== -1){
+        n.textContent = 'справочно · факт по портфелю и оттоку';
+      }
+    });
+  }
+  function addButtons(){
+    fixMgmtNote();
+    document.querySelectorAll('.forecast-panel').forEach(function(panel){
+      if(panel.dataset.tbDyn === '1') return;
+      var trigger = panel.querySelector(':scope > .mgmt-trigger');
+      if(!trigger) return;               /* ux.js ещё не перестроил этот уровень */
+      panel.dataset.tbDyn = '1';
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mgmt-trigger tbdyn-trigger';
+      btn.title = 'План, факт и выполнение по всем территориальным банкам';
+      btn.innerHTML = '<span>Портфель по всем ТБ: план, факт, динамика</span>'
+        + '<span class="mti">\\u2192</span>';
+      btn.addEventListener('click', tbDynOpen);
+      trigger.insertAdjacentElement('afterend', btn);
+    });
+  }
+  addButtons();
+  /* этот скрипт стоит в теле страницы, а плашку прогноза перестраивает скрипт
+     дизайна из хвоста — на момент первого вызова её ещё нет. Поэтому повтор по
+     загрузке документа: без него кнопка появлялась только после первого клика
+     где-нибудь на странице. */
+  window.addEventListener('load', addButtons);
+  document.addEventListener('click', function(){ setTimeout(addButtons, 0); });
+  window.addEventListener('hashchange', function(){ setTimeout(addButtons, 0); });
+})();
+</script>
+"""
 
 
 def _cell_dialog() -> str:
@@ -1291,6 +1828,11 @@ function exportLevelPdf(idx){
     el.remove();
   });
   clone.querySelectorAll('details').forEach(function(d){ d.open = true; });
+  /* на бумаге разделы идут подряд: экран выбора и строка возврата — способ
+     навигации по странице, в отчёте им места нет, а спрятанные им разделы
+     должны вернуться */
+  clone.removeAttribute('data-hub-view');
+  clone.querySelectorAll('.hub-wrap, .hub-back').forEach(function(el){ el.remove(); });
   /* плашка показателей могла быть свёрнута кнопкой — возвращаем */
   clone.querySelectorAll('[style]').forEach(function(el){
     if(el.style && el.style.display === 'none') el.style.display = '';
