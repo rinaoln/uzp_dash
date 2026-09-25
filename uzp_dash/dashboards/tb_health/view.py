@@ -502,15 +502,23 @@ def _hero(a: analyze.Analysis) -> str:
     return C.card(inner, cls="hero")
 
 
+# ДИНАМИКА НЕДЕЛЯ К НЕДЕЛЕ ПОКАЗЫВАЕТСЯ, ТОЛЬКО ЕСЛИ ЕСТЬ ЧТО ПОКАЗАТЬ.
+#
+# Раньше при нулевой дельте строка писала «без изменений», а при отсутствии базы —
+# что сравнивать не с чем. Читателю от обеих формулировок пользы нет: строка
+# занимает место в самой заметной плашке отчёта и выглядит как неработающий
+# показатель. Правило теперь простое: нет цифры — нет и строки. Поэтому
+# `_wow_num`/`_wow_pp` возвращают пустую строку на нулевой дельте, а строка
+# целиком не рисуется, если ни одно из её чисел не заполнилось.
 def _wow_num(delta: float, unit: str = "", digits: int = 0,
              eps: float = 0.5) -> str:
     """Изменение величины к прошлой сборке: знак, цвет, единица.
 
-    Ноль в пределах округления пишем словами: «+0 чел» читалось бы как
-    настоящее изменение на ноль, а это отсутствие изменения.
+    Ноль в пределах округления — пусто: «+0 чел» читалось бы как настоящее
+    изменение на ноль, а «без изменений» — как сломанный расчёт.
     """
     if abs(delta) < eps:
-        return '<b style="color:var(--text-2)">без изменений</b>'
+        return ""
     col = "var(--good)" if delta > 0 else "var(--bad)"
     sign = "+" if delta > 0 else "−"
     tail = f" {C.esc(unit)}" if unit else ""
@@ -524,27 +532,39 @@ def _wow_pp(delta: float | None) -> str:
     Проценты от процентов в отчёте про выполнение плана читаются неверно.
     """
     if delta is None or abs(delta) < 0.0005:
-        return '<b style="color:var(--text-2)">без изменений</b>'
+        return ""
     col = "var(--good)" if delta > 0 else "var(--bad)"
     sign = "+" if delta > 0 else "−"
     return f'<b style="color:{col}">{sign}{abs(delta) * 100:.1f} п.п.</b>'
 
 
 def _wow_row(a: analyze.Analysis) -> str:
-    """Строка «неделя к неделе» в плашке прогноза.
+    """Строка «неделя к неделе» в плашке прогноза — или пусто.
 
-    Сравнение идёт с прошлой СБОРКОЙ отчёта — в витрине недельного грейна нет
-    (см. snapshot.py), поэтому дата базовой сборки подписана прямо в строке: без
-    неё непонятно, за какой период показано изменение. Когда базы ещё нет, строка
-    не исчезает, а говорит об этом — иначе читатель решит, что изменений нет.
+    Сравнение идёт с прошлой СБОРКОЙ отчёта: в витрине недельного грейна нет
+    (см. snapshot.py). Поэтому дата базовой сборки подписана прямо в строке — без
+    неё непонятно, за какой период показано изменение. Если базы нет или ни одно
+    число не изменилось, строки не будет вовсе.
     """
     w = a.wow or {}
     if not w.get("rcp"):
-        return ('<div class="row2 wow">Неделя к неделе: сравнивать пока не с чем — '
-                'снимок этой сборки сохранён, динамика появится в следующем отчёте.</div>')
+        return ""
     rcp, fot = w["rcp"], w.get("fot") or {}
-    plan = (f' · план {_wow_num(rcp["plan"], "чел")}'
-            if abs(rcp.get("plan", 0)) >= 0.5 else "")
+    parts = []
+    fc = _wow_num(rcp["fc"], "чел")
+    if fc:
+        parts.append(f"прогноз получателей {fc}")
+    plan = _wow_num(rcp.get("plan", 0), "чел")
+    if plan:
+        parts.append(f"план {plan}")
+    ex = _wow_pp(rcp.get("exec"))
+    if ex:
+        parts.append(f"выполнение {ex}")
+    fot_d = _wow_num(fot.get("fc", 0) / 1e6, "млн ₽", 1, 0.05)
+    if fot_d:
+        parts.append(f"прогноз ФОТ {fot_d}")
+    if not parts:
+        return ""
     # Подсказка называет ОБА прогноза — базовый и текущий. Сравнение идёт по
     # прогнозу витрины на один и тот же месяц, и это должно проверяться на месте,
     # без открытия снимка прошлой сборки.
@@ -554,9 +574,7 @@ def _wow_row(a: analyze.Analysis) -> str:
            f'{C.fmt_num(was)} в сборке от {C.esc(w["full"])} → {C.fmt_num(now)} сейчас"'
            if was else "")
     return (f'<div class="row2 wow"{tip}>Неделя к неделе, к сборке от '
-            f'{C.esc(w["full"])}: прогноз получателей {_wow_num(rcp["fc"], "чел")}'
-            f'{plan} · выполнение {_wow_pp(rcp.get("exec"))} · '
-            f'прогноз ФОТ {_wow_num(fot.get("fc", 0) / 1e6, "млн ₽", 1, 0.05)}</div>')
+            f'{C.esc(w["full"])}: ' + " · ".join(parts) + '</div>')
 
 
 def _wow_unit(a: analyze.Analysis, unit_id: int, cls: str = "g-wow") -> str:
@@ -565,11 +583,19 @@ def _wow_unit(a: analyze.Analysis, unit_id: int, cls: str = "g-wow") -> str:
     u = (w.get("units") or {}).get(unit_id)
     if not u:
         return ""
+    parts = []
+    fc = _wow_num(u["fc"], "чел")
+    if fc:
+        parts.append(f"прогноз {fc}")
+    ex = _wow_pp(u.get("exec"))
+    if ex:
+        parts.append(f"выполнение {ex}")
+    if not parts:
+        return ""
     tip = (f' title="прогноз в сборке от {C.esc(w.get("full", ""))}: '
            f'{C.fmt_num(u["was"])} чел"' if u.get("was") else "")
     return (f'<div class="{cls}"{tip}>Неделя к неделе (к {C.esc(w.get("label", ""))}): '
-            f'прогноз {_wow_num(u["fc"], "чел")} · '
-            f'выполнение {_wow_pp(u.get("exec"))}</div>')
+            + " · ".join(parts) + '</div>')
 
 
 def _delta_html(delta: float, unit: str = "") -> str:
@@ -1266,6 +1292,39 @@ def _rank_cell(rk: tuple | None) -> str:
     return f'<span class="rk">{rk[0]}<i>/{rk[1]}</i></span>'
 
 
+def _delta_cell(delta: float) -> str:
+    """Отклонение от плана в КОЛОНКЕ таблицы: только знак, число и цвет.
+
+    Единица («чел») и смысл («к плану») вынесены в шапку колонки: в таблице на
+    дюжину строк подпись повторялась бы у каждого числа и мешала сравнивать
+    столбец по вертикали. В тексте, где число стоит одно, работает `_delta_html`
+    — там подпись нужна.
+    """
+    if abs(delta) < 0.5:
+        return '<b style="color:var(--text-2)">0</b>'
+    col = "var(--good)" if delta > 0 else "var(--bad)"
+    sign = "+" if delta > 0 else "−"
+    return f'<b style="color:{col}">{sign}{C.fmt_num(abs(delta))}</b>'
+
+
+# Месяц прописью: «07.2026» → «июль 2026» (на что? на июль) или «июля 2026»
+# (факт чего? факт июля). Заголовки окон читаются людьми вслух на совещании, и
+# «Факт 06.2026» в них звучит как код, а не как месяц.
+_MONTHS_NOM = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль",
+               "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+_MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+               "августа", "сентября", "октября", "ноября", "декабря")
+
+
+def _month_ru(label: str, case: str = "nom") -> str:
+    """«MM.YYYY» словами. Непонятный формат возвращаем как есть — без выдумок."""
+    m = re.fullmatch(r"\s*(\d{1,2})\.(\d{4})\s*", str(label or ""))
+    if not m or not 1 <= int(m.group(1)) <= 12:
+        return C.esc(label or "")
+    names = _MONTHS_GEN if case == "gen" else _MONTHS_NOM
+    return f"{names[int(m.group(1)) - 1]} {m.group(2)}"
+
+
 def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str:
     """Плашка «Портфель по всем ТБ»: прогноз, закрытый месяц и помесячная динамика.
 
@@ -1308,17 +1367,17 @@ def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str
                 # у банка ранга нет — сравнивать его не с кем
                 _rank_cell(None if a is sb else ranks.get(a.tb_id)),
                 C.fmt_num(plan), C.fmt_num(val),
-                _delta_html(val - plan, "чел"),
+                _delta_cell(val - plan),
                 C.badge(_pct(ex), C.status_of(ex)),
             ])
         return out
 
     fc_tbl = C.table(["Территориальный банк", "ранг", "план, чел", "прогноз, чел",
-                      "отклонение от плана", "выполнение"],
-                     money_rows("forecast"), num_cols=[1, 2, 3])
+                      "отклонение от плана, чел", "выполнение"],
+                     money_rows("forecast"), num_cols=[1, 2, 3, 4])
     cl_tbl = C.table(["Территориальный банк", "ранг", "план, чел", "факт, чел",
-                      "отклонение от плана", "выполнение"],
-                     money_rows("closed"), num_cols=[1, 2, 3])
+                      "отклонение от плана, чел", "выполнение"],
+                     money_rows("closed"), num_cols=[1, 2, 3, 4])
 
     # Помесячная динамика: выполнение плана по каждому ТБ за закрытые месяцы.
     # Берём ту же историю, по которой строится раздел «Динамика за 12 месяцев»,
@@ -1355,23 +1414,22 @@ def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str
         '<div class="gd-head"><div>'
         '<h3 style="margin:0">Портфель по территориальным банкам</h3>'
         f'<div class="gd-note">план, факт и выполнение по всей сети · '
-        f'прогноз на {C.esc(d.get("label", ""))}, база — закрытый '
-        f'{C.esc(d.get("closed_label", ""))}</div></div>'
+        f'прогноз на {_month_ru(d.get("label", ""))}, база — факт '
+        f'{_month_ru(d.get("closed_label", ""), "gen")}</div></div>'
         '<div class="gd-head-actions">'
         '<button type="button" class="gd-close" onclick="tbDynClose()" '
         'aria-label="Закрыть">×</button></div></div>'
-        f'<div class="gd-block"><h4>Прогноз на {C.esc(d.get("label", ""))}</h4>'
+        f'<div class="gd-block"><h4>Прогноз на {_month_ru(d.get("label", ""))}</h4>'
         '<p class="g-act" style="margin:0 0 10px">Прогноз берётся из витрины '
         'готовым — это то же число, что стоит в плашке каждого банка. Ранг — '
         'место по прогнозному выполнению плана: витрина ранжирует банки только '
         'по закрытому месяцу, поэтому здесь банки упорядочены по колонке '
         '«выполнение» этой же таблицы.</p>'
         f'{fc_tbl}</div>'
-        f'<div class="gd-block"><h4>Закрытый месяц '
-        f'{C.esc(d.get("closed_label", ""))} — факт</h4>'
-        '<p class="g-act" style="margin:0 0 10px">Твёрдая цифра: ведомость '
-        'закрыта, пересчёту не подлежит. Ранг — витринный: то же место, что '
-        'стоит в плашке прогноза строкой «ранг ТБ».</p>'
+        f'<div class="gd-block"><h4>Факт '
+        f'{_month_ru(d.get("closed_label", ""), "gen")}</h4>'
+        '<p class="g-act" style="margin:0 0 10px">Ранг — витринный: то же место, '
+        'что стоит в плашке прогноза строкой «ранг ТБ».</p>'
         f'{cl_tbl}</div>'
         f'{dyn}'
         '</div></dialog>'
