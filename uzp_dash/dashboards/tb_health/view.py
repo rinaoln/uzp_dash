@@ -435,7 +435,8 @@ def _hub(a: analyze.Analysis, idx: int, secs: list) -> str:
     return (f'<div class="hub-wrap">'
             f'<div class="hub-lead">Разделы отчёта — откройте нужный, '
             f'страница покажет только его</div>'
-            f'<div class="hub">{"".join(tiles)}</div></div>{back}')
+            f'<div class="hub" data-n="{len(tiles)}">{"".join(tiles)}'
+            f'</div></div>{back}')
 
 
 def _lvl_head(a: analyze.Analysis, idx: int) -> str:

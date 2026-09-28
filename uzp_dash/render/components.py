@@ -655,3 +655,17 @@ def month_ru(label: str, case: str = "nom") -> str:
         return esc(label or "")
     names = _MONTHS_GEN if case == "gen" else _MONTHS_NOM
     return f"{names[int(m.group(1)) - 1]} {m.group(2)}"
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Форма слова при числе: 1 пара, 2 пары, 5 пар.
+
+    Согласование пишем руками, а не оставляем «1 пар»: в отчёте правления
+    такая строка читается как опечатка и роняет доверие к цифре рядом.
+    """
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many
