@@ -38,14 +38,48 @@ def dashboard(name: str):
 
 
 def _ensure_loaded() -> None:
-    """Импортировать все модули пакета dashboards, чтобы сработали декораторы."""
+    """Импортировать все модули пакета dashboards, чтобы сработали декораторы.
+
+    Пропуск одного дэша не должен ронять остальные: о сбое импорта сообщаем и
+    идём дальше. Сообщения печатаются всегда, минуя progress: это проблема
+    доставки кода, а не хода расчёта, и увидеть её нужно даже при verbose=False.
+    """
     global _LOADED
     if _LOADED:
         return
     from . import dashboards as pkg
+    seen: set[str] = set()
     for mod in pkgutil.iter_modules(pkg.__path__):
-        importlib.import_module(f"{pkg.__name__}.{mod.name}")
+        seen.add(mod.name)
+        try:
+            importlib.import_module(f"{pkg.__name__}.{mod.name}")
+        except Exception as e:                 # noqa: BLE001 — сообщаем и живём дальше
+            print(f"⚠ Дэш «{mod.name}» не загрузился и в список не попадёт: "
+                  f"{type(e).__name__}: {e}. Полная трассировка — "
+                  f"import {pkg.__name__}.{mod.name}", flush=True)
+    _warn_not_packages(pkg, seen)
     _LOADED = True
+
+
+def _warn_not_packages(pkg, seen: set[str]) -> None:
+    """Папка дэша лежит на месте, но пакетом не является — сказать об этом.
+
+    pkgutil видит подпапку как модуль только при наличии __init__.py. Если файл
+    не доехал (типичное при переносе кода на пром: он короткий и на вид пустой),
+    дэша просто нет в списке — без единой ошибки. Такое молчание дороже лишней
+    строки в выводе, поэтому проверяем папки сами.
+    """
+    for root in pkg.__path__:
+        d = Path(root)
+        if not d.is_dir():
+            continue
+        for sub in sorted(d.iterdir()):
+            if (sub.name in seen or sub.name.startswith(("_", "."))
+                    or not sub.is_dir() or not any(sub.glob("*.py"))):
+                continue
+            print(f"⚠ Папка «{sub.name}» в {d} не подключена: нет файла "
+                  f"__init__.py, дэша в списке не будет. Скопируйте на пром "
+                  f"файл {sub.name}/__init__.py целиком.", flush=True)
 
 
 def list_dashboards() -> list[str]:
