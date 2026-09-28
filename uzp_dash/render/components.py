@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import html as _html
 import math
+import re
 from typing import Iterable, Sequence
 
 
@@ -637,3 +638,20 @@ def orgs_explorer(table_id: str, rows: list[dict], gosb_options: list[str],
 }})();
 </script>
 """
+
+# Месяц прописью: «07.2026» → «июль 2026» (на что? на июль) или «июля 2026»
+# (факт чего? факт июля). Заголовки окон и строки выгрузки читаются людьми вслух
+# на совещании, и «Факт 06.2026» в них звучит как код, а не как месяц.
+_MONTHS_NOM = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль",
+               "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+_MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
+               "августа", "сентября", "октября", "ноября", "декабря")
+
+
+def month_ru(label: str, case: str = "nom") -> str:
+    """«MM.YYYY» словами. Непонятный формат возвращаем как есть — без выдумок."""
+    m = re.fullmatch(r"\s*(\d{1,2})\.(\d{4})\s*", str(label or ""))
+    if not m or not 1 <= int(m.group(1)) <= 12:
+        return esc(label or "")
+    names = _MONTHS_GEN if case == "gen" else _MONTHS_NOM
+    return f"{names[int(m.group(1)) - 1]} {m.group(2)}"

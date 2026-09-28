@@ -535,3 +535,29 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
   .hub-tile { min-height: 0; }
   .hub-back-fc { margin-left: 0; width: 100%; }
 }
+
+/* ============================================================
+   Кнопки выгрузки — синий контур
+   ============================================================
+   «Скачать PDF» у уровня и в карточке, «Экспорт в Excel» у каждой таблицы и в
+   раскрытой ячейке — это одна группа действий, и выглядеть они должны
+   одинаково. Раньше контур был серым и синел только при наведении: кнопки
+   терялись среди заголовков, и их искали глазами. Теперь контур и подпись синие
+   сразу, а заливки нет намеренно — залитый синий в отчёте занят главными
+   кнопками плашки прогноза, и спорить с ними выгрузки не должны.
+
+   Блок стоит в конце файла: правила выше объявляют те же классы, и перекрыть их
+   должен именно он. */
+.lvl-pdf, .xls-btn, .gd-export {
+  border: 1.5px solid var(--accent);
+  color: var(--accent);
+  background: var(--surface-solid);
+}
+.lvl-pdf:hover, .xls-btn:hover, .gd-export:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface-solid));
+}
+.lvl-pdf:focus-visible, .xls-btn:focus-visible, .gd-export:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}

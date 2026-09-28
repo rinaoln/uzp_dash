@@ -53,6 +53,7 @@ class Bank:
     trend: pd.DataFrame               # план/факт помесячно за 12 закрытых месяцев
     unit_seg: pd.DataFrame            # ГОСБ × сегмент, обе опорные даты
     unit_tot: pd.DataFrame            # итоги ГОСБ, обе опорные даты
+    unit_tot_fot: pd.DataFrame        # то же по ФОТ — только для выгрузки в Excel
     orgs: pd.DataFrame                # (ГОСБ, ИНН) — витрина + воронка + отток
     orgs_tb: pd.DataFrame             # (ТБ, ИНН) — строки витрины уровнем выше
     fagg: pd.DataFrame                # агрегат воронки по (ГОСБ, ИНН)
@@ -121,7 +122,13 @@ def load(ctx) -> Bank:
     unit_tot = read_sql(e, Q.UNIT_TOTALS, {"m_rcp": Q.METRIC_RECIPIENTS,
                                            "ref_cur": d["ref_cur"],
                                            "ref_closed": d["ref_closed"]})
-    for f in (unit_seg, unit_tot):
+    # Те же итоги по ФОТ. Нужны ТОЛЬКО сводной выгрузке в Excel: в самом отчёте ФОТ
+    # живёт на уровнях банка и ТБ (строка вердикта), а по ГОСБ его никто не читает.
+    # Запрос тот же, отличается метрикой, поэтому отдельного SQL не заводим.
+    unit_tot_fot = read_sql(e, Q.UNIT_TOTALS, {"m_rcp": Q.METRIC_FOT,
+                                               "ref_cur": d["ref_cur"],
+                                               "ref_closed": d["ref_closed"]})
+    for f in (unit_seg, unit_tot, unit_tot_fot):
         f["end_dt"] = pd.to_datetime(f["end_dt"]).dt.date
     _log_units(unit_seg, unit_tot, d)
 
@@ -173,6 +180,7 @@ def load(ctx) -> Bank:
 
     return Bank(dates=d, tbs=tbs, apparat=apparat, tb_of=tb_of, gosb_name=gosb_name,
                 verdict=verdict, trend=trend, unit_seg=unit_seg, unit_tot=unit_tot,
+                unit_tot_fot=unit_tot_fot,
                 orgs=orgs, orgs_tb=orgs_tb, fagg=fagg, act_tot=act_tot, act_brk=act_brk,
                 fmonths=fmonths, orgs_fc=orgs_fc, conv=conv, seg_by_inn=seg_by_inn,
                 promises=promises,

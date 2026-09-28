@@ -19,7 +19,7 @@ from ...registry import Context, dashboard
 from ...render import components as C
 from ...render import page
 from ... import progress
-from . import analyze, bank, prompts, segments, snapshot
+from . import analyze, bank, prompts, segments, snapshot, summary_xlsx
 
 SEG_ORDER = segments.ORDER   # короткие названия сегментов (КСБ, РГС, …)
 
@@ -189,6 +189,12 @@ def build(ctx: Context) -> str:
                       "на этот прогнозный месяц нет — в плашке прогноза об этом "
                       "сказано прямо")
     snapshot.save(ctx.output_dir, ref_cur, [sb] + preps)
+
+    # Сводка по всем ТБ и ГОСБ в шаблоне банка «Портфель ФЛ_Summary ТБ» —
+    # отдельным файлом рядом с отчётом. Собирается здесь, а не отдельным
+    # прогоном: все её числа уже прочитаны для самого отчёта, и второй заход
+    # в витрину ради того же среза был бы лишним.
+    summary_xlsx.save(ctx.output_dir, b)
 
     # Выводы по разделам — по вызову LLM на уровень, и это основное время отчёта.
     # ПОСЛЕДОВАТЕЛЬНО: параллельный вариант пробовали, корпоративный шлюз отвечает на
@@ -1307,24 +1313,6 @@ def _delta_cell(delta: float) -> str:
     return f'<b style="color:{col}">{sign}{C.fmt_num(abs(delta))}</b>'
 
 
-# Месяц прописью: «07.2026» → «июль 2026» (на что? на июль) или «июля 2026»
-# (факт чего? факт июля). Заголовки окон читаются людьми вслух на совещании, и
-# «Факт 06.2026» в них звучит как код, а не как месяц.
-_MONTHS_NOM = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль",
-               "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
-_MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
-               "августа", "сентября", "октября", "ноября", "декабря")
-
-
-def _month_ru(label: str, case: str = "nom") -> str:
-    """«MM.YYYY» словами. Непонятный формат возвращаем как есть — без выдумок."""
-    m = re.fullmatch(r"\s*(\d{1,2})\.(\d{4})\s*", str(label or ""))
-    if not m or not 1 <= int(m.group(1)) <= 12:
-        return C.esc(label or "")
-    names = _MONTHS_GEN if case == "gen" else _MONTHS_NOM
-    return f"{names[int(m.group(1)) - 1]} {m.group(2)}"
-
-
 def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str:
     """Плашка «Портфель по всем ТБ»: прогноз, закрытый месяц и помесячная динамика.
 
@@ -1414,12 +1402,12 @@ def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str
         '<div class="gd-head"><div>'
         '<h3 style="margin:0">Портфель по территориальным банкам</h3>'
         f'<div class="gd-note">план, факт и выполнение по всей сети · '
-        f'прогноз на {_month_ru(d.get("label", ""))}, база — факт '
-        f'{_month_ru(d.get("closed_label", ""), "gen")}</div></div>'
+        f'прогноз на {C.month_ru(d.get("label", ""))}, база — факт '
+        f'{C.month_ru(d.get("closed_label", ""), "gen")}</div></div>'
         '<div class="gd-head-actions">'
         '<button type="button" class="gd-close" onclick="tbDynClose()" '
         'aria-label="Закрыть">×</button></div></div>'
-        f'<div class="gd-block"><h4>Прогноз на {_month_ru(d.get("label", ""))}</h4>'
+        f'<div class="gd-block"><h4>Прогноз на {C.month_ru(d.get("label", ""))}</h4>'
         '<p class="g-act" style="margin:0 0 10px">Прогноз берётся из витрины '
         'готовым — это то же число, что стоит в плашке каждого банка. Ранг — '
         'место по прогнозному выполнению плана: витрина ранжирует банки только '
@@ -1427,7 +1415,7 @@ def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str
         '«выполнение» этой же таблицы.</p>'
         f'{fc_tbl}</div>'
         f'<div class="gd-block"><h4>Факт '
-        f'{_month_ru(d.get("closed_label", ""), "gen")}</h4>'
+        f'{C.month_ru(d.get("closed_label", ""), "gen")}</h4>'
         '<p class="g-act" style="margin:0 0 10px">Ранг — витринный: то же место, '
         'что стоит в плашке прогноза строкой «ранг ТБ».</p>'
         f'{cl_tbl}</div>'
