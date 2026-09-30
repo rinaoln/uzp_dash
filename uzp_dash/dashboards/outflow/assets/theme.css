@@ -206,3 +206,8 @@ td.of-cell.on { outline: 2px solid var(--ink); outline-offset: -2px; }
 .g-more.u-open:hover { border-color: var(--accent); }
 .gcard.on { outline: 2px solid var(--accent); outline-offset: -2px; }
 .of-drill h4 { margin: 14px 0 6px; font-size: 15px; font-weight: 700; }
+
+/* Колонка «что сказано в задаче»: текст, а не число, и он не должен растягивать
+   таблицу — ширину ограничиваем, длинные причины переносим по словам. */
+td.of-said { font-size: 13px; line-height: 1.4; color: var(--text-2); max-width: 280px; }
+td.of-said i { font-style: normal; }

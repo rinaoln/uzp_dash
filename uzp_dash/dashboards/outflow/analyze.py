@@ -738,13 +738,22 @@ def _cells(clients: pd.DataFrame, b, tb_id: int | None, months: list,
     g = (c.groupby([key, "seg_name", "inn"], as_index=False)
           [["out_qty", "ret_qty", "out_kept"]].sum())
     names = _name_by_inn(b)
+    # Что сказано в задачах по клиенту: причина ухода и обещание вернуть людей.
+    # Разбирают текст правила tb_health (чек-лист сильнее комментария) — тем же
+    # расчётом, что и свод по причинам, иначе строка клиента и свод разошлись бы.
+    said = th._promise_index(getattr(b, "promises", None),
+                             "tb_id" if tb_id is None else "new_gosb_id",
+                             getattr(b, "tb_of", None))
     out: dict = {}
     for (uid, seg), part in g.groupby([key, "seg_name"], dropna=False):
         part = part.sort_values("out_kept", ascending=False)
-        rows = [{"name": names.get(int(r.inn)) or f"Орг. {int(r.inn)}",
-                 "gone": float(r.out_qty), "ret": float(r.ret_qty),
-                 "kept": float(r.out_kept)}
-                for r in part.head(CELL_TOP_N).itertuples()]
+        rows = []
+        for r in part.head(CELL_TOP_N).itertuples():
+            row = {"name": names.get(int(r.inn)) or f"Орг. {int(r.inn)}",
+                   "gone": float(r.out_qty), "ret": float(r.ret_qty),
+                   "kept": float(r.out_kept)}
+            row.update(_said(said.get((int(uid), int(r.inn)))))
+            rows.append(row)
         tail = part.iloc[CELL_TOP_N:]
         out[f"{pkey}|{int(uid)}|{seg}"] = {
             "seg": str(seg), "n": int(len(part)),
@@ -752,6 +761,36 @@ def _cells(clients: pd.DataFrame, b, tb_id: int | None, months: list,
             "gone": float(part["out_qty"].sum()),
             "ret": float(part["ret_qty"].sum()), "rows": rows,
             "rest_n": int(len(tail)), "rest_kept": float(tail["out_kept"].sum())}
+    return out
+
+
+def _said(p: dict | None) -> dict:
+    """Строка «что сказано в задаче» для клиента: причина и обещание.
+
+    Обещание и причина живут только в тексте задачи — в чек-листе или в
+    комментарии сотрудника. Отдельного поля под них в витринах нет, поэтому у
+    части клиентов строка пустая: сказать «работы не было» по этому нельзя, и
+    отчёт ничего такого не говорит — просто прочерк.
+    """
+    if not p:
+        return {}
+    out = {}
+    reason = str(p.get("reason") or "")
+    if reason:
+        out["reason"] = reason
+        # откуда взято: чек-лист заполняют по форме, комментарий пишут словами —
+        # доверие к ним разное, и читатель вправе это видеть
+        out["rsrc"] = "чек-лист" if "чек-лист" in str(p.get("reason_src") or "") \
+            else "комментарий"
+    pr = p.get("promise") or {}
+    if pr:
+        qty = pr.get("qty")
+        month = str(pr.get("month") or "")
+        txt = ("обещали вернуть " + (f"{qty:,.0f} чел".replace(",", "\u00a0")
+                                     if qty else "получателей"))
+        if month:
+            txt += f" до {month}"
+        out["promise"] = txt
     return out
 
 

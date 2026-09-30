@@ -75,6 +75,9 @@ def build(ctx: Context) -> str:
               # памятка: своя разметка, свой скрипт (свой ключ «не показывать»),
               # а шаги листает общий скрипт первого отчёта — он про разметку, а
               # не про содержание, и дублировать его нечем
+              # окно разбора подразделения — прямо в <body>, вне уровней:
+              # <dialog> внутри скрытого поддерева открывается нулевого размера
+              f'{_UNIT_DLG}\n'
               f'{_asset("help.html")}<script>\n{_asset("help.js")}</script>\n'
               f'{base._HELP_STEPS_JS}\n'
               f'<div id="print-root" aria-hidden="true"></div>'),
@@ -90,6 +93,9 @@ def _asset(name: str) -> str:
 # Раскрытие ячейки матрицы. Таблица собирается СКРИПТОМ из данных уровня: готовая
 # разметка на все ячейки всех уровней весит в разы больше самих чисел, а
 # открывают за сеанс одну-две.
+_UNIT_DLG = ('<dialog class="gd of-dlg" id="of-unit" aria-label="Разбор '
+             'подразделения"><div class="gd-sheet" id="of-unit-body"></div></dialog>')
+
 _CELLS_JS = """
 <script>
 (function(){
@@ -99,6 +105,16 @@ _CELLS_JS = """
     });
   }
   function num(n){ return Number(n || 0).toLocaleString('ru-RU'); }
+  function said(r){
+    /* что сказано в задаче по этому клиенту: причина ухода и обещание вернуть.
+       Пусто — значит в тексте задачи об этом ничего нет; утверждать по этому,
+       что работы не было, отчёт не вправе */
+    var bits = [];
+    if(r.reason) bits.push(esc(r.reason)
+      + (r.rsrc ? ' <i style="color:var(--text-2)">(' + esc(r.rsrc) + ')</i>' : ''));
+    if(r.promise) bits.push(esc(r.promise));
+    return bits.length ? bits.join('<br>') : '\u2014';
+  }
   function clear(card){
     var on = card.querySelectorAll('td.of-cell.on');
     for(var i = 0; i < on.length; i++) on[i].classList.remove('on');
@@ -119,18 +135,18 @@ _CELLS_JS = """
       for(var i = 0; i < on.length; i++) on[i].classList.remove('on');
     }
   };
+  window.ofUnitClose = function(){
+    var d = document.getElementById('of-unit');
+    if(d && d.open){ if(d.close) d.close(); else d.removeAttribute('open'); }
+  };
   window.ofUnit = function(btn){
-    var pane = scope(btn); if(!pane) return;
-    var box = pane.querySelector('.of-drill'); if(!box) return;
+    var dlg = document.getElementById('of-unit');
+    var box = document.getElementById('of-unit-body');
+    if(!dlg || !box) return;
     var lvl = btn.closest('.lvl');
     var key = btn.getAttribute('data-unit') || '';
     var u = ((window.__OFUNITS || {})[lvl ? lvl.id : ''] || {})[key];
     if(!u) return;
-    if(box.dataset.key === key && !box.hidden){ window.ofDrillClose(box); return; }
-    clear(pane);
-    var cards = pane.querySelectorAll('.gcard.on');
-    for(var i = 0; i < cards.length; i++) cards[i].classList.remove('on');
-    if(btn.closest('.gcard')) btn.closest('.gcard').classList.add('on');
     var segs = (u.segs || []).map(function(sg){
       return '<tr><td>' + esc(sg.seg) + '</td><td class="num"><b>'
            + num(sg.kept) + '</b></td><td class="num">'
@@ -145,7 +161,10 @@ _CELLS_JS = """
       if(k.indexOf(pref) !== 0) return;
       (all[k].rows || []).forEach(function(r){
         var c = agg[r.name] || { name: r.name, gone: 0, ret: 0, kept: 0 };
-        c.gone += r.gone; c.ret += r.ret; c.kept += r.kept; agg[r.name] = c;
+        c.gone += r.gone; c.ret += r.ret; c.kept += r.kept;
+        if(!c.reason && r.reason){ c.reason = r.reason; c.rsrc = r.rsrc; }
+        if(!c.promise && r.promise) c.promise = r.promise;
+        agg[r.name] = c;
       });
     });
     var rows = Object.keys(agg).map(function(k){ return agg[k]; })
@@ -153,39 +172,47 @@ _CELLS_JS = """
       .map(function(r){
         return '<tr><td>' + esc(r.name) + '</td><td class="num">' + num(r.gone)
              + '</td><td class="num">' + (r.ret ? num(r.ret) : '\u2014')
-             + '</td><td class="num"><b>' + num(r.kept) + '</b></td></tr>';
+             + '</td><td class="num"><b>' + num(r.kept) + '</b></td>'
+             + '<td class="of-said">' + said(r) + '</td></tr>';
       }).join('');
     var dyn = [];
     if(u.delta !== null && u.delta !== undefined){
-      dyn.push('к ' + esc(u.prev) + ': ' + (u.delta > 0 ? '+' : '\u2212')
+      dyn.push('к ' + esc(u.prev) + ' ' + (u.delta > 0 ? '+' : '\u2212')
                + num(Math.abs(u.delta)) + ' чел (было ' + num(u.was) + ')');
     }
     if(u.yoy !== null && u.yoy !== undefined){
-      dyn.push('к ' + esc(u.yoy_label) + ': ' + (u.yoy > 0 ? '+' : '\u2212')
+      dyn.push('к ' + esc(u.yoy_label) + ' ' + (u.yoy > 0 ? '+' : '\u2212')
                + num(Math.abs(u.yoy)) + ' чел (было ' + num(u.yoy_was) + ')');
     }
     box.innerHTML =
-      '<div class="of-drill-head"><div class="of-drill-t">' + esc(u.name)
-      + ' \u00b7 <span class="of-drill-p">' + esc(u.period) + '</span></div>'
-      + '<button type="button" class="of-drill-x" onclick="ofDrillClose(this)">'
-      + 'Закрыть</button></div>'
-      + '<div class="of-drill-sub">Потеряли безвозвратно ' + num(u.kept)
-      + ' чел \u00b7 ушло ' + num(u.gone) + ' \u00b7 вернулось ' + num(u.ret)
-      + ' \u00b7 ушли из ' + num(u.orgs) + ' организаций'
-      + (dyn.length ? ' \u00b7 ' + dyn.join(' \u00b7 ') : '') + '</div>'
-      + (segs ? '<h4 style="margin:14px 0 6px">По каким сегментам ушли</h4>'
+      '<div class="gd-head"><div><h3 style="margin:0">' + esc(u.name) + '</h3>'
+      + '<div class="gd-note">' + esc(u.period) + '</div>'
+      + '<div class="gd-fc">Потеряли безвозвратно <b>' + num(u.kept)
+      + '</b> чел \u00b7 ушло ' + num(u.gone) + ' \u00b7 вернулось ' + num(u.ret)
+      + ' \u00b7 ушли из ' + num(u.orgs) + ' организаций</div>'
+      + (dyn.length ? '<div class="gd-note">' + dyn.join(' \u00b7 ') + '</div>' : '')
+      + '</div><div class="gd-head-actions">'
+      + '<button type="button" class="gd-close" onclick="ofUnitClose()" '
+      + 'aria-label="Закрыть">\u00d7</button></div></div>'
+      + (segs ? '<div class="gd-block"><h4>По каким сегментам ушли</h4>'
         + '<table><thead><tr><th>Сегмент</th><th class="num">потери, чел</th>'
         + '<th class="num">доля</th></tr></thead><tbody>' + segs
-        + '</tbody></table>' : '')
-      + (rows ? '<h4 style="margin:16px 0 6px">Кого потеряли крупнее всего</h4>'
+        + '</tbody></table></div>' : '')
+      + (rows ? '<div class="gd-block"><h4>Кого потеряли крупнее всего</h4>'
         + '<table><thead><tr><th>Клиент</th><th class="num">отток, чел</th>'
-        + '<th class="num">возврат, чел</th><th class="num">потери, чел</th></tr>'
+        + '<th class="num">возврат, чел</th><th class="num">потери, чел</th>'
+        + '<th>что сказано в задаче</th></tr>'
         + '</thead><tbody>' + rows + '</tbody></table>'
         + '<p class="of-drill-rest">Здесь десять крупнейших. Полный список по '
-        + 'паре подразделение\u2013сегмент открывается в матрице потерь.</p>' : '');
-    box.dataset.key = key;
-    box.hidden = false;
+        + 'паре подразделение\u2013сегмент открывается в матрице потерь.</p>'
+        + '</div>' : '');
+    if(typeof dlg.showModal === 'function'){ if(!dlg.open) dlg.showModal(); }
+    else { dlg.setAttribute('open', ''); }
   };
+  document.addEventListener('click', function(e){
+    /* клик по подложке закрывает окно: <dialog> сам этого не делает */
+    if(e.target && e.target.id === 'of-unit') window.ofUnitClose();
+  });
   window.ofCellKey = function(e, td){
     if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); window.ofCell(td); }
   };
@@ -208,7 +235,8 @@ _CELLS_JS = """
       return '<tr><td>' + esc(r.name) + '</td>'
            + '<td class="num">' + num(r.gone) + '</td>'
            + '<td class="num">' + (r.ret ? num(r.ret) : '\u2014') + '</td>'
-           + '<td class="num"><b>' + num(r.kept) + '</b></td></tr>';
+           + '<td class="num"><b>' + num(r.kept) + '</b></td>'
+           + '<td class="of-said">' + said(r) + '</td></tr>';
     }).join('');
     var share = data.ret && data.gone ? Math.round(data.ret / data.gone * 100) : 0;
     var rest = data.rest_n
@@ -227,7 +255,8 @@ _CELLS_JS = """
       + ' чел \u00b7 ушло ' + num(data.gone) + ' \u00b7 вернулось ' + num(data.ret)
       + ' (' + share + '%) \u00b7 организаций: ' + num(data.n) + '</div>'
       + '<table><thead><tr><th>Клиент</th><th class="num">отток, чел</th>'
-      + '<th class="num">возврат, чел</th><th class="num">потери, чел</th></tr>'
+      + '<th class="num">возврат, чел</th><th class="num">потери, чел</th>'
+      + '<th>что сказано в задаче</th></tr>'
       + '</thead><tbody>' + rows + '</tbody></table>' + rest;
     box.dataset.key = key;
     box.hidden = false;
@@ -904,8 +933,7 @@ def _unit_cards(lvl: analyze.Level, p: dict, lvl_of: dict | None) -> str:
                  f'lvlGo({go})">Открыть разбор {C.esc(u["name"])} →</div>'
                  if go else "")
         cards.append(f'<div class="card gcard {st}">{inner}{more}{drill}</div>')
-    return (f'<div class="gcards">{"".join(cards)}</div>'
-            f'<div class="of-drill" hidden aria-live="polite"></div>')
+    return f'<div class="gcards">{"".join(cards)}</div>'
 
 
 def _reasons_section(lvl: analyze.Level) -> str:
