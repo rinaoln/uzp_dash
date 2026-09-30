@@ -465,6 +465,7 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
   white-space: nowrap;
 }
 .hub-n b.bad { color: var(--bad); }
+.hub-n b.good { color: var(--good); }
 .hub-n i { font-style: normal; font-size: 12.5px; line-height: 1.3; color: var(--text-2); }
 /* --- Подвал уровня: к кому идти с вопросами ---
    Набран тише всего на странице: это служебная подпись, а не раздел отчёта.

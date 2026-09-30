@@ -377,12 +377,11 @@ def _hub_facts(a: analyze.Analysis) -> dict:
     o = a.outflow or {}
     if o.get("rows"):
         out["outflow"] = (
-            "Кого потеряли за три месяца, из-за чего и с каким результатом.",
+            "Кого потеряли за три месяца, кого вернули и с каким результатом.",
             [(C.fmt_num(o.get("tot_kept", 0)), "чел безвозвратных потерь", "bad"),
+             (C.fmt_num(o.get("ret_returned") or 0), "чел вернули", "good"),
              (C.fmt_num(len(o.get("top_promised") or [])),
-              "обещали вернуться, но не вернулись", ""),
-             (C.fmt_num(len(o.get("top_worked") or [])),
-              "отработали без результата", "")],
+              "обещали вернуться, но не вернулись", "")],
         )
     return out
 
@@ -2326,8 +2325,11 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
         f'{C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%). Безвозвратные потери: '
         f'<b>{C.fmt_num(o["tot_kept"])}</b> чел.</p>'
         + _gd_help(
-            '<b>Что за списки.</b> Оба — про один и тот же отток за три закрытых '
-            'месяца, но отвечают на разные вопросы. «Обещали вернуться» — там, где '
+            '<b>Что за списки.</b> Все — про один и тот же отток за три закрытых '
+            'месяца, но отвечают на разные вопросы. «Вернулись» — кого вернули: '
+            'люди ушли в окне отчёта и снова получают зарплату у нас; возврат '
+            'берётся из витрины возвратов, а не из задач, поэтому в списке есть и '
+            'клиенты, по которым работа не видна. «Обещали вернуться» — там, где '
             'договорённость о возврате была зафиксирована, а возврата нет. '
             '«Отработали без результата» — там, где по клиенту велась работа в месяцы '
             'ухода, обещаний не давали и не вернулся никто. Сколько задач было и '
@@ -2358,6 +2360,17 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
     if summary:
         groups.append({"title": "Общий свод по причинам оттока",
                        "sub": _reasons_tab_sub(o), "html": summary})
+    # Вторая плашка — обратный срез: не «где не получилось», а кого вернули.
+    # Стоит перед списками потерь намеренно: возврат — это результат работы, и
+    # разговор о нём начинается с того, что получилось.
+    if o.get("top_returned"):
+        n_ret = int(o.get("n_returned") or 0)
+        groups.append({
+            "title": "Вернулись",
+            "sub": (f'{C.fmt_num(n_ret)} '
+                    f'{_plural(n_ret, "клиент", "клиента", "клиентов")} · возврат '
+                    f'{C.fmt_num(o.get("ret_returned") or 0)} чел'),
+            "html": _returned_group(o["top_returned"], unit, o)})
     for rows_src, title, lead, kind in (
         (o.get("top_promised") or [], "Обещали вернуться, но не вернулись",
          "Договорённость о возврате зафиксирована в задаче по оттоку, а люди "
@@ -2377,9 +2390,10 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
     return C.section(
         "Отток", C.card(head + _outflow_tabs(groups)) + _ai(ai),
         eyebrow="Безвозвратные потери портфеля",
-        desc="Кого потеряли за три закрытых месяца и чем закончилась работа по "
-             "ним: отдельно невыполненные обещания вернуть получателей, отдельно "
-             "отработка, которая результата не дала.")
+        desc="Кого потеряли за три закрытых месяца, кого вернули и чем "
+             "закончилась работа: отдельно возвраты поимённо, отдельно "
+             "невыполненные обещания вернуть получателей, отдельно отработка, "
+             "которая результата не дала.")
 
 
 def _outflow_tabs(groups: list) -> str:
@@ -2405,9 +2419,13 @@ def _outflow_tabs(groups: list) -> str:
         f'<span class="of-tab-t">{C.esc(g["title"])}</span>'
         f'<span class="of-tab-n">{C.esc(g["sub"])}</span></button>'
         for i, g in enumerate(groups))
+    # Число плашек зависит от того, что нашлось в данных уровня, поэтому оно
+    # называется словом, а не подставляется цифрой: «Раздел собран из 4 плашек»
+    # в отчёте правления читается как недоделанный шаблон.
+    n = len(groups)
+    words = {3: "трёх", 4: "четырёх", 5: "пяти", 6: "шести"}.get(n)
     lead = ('<p class="sub" style="font-size:14px;margin:0 0 10px">'
-            'Раздел собран из трёх плашек — выберите нужную.</p>'
-            if len(groups) > 2 else
+            f'Раздел собран из {words} плашек — выберите нужную.</p>' if words else
             '<p class="sub" style="font-size:14px;margin:0 0 10px">'
             'Потери разнесены по двум спискам — выберите нужный.</p>')
     return (f'<div class="of-wrap">{lead}'
@@ -2575,6 +2593,95 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
         f'{C.fmt_num(tot)} чел</h4>'
         f'<p class="g-act" style="margin:0 0 10px">{C.esc(lead)}</p>'
         + C.table(cols, rows, num_cols=[1, 2, 3])
+    )
+
+
+def _returned_group(rows_src: list, unit: str, o: dict) -> str:
+    """Список вернувшихся клиентов — поимённо, с долей возврата.
+
+    Отдельная таблица, а не колонка в списках потерь: там разговор о том, где не
+    сработало, и возврат в них виден только как «вернулось меньше обещанного».
+    Здесь обратный вопрос — сколько людей вернули и по каким клиентам, — и
+    порядок строк задаёт именно возврат, а не потери.
+
+    Возврат берётся из витрины возвратов, а не из задач. Поэтому в списке есть
+    клиенты, по которым работа не видна: часть людей возвращается сама, и
+    приписывать этот возврат отработке было бы неправдой. О клиентах без задач
+    отчёт молчит — пустая ячейка, без утверждений.
+    """
+    if not rows_src:
+        return ""
+    has_emp = any(r["emp"] for r in rows_src)
+    n_all = int(o.get("n_returned") or len(rows_src))
+    n_full = int(o.get("n_ret_full") or 0)
+    ret_full = float(o.get("ret_full") or 0)
+    n_task = int(o.get("n_ret_task") or 0)
+    shown = sum(r["ret"] for r in rows_src)
+    rows = []
+    for r in rows_src:
+        when = ", ".join(r["months"][:3]) + (f" и ещё {len(r['months']) - 3}"
+                                             if len(r["months"]) > 3 else "")
+        share = (r["ret"] / r["gone"] * 100) if r["gone"] else 0
+        if r["kept"] <= 0:
+            kept_cell = '<span style="color:var(--good)">вернулись все</span>'
+        else:
+            kept_cell = f'<b style="color:var(--bad)">−{C.fmt_num(r["kept"])}</b>'
+        p = r.get("promise") or {}
+        if p.get("qty"):
+            work = (f'обещали вернуть {C.fmt_num(p["qty"])} чел · '
+                    + ('<span style="color:var(--good)">обещание выполнено</span>'
+                       if r["ret"] + 0.5 >= p["qty"] else
+                       '<span style="color:var(--warn)">вернулось меньше '
+                       'обещанного</span>'))
+        elif p:
+            work = 'обещали вернуть получателей'
+        elif r["out_success"]:
+            work = '<span style="color:var(--good)">задача по оттоку закрыта</span>'
+        elif r["tasks"]:
+            work = f'задачи в месяцы ухода: {r["tasks"]}'
+        else:
+            work = "—"
+        if r.get("out_reason"):
+            work += f'<div class="gd-emp">причина ухода: {C.esc(r["out_reason"])}</div>'
+        if r["emp"]:
+            who = f' · {C.esc(r["emp"])}'
+        elif has_emp:
+            who = ' · <span style="color:var(--warn)">закрепления нет</span>'
+        else:
+            who = ""
+        rows.append([
+            f'{C.esc(r["name"])}<div class="gd-emp">{C.esc(r["unit"])}{who}</div>',
+            C.fmt_num(r["gone"]),
+            f'<b style="color:var(--good)">{C.fmt_num(r["ret"])}</b>',
+            f'{share:.0f}%',
+            kept_cell,
+            C.esc(when) or "—",
+            work,
+        ])
+    cols = [f"Организация · {unit}" + (" · ответственный" if has_emp else ""),
+            "отток", "возврат", "доля возврата", "осталось потерь",
+            "период оттока", "чем сопровождался возврат"]
+    # «Полностью вернулись 0 клиентов» — предложение ни о чём: когда таких нет,
+    # его просто не пишем, а не печатаем ноль
+    full = (f'Полностью вернулись {C.fmt_num(n_full)} '
+            f'{_plural(n_full, "клиент", "клиента", "клиентов")} '
+            f'({C.fmt_num(ret_full)} чел). ' if n_full else "")
+    lead = (f'Возврат — это люди, которые ушли в окне отчёта и снова получают '
+            f'зарплату у нас; он считается по витрине возвратов, а не по задачам. '
+            f'{full}По {C.fmt_num(n_task)} '
+            f'{_plural(n_task, "клиенту", "клиентам", "клиентам")} в месяцы ухода '
+            f'велись задачи.')
+    tail = (f'<p class="sub" style="font-size:13px;margin:10px 0 0">В таблице '
+            f'{len(rows)} {_plural(len(rows), "клиент", "клиента", "клиентов")} '
+            f'из {C.fmt_num(n_all)} — на них {C.fmt_num(shown)} чел возврата из '
+            f'{C.fmt_num(o.get("ret_returned") or 0)}.</p>'
+            if n_all > len(rows) else "")
+    return (
+        f'<h4 style="margin-top:22px">Кого вернули — возврат '
+        f'{C.fmt_num(o.get("ret_returned") or 0)} чел по {C.fmt_num(n_all)} '
+        f'{_plural(n_all, "клиенту", "клиентам", "клиентам")}</h4>'
+        f'<p class="g-act" style="margin:0 0 10px">{lead}</p>'
+        + C.table(cols, rows, num_cols=[1, 2, 3, 4]) + tail
     )
 
 

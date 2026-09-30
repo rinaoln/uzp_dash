@@ -52,9 +52,12 @@ class Level:
     orgs: list = field(default_factory=list)        # крупнейшие потери, поимённо
     reco: list = field(default_factory=list)        # что делать — общий блок уровня
     reco_sec: dict = field(default_factory=dict)    # то же по каждому разделу
+    cells: dict = field(default_factory=dict)       # клиенты внутри ячеек матрицы
+    periods: list = field(default_factory=list)     # разрезы: окно и каждый месяц
 
 
-def prepare(b, hist: pd.DataFrame, tb_id: int | None, short: str, full: str) -> Level:
+def prepare(b, hist: pd.DataFrame, clients: pd.DataFrame, tb_id: int | None,
+            short: str, full: str) -> Level:
     """Собрать уровень: банк (tb_id=None) или один ТБ."""
     unit_label = "ТБ" if tb_id is None else "ГОСБ"
     lvl = Level(key="sb" if tb_id is None else str(tb_id), tb_id=tb_id,
@@ -67,7 +70,17 @@ def prepare(b, hist: pd.DataFrame, tb_id: int | None, short: str, full: str) -> 
     window = list(d.get("out_months") or [])
     lvl.totals = _totals(h, window)
     lvl.months = _months(h)
-    lvl.units, lvl.matrix, lvl.segs = _units(h, window, tb_id)
+    # РАЗРЕЗЫ. Отчёт показывает окно и каждый его месяц отдельно: три месяца
+    # накопительно сглаживают разовый уход, а месяц отвечает на вопрос «что
+    # происходит сейчас». Считаются они из одних и тех же строк, поэтому сумма
+    # трёх месяцев равна накопительному итогу, и это проверяется глазами.
+    lvl.periods = _periods(h, clients, b, window, tb_id)
+    base = lvl.periods[0] if lvl.periods else {}
+    lvl.units = base.get("units") or []
+    lvl.matrix = base.get("matrix") if base.get("matrix") is not None else pd.DataFrame()
+    lvl.segs = base.get("segs") or []
+    # ячейки всех разрезов в одном словаре: ключ начинается с кода разреза
+    lvl.cells = {k: v for p in lvl.periods for k, v in (p.get("cells") or {}).items()}
     lvl.outflow = _work_lists(b, tb_id)
     lvl.reasons = (lvl.outflow or {}).get("reasons_block") or {}
     lvl.orgs = _orgs(lvl.outflow)
@@ -129,7 +142,7 @@ def _reco_trend(lvl: Level) -> list:
                     f'периоде: {len(red)}'),
             "kind": "bad"})
         out.append({
-            "do": "Проверить, разовый это уход крупного клиента или тенденция",
+            "do": "Понять, один это крупный клиент или общая тенденция",
             "why": ('если всплеск дали несколько клиентов — работа точечная, '
                     'в разделе «Крупнейшие потери» они названы поимённо'),
             "kind": "warn"})
@@ -141,7 +154,42 @@ def _reco_trend(lvl: Level) -> list:
                     f'{_n(med)} — чтобы выйти из красной зоны, нужно не потерять '
                     f'{_n(last["kept"] - med)} чел'),
             "kind": "warn"})
+    out += _reco_month_cmp(lvl)
     return out
+
+
+def _reco_month_cmp(lvl: Level) -> list:
+    """Что делать с ростом, который видно в сравнениях месяца.
+
+    Рост сразу в обоих сравнениях — это уже не сезонность и не разовый уход:
+    так отчёт отличает тенденцию от всплеска, и формулировка действия у них
+    разная. Цель в людях берётся из сравнения с годом назад: это последний
+    уровень, на котором подразделение уже работало.
+    """
+    t = lvl.totals or {}
+    mom, yoy = t.get("mom"), t.get("yoy")
+    grow = [c for c in (mom, yoy) if c and c["delta"] > 0]
+    if len(grow) == 2:
+        return [{
+            "do": "Остановить рост потерь: он идёт и к прошлому месяцу, и к прошлому году",
+            "why": (f'{mom["cur_label"]}: {_n(mom["kept"])} чел — на '
+                    f'{_n(mom["delta"])} больше, чем в {mom["base_label"]}, и на '
+                    f'{_n(yoy["delta"])} больше, чем в {yoy["base_label"]}. Чтобы '
+                    f'вернуться к уровню года назад, нужно удержать '
+                    f'{_n(yoy["delta"])} чел'),
+            "kind": "bad"}]
+    if grow:
+        c = grow[0]
+        what = ("к предыдущему месяцу" if c is mom
+                else "к тому же месяцу год назад")
+        return [{
+            "do": f'Разобрать рост потерь {what}',
+            "why": (f'{c["cur_label"]}: {_n(c["kept"])} чел против '
+                    f'{_n(c["base_kept"])} в {c["base_label"]} — больше на '
+                    f'{_n(c["delta"])} чел; в другом сравнении роста нет, так что '
+                    f'проверить нужно именно этот период'),
+            "kind": "warn"}]
+    return []
 
 
 def _reco_matrix(lvl: Level) -> list:
@@ -161,7 +209,7 @@ def _reco_matrix(lvl: Level) -> list:
     # цель: опуститься до следующей по весу пары — тогда зона перестаёт быть худшей
     nxt = float(cells.iloc[1]) if len(cells) > 1 else 0.0
     out.append({
-        "do": f'Сфокусироваться на паре {top_u} · {top_s}',
+        "do": f'Взяться за пару {top_u} · {top_s}',
         "why": (f'{_n(top_v)} чел — {top_v / kept * 100:.0f}% потерь уровня, '
                 f'самая тёмная ячейка матрицы. Чтобы она перестала быть худшей, '
                 f'нужно вернуть или не потерять {_n(max(top_v - nxt, 0))} чел'),
@@ -171,7 +219,7 @@ def _reco_matrix(lvl: Level) -> list:
         fl = sum(v for _, _, v in red[1:])
         n_rest = len(red) - 1
         out.append({
-            "do": "Держать на контроле остальные красные ячейки",
+            "do": "Не упускать остальные красные ячейки",
             "why": (f'ещё {n_rest} {C.plural(n_rest, "пара", "пары", "пар")} '
                     f'{C.plural(n_rest, "даёт", "дают", "дают")} {_n(fl)} чел '
                     f'({fl / kept * 100:.0f}% потерь уровня): {names}'),
@@ -189,7 +237,7 @@ def _reco_units(lvl: Level) -> list:
     """Подразделения, где потери выросли: на сколько и до какого уровня возвращать."""
     grown = [u for u in lvl.units if (u.get("delta") or 0) > 0.5]
     if not grown:
-        return [{"do": "Держать достигнутый уровень",
+        return [{"do": "Удержать то, что есть",
                  "why": "ни одно подразделение не увеличило потери к предыдущим "
                         "трём месяцам", "kind": "good"}]
     grown.sort(key=lambda x: -x["delta"])
@@ -231,7 +279,7 @@ def _reco_reasons(lvl: Level) -> list:
     cov = o.get("reason_known_n")
     n_all = o.get("n_all")
     if cov and n_all:
-        out.append({"do": "Добиваться, чтобы причина ухода попадала в задачу",
+        out.append({"do": "Требовать, чтобы причину ухода записывали в задачу",
                     "why": (f'сейчас причина известна у {cov} организаций из '
                             f'{n_all}: по остальным разбирать нечего'),
                     "kind": "warn"})
@@ -246,7 +294,7 @@ def _reco_work(lvl: Level) -> list:
     if promised:
         fl = sum(float(r.get("kept") or 0) for r in promised)
         top = max(promised, key=lambda r: float(r.get("kept") or 0))
-        out.append({"do": "Вернуться к клиентам с зафиксированным обещанием",
+        out.append({"do": "Вернуться к тем, кто обещал вернуть людей",
                     "why": (f'{len(promised)} '
                             f'{C.plural(len(promised), "клиент", "клиента", "клиентов")}, '
                             f'{_n(fl)} чел. Крупнейший — {top.get("name", "")}: '
@@ -254,7 +302,7 @@ def _reco_work(lvl: Level) -> list:
                     "kind": "bad"})
     if worked:
         fl = sum(float(r.get("kept") or 0) for r in worked)
-        out.append({"do": "Разобрать, почему отработка не дала возврата",
+        out.append({"do": "Понять, почему работа не дала возврата",
                     "why": (f'{len(worked)} '
                             f'{C.plural(len(worked), "клиент", "клиента", "клиентов")}, '
                             f'{_n(fl)} чел: работа велась в месяцы ухода, но '
@@ -274,7 +322,7 @@ def _reco_orgs(lvl: Level) -> list:
                     f'{C.plural(len(rows), "крупнейшего клиента", "крупнейших клиента", "крупнейших клиентов")}'),
              "why": f'на них приходится {_n(fl)} чел{share}',
              "kind": "bad"},
-            {"do": "Проверить, закреплён ли за каждым ответственный",
+            {"do": "Проверить, за каждым ли клиентом закреплён сотрудник",
              "why": ("в списке видно закрепление: где его нет, задачу некому "
                      "поставить"), "kind": "warn"}]
 
@@ -333,7 +381,7 @@ def _reco(lvl: Level) -> list:
     if promised:
         fl = sum(float(r.get("kept") or 0) for r in promised)
         out.append({
-            "do": "Вернуть в работу клиентов с зафиксированным обещанием возврата",
+            "do": "Вернуться к клиентам, которые обещали вернуть получателей",
             "why": (f'{len(promised)} клиентов обещали вернуть получателей и не '
                     f'вернули — {_n(fl)} чел'),
             "kind": "warn"})
@@ -343,7 +391,7 @@ def _reco(lvl: Level) -> list:
     if worked:
         fl = sum(float(r.get("kept") or 0) for r in worked)
         out.append({
-            "do": "Пересмотреть подход к возврату там, где работа результата не дала",
+            "do": "Разобраться, почему работа не вернула никого",
             "why": (f'{len(worked)} клиентов отработаны в месяцы ухода без '
                     f'возврата — {_n(fl)} чел'),
             "kind": "warn"})
@@ -366,7 +414,7 @@ def _reco(lvl: Level) -> list:
     now_share, was_share = t.get("ret_share"), prev.get("ret_share")
     if now_share is not None and was_share is not None and was_share - now_share >= 0.03:
         out.append({
-            "do": "Разобрать, почему возвращать стало сложнее",
+            "do": "Понять, почему возвращать стало труднее",
             "why": (f'доля возврата снизилась с {was_share * 100:.0f}% до '
                     f'{now_share * 100:.0f}% к предыдущим трём месяцам'),
             "kind": "bad"})
@@ -410,11 +458,18 @@ def _n(v) -> str:
 
 # --------------------------------------------------------------------------- #
 def _totals(h: pd.DataFrame, window: list) -> dict:
-    """Итоги окна и сравнение с предыдущим таким же окном.
+    """Итоги окна, сравнение с предыдущим окном и два сравнения по месяцам.
 
-    Предыдущее окно — три месяца, стоящие в истории прямо перед отчётным. Год к
-    году не берём: отток сильно сезонный по отдельным клиентам, но выборка в три
-    месяца уже сглаживает его, а «год назад» в витрине есть не у всех ГОСБ.
+    Вердикт уровня считается по ОКНУ: предыдущее окно — три месяца, стоящие в
+    истории прямо перед отчётным. Три месяца сглаживают уход одного крупного
+    клиента, из-за которого отдельный месяц ничего не доказывает.
+
+    Сверх этого считаются два сравнения последнего закрытого месяца: к
+    предыдущему месяцу — что изменилось только что, и к тому же месяцу год
+    назад — сезонность, где август сравнивается с августом, а не с июлем.
+    Месяц-основание ищется ПО КАЛЕНДАРЮ, а не по позиции в истории: если его в
+    витрине нет, сравнение не показывается вовсе. Соседний месяц под чужой
+    подписью хуже, чем отсутствие сравнения.
     """
     months = sorted(h["report_dt"].unique())
     cur = [m for m in months if m in set(window)] or months[-3:]
@@ -426,7 +481,48 @@ def _totals(h: pd.DataFrame, window: list) -> dict:
            "delta_ret_share": (now["ret_share"] - was["ret_share"]
                                if was and was.get("ret_share") is not None
                                and now.get("ret_share") is not None else None)}
+    out["mom"] = _cmp_month(h, months, 1)      # месяц к месяцу
+    out["yoy"] = _cmp_month(h, months, 12)     # год к году, тот же месяц
     return out
+
+
+def _cmp_month(h: pd.DataFrame, months: list, back: int) -> dict | None:
+    """Последний закрытый месяц против месяца на `back` месяцев раньше."""
+    return _cmp_at(h, months, months[-1], back) if months else None
+
+
+def _cmp_at(h: pd.DataFrame, months: list, cur, back: int) -> dict | None:
+    """Месяц `cur` против месяца на `back` месяцев раньше."""
+    if not months or cur is None:
+        return None
+    by_period = {pd.Timestamp(m).to_period("M"): m for m in months}
+    base = by_period.get(pd.Timestamp(cur).to_period("M") - back)
+    if base is None:
+        return None
+    now, was = _sum(h, [cur]), _sum(h, [base])
+    if not now or not was:
+        return None
+    delta = now["kept"] - was["kept"]
+    return {"cur": cur, "base": base, "back": back,
+            "cur_label": _lbl(cur), "base_label": _lbl(base),
+            "kept": now["kept"], "base_kept": was["kept"],
+            "gone": now["gone"], "base_gone": was["gone"],
+            "ret": now["ret"], "base_ret": was["ret"],
+            "ret_share": now["ret_share"], "base_ret_share": was["ret_share"],
+            "delta": delta,
+            "pct": (delta / was["kept"] * 100) if was["kept"] else None}
+
+
+def _shift_months(months: list, avail: list, back: int) -> list:
+    """Те же месяцы на `back` месяцев раньше — только те, что есть в истории."""
+    by = {pd.Timestamp(m).to_period("M"): m for m in avail}
+    got = [by.get(pd.Timestamp(m).to_period("M") - back) for m in months]
+    return [m for m in got if m is not None]
+
+
+def _lbl(dt) -> str:
+    ts = pd.Timestamp(dt)
+    return f"{ts.month:02d}.{ts.year}"
 
 
 def _sum(h: pd.DataFrame, months: list) -> dict:
@@ -440,6 +536,102 @@ def _sum(h: pd.DataFrame, months: list) -> dict:
             "force": float(sub["force_qty"].sum()),
             "orgs": int(sub["n_orgs"].sum()),
             "ret_share": (ret / gone) if gone else None}
+
+
+def _totals_month(h: pd.DataFrame, m) -> dict:
+    """Итоги одного месяца и его сравнения: к предыдущему месяцу и к году назад.
+
+    Форма словаря та же, что у окна: представление не должно знать, какой разрез
+    оно рисует, иначе каждая карточка обросла бы условиями.
+    """
+    months = sorted(h["report_dt"].unique())
+    by_period = {pd.Timestamp(x).to_period("M"): x for x in months}
+    prev = by_period.get(pd.Timestamp(m).to_period("M") - 1)
+    now = _sum(h, [m])
+    was = _sum(h, [prev]) if prev is not None else {}
+    return {"months": [m], "prev_months": [prev] if prev is not None else [],
+            **now, "prev": was,
+            "delta_kept": now["kept"] - was["kept"] if was else None,
+            "delta_ret_share": (now["ret_share"] - was["ret_share"]
+                                if was and was.get("ret_share") is not None
+                                and now.get("ret_share") is not None else None),
+            "mom": _cmp_at(h, months, m, 1),
+            "yoy": _cmp_at(h, months, m, 12)}
+
+
+def _periods(h: pd.DataFrame, clients: pd.DataFrame, b, window: list,
+             tb_id: int | None) -> list:
+    """Разрезы отчёта: окно накопительно и каждый его месяц отдельно.
+
+    Первым идёт накопительный: он и есть вердикт уровня, на нём считаются
+    рекомендации и он же открыт по умолчанию. Месяцы идут от свежего к старому —
+    читателя интересует прежде всего последний закрытый.
+    """
+    if not window:
+        return []
+    ms = sorted(window)
+    units, matrix, segs = _units(h, window, tb_id,
+                                 n_orgs=_n_orgs(clients, tb_id, window))
+    out = [{"key": "win", "short": "Три месяца",
+            "label": f"Три месяца накопительно · {_lbl(ms[0])} — {_lbl(ms[-1])}",
+            "months": list(window), "is_month": False,
+            "totals": _totals(h, window), "units": units, "matrix": matrix,
+            "segs": segs, "cells": _cells(clients, b, tb_id, window, "win")}]
+    for m in sorted(window, reverse=True):
+        u, mx, sg = _units(h, [m], tb_id, with_yoy=True,
+                           n_orgs=_n_orgs(clients, tb_id, [m]))
+        out.append({"key": _lbl(m), "short": _lbl(m),
+                    "label": C.month_ru(_lbl(m)).capitalize(),
+                    "months": [m], "is_month": True,
+                    "totals": _totals_month(h, m), "units": u, "matrix": mx,
+                    "segs": sg, "cells": _cells(clients, b, tb_id, [m], _lbl(m))})
+    for p in out:
+        p["unit_cards"] = _unit_payload(p, tb_id)
+    return out
+
+
+def _n_orgs(clients: pd.DataFrame, tb_id: int | None, months: list) -> dict:
+    """Сколько РАЗНЫХ клиентов потеряла каждая единица за период."""
+    if clients is None or clients.empty:
+        return {}
+    c = clients if tb_id is None else clients[clients["tb_id"] == tb_id]
+    if months and "report_dt" in c:
+        c = c[c["report_dt"].isin(months)]
+    if c.empty:
+        return {}
+    key = "tb_id" if tb_id is None else "unit_id"
+    return c.groupby(key)["inn"].nunique().to_dict()
+
+
+def _unit_payload(period: dict, tb_id: int | None) -> dict:
+    """Что показать в раскрытой карточке подразделения.
+
+    Клиентов сюда не кладём: они уже лежат в перечнях ячеек матрицы, и скрипт
+    собирает список единицы из них. Дублировать тот же список второй раз —
+    лишний мегабайт в файле ради тех же имён.
+    """
+    m = period.get("matrix")
+    by_unit: dict = {}
+    if m is not None and not m.empty:
+        for r in m.itertuples():
+            by_unit.setdefault(int(r.unit_id), []).append(
+                {"seg": str(r.seg_name), "kept": float(r.kept)})
+    out = {}
+    for u in period.get("units") or []:
+        segs = sorted(by_unit.get(u["id"], []), key=lambda x: -x["kept"])
+        out[f'{period["key"]}|{u["id"]}'] = {
+            "name": u["name"], "gone": u["gone"], "ret": u["ret"],
+            "kept": u["kept"], "orgs": u["orgs"],
+            "ret_share": u.get("ret_share"),
+            "delta": u.get("delta"), "was": u.get("was_kept"),
+            # подпись базы сравнения готовим здесь: «к 01.2026, 02.2026, 03.2026»
+            # в раскрытой карточке читается как случайный набор дат
+            "prev": ("прошлым трём месяцам" if not period.get("is_month")
+                     else C.month_ru(u.get("prev_label", ""), "dat")),
+            "yoy": u.get("yoy_delta"), "yoy_was": u.get("yoy_kept"),
+            "yoy_label": C.month_ru(u.get("yoy_label", ""), "dat"),
+            "period": period["label"], "segs": segs}
+    return out
 
 
 def _months(h: pd.DataFrame) -> list:
@@ -457,8 +649,15 @@ def _months(h: pd.DataFrame) -> list:
     return out
 
 
-def _units(h: pd.DataFrame, window: list, tb_id: int | None):
-    """Карточки единиц и матрица «единица × сегмент» по безвозвратным потерям."""
+def _units(h: pd.DataFrame, window: list, tb_id: int | None,
+           with_yoy: bool = False, n_orgs: dict | None = None):
+    """Карточки единиц и матрица «единица × сегмент» по безвозвратным потерям.
+
+    Период задаётся списком месяцев: окно целиком или один месяц — расчёт один и
+    тот же. Предыдущий период берётся СТРОГО ДО начала текущего: для месяца это
+    предыдущий месяц, а не «все прочие месяцы истории», иначе апрелю в пару встал
+    бы июнь и стрелка динамики показывала бы в обратную сторону.
+    """
     cur = h[h["report_dt"].isin(window)] if window else h
     if cur.empty:
         return [], pd.DataFrame(), []
@@ -468,20 +667,37 @@ def _units(h: pd.DataFrame, window: list, tb_id: int | None):
     g = cur.groupby([key, name_col], dropna=False).agg(
         gone=("out_qty", "sum"), ret=("ret_qty", "sum"),
         kept=("out_kept", "sum"), orgs=("n_orgs", "sum")).reset_index()
-    # предыдущее окно — для стрелки динамики в карточке
-    prev_months = sorted(set(h["report_dt"]) - set(window))[-len(window or []):]
+    avail = sorted(set(h["report_dt"]))
+    prev_months = ([m for m in avail if m < min(window)][-len(window):]
+                   if window else [])
     prev = (h[h["report_dt"].isin(prev_months)]
             .groupby(key)["out_kept"].sum().to_dict() if prev_months else {})
+    # год к году считаем только для месячного разреза: у окна из трёх месяцев
+    # такое сравнение уже есть в разделе «Динамика», а в карточке оно заняло бы
+    # третью строку ради того же факта
+    yoy_months = _shift_months(window, avail, 12) if with_yoy and window else []
+    yoy = (h[h["report_dt"].isin(yoy_months)]
+           .groupby(key)["out_kept"].sum().to_dict() if yoy_months else {})
 
     units = []
     for r in g.itertuples():
         uid = int(getattr(r, key))
         was = float(prev.get(uid, 0.0))
-        units.append({"id": uid, "name": str(getattr(r, name_col) or uid),
-                      "gone": float(r.gone), "ret": float(r.ret),
-                      "kept": float(r.kept), "orgs": int(r.orgs),
-                      "ret_share": (float(r.ret) / float(r.gone)) if r.gone else None,
-                      "was_kept": was, "delta": float(r.kept) - was if prev else None})
+        # клиентов считаем по ИНН из клиентского среза: в истории n_orgs лежит
+        # помесячно, и сумма за три месяца считала бы одного клиента трижды
+        orgs = int((n_orgs or {}).get(uid, r.orgs))
+        u = {"id": uid, "name": str(getattr(r, name_col) or uid),
+             "gone": float(r.gone), "ret": float(r.ret),
+             "kept": float(r.kept), "orgs": orgs,
+             "ret_share": (float(r.ret) / float(r.gone)) if r.gone else None,
+             "was_kept": was, "delta": float(r.kept) - was if prev else None,
+             "prev_label": ", ".join(_lbl(m) for m in prev_months)}
+        if yoy_months:
+            ago = float(yoy.get(uid, 0.0))
+            u["yoy_kept"] = ago
+            u["yoy_delta"] = float(r.kept) - ago
+            u["yoy_label"] = ", ".join(_lbl(m) for m in yoy_months)
+        units.append(u)
     units.sort(key=lambda x: -x["kept"])
 
     segs = [s for s in segments.ORDER if s in set(cur["seg_name"].dropna())]
@@ -490,6 +706,95 @@ def _units(h: pd.DataFrame, window: list, tb_id: int | None):
                  .rename(columns={key: "unit_id", name_col: "unit_name",
                                   "out_kept": "kept"}))
     return units, matrix, segs
+
+
+CELL_TOP_N = 12           # клиентов в раскрытой ячейке матрицы
+
+
+def _cells(clients: pd.DataFrame, b, tb_id: int | None, months: list,
+           pkey: str) -> dict:
+    """Клиенты внутри каждой ячейки матрицы: {«единица|сегмент»: {...}}.
+
+    Считается из той же витрины и тем же фильтром, что и сама матрица, только на
+    грейн ниже — поэтому сумма клиентов ячейки равна её числу, и это можно
+    проверить глазами прямо в отчёте. Брать клиентов из расчёта прогноза нельзя:
+    он живёт на другом окне и дал бы другие числа под тем же заголовком.
+
+    В раскрытой плашке показываются CELL_TOP_N крупнейших, остальные сворачиваются
+    в строку «ещё N клиентов»: список на триста строк в управленческом отчёте не
+    читают, а вес файла он утраивает.
+    """
+    if clients is None or clients.empty:
+        return {}
+    c = clients if tb_id is None else clients[clients["tb_id"] == tb_id]
+    if months and "report_dt" in c:
+        c = c[c["report_dt"].isin(months)]
+    if c.empty:
+        return {}
+    key = "tb_id" if tb_id is None else "unit_id"
+    # на уровне банка единица — ТБ, и организация, обслуживаемая в нескольких его
+    # ГОСБ, обязана стать ОДНОЙ строкой: иначе крупнейший клиент ячейки
+    # рассыпается на части и в перечень не попадает
+    g = (c.groupby([key, "seg_name", "inn"], as_index=False)
+          [["out_qty", "ret_qty", "out_kept"]].sum())
+    names = _name_by_inn(b)
+    out: dict = {}
+    for (uid, seg), part in g.groupby([key, "seg_name"], dropna=False):
+        part = part.sort_values("out_kept", ascending=False)
+        rows = [{"name": names.get(int(r.inn)) or f"Орг. {int(r.inn)}",
+                 "gone": float(r.out_qty), "ret": float(r.ret_qty),
+                 "kept": float(r.out_kept)}
+                for r in part.head(CELL_TOP_N).itertuples()]
+        tail = part.iloc[CELL_TOP_N:]
+        out[f"{pkey}|{int(uid)}|{seg}"] = {
+            "seg": str(seg), "n": int(len(part)),
+            "kept": float(part["out_kept"].sum()),
+            "gone": float(part["out_qty"].sum()),
+            "ret": float(part["ret_qty"].sum()), "rows": rows,
+            "rest_n": int(len(tail)), "rest_kept": float(tail["out_kept"].sum())}
+    return out
+
+
+def _name_by_inn(b) -> dict:
+    """ИНН → название организации.
+
+    Имя одно на ИНН: в перечне ячейки уровня банка клиент уже сведён по всем
+    своим ГОСБ, и выбирать между их написаниями нечего.
+    """
+    o = getattr(b, "orgs", None)
+    if o is None or o.empty or "company_name" not in o:
+        return {}
+    out = {}
+    for r in o.itertuples():
+        nm = str(getattr(r, "company_name", "") or "").strip()
+        if nm:
+            out.setdefault(int(r.inn), nm)
+    return out
+
+
+def load_clients(ctx, b) -> pd.DataFrame:
+    """Отток на грейне (ГОСБ, сегмент, ИНН) за отчётное окно — для матрицы."""
+    from ...db import read_sql
+    from . import queries as Q
+    from ..tb_health import bank as th_bank
+
+    d = b.dates or {}
+    progress.step("Клиенты внутри ячеек матрицы потерь")
+    c = read_sql(ctx.engine, Q.OUTFLOW_CLIENTS,
+                 {"out_min": th_bank.OUT_MIN_QTY, "out_from": d.get("out_from"),
+                  "ref_closed": d.get("ref_closed")})
+    if c.empty:
+        progress.warn("Клиентов за окно не нашлось — ячейки матрицы не раскроются")
+        return c
+    c["report_dt"] = pd.to_datetime(c["report_dt"]).dt.date
+    c["unit_id"] = c["unit_id"].astype("int64")
+    c["tb_id"] = c["tb_id"].astype("int64")
+    c["inn"] = c["inn"].astype("int64")
+    for col in ("out_qty", "ret_qty", "out_kept"):
+        c[col] = forecast.num(c, col)
+    progress.done(f"Клиенты ячеек: {len(c)} строк · "
+                  f"{c['inn'].nunique()} организаций")
+    return c
 
 
 def _work_lists(b, tb_id: int | None) -> dict:

@@ -13,7 +13,9 @@
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 
@@ -25,6 +27,8 @@ from ..tb_health import analyze as th
 from ..tb_health import bank, view as base
 from . import analyze
 
+_ASSETS = Path(__file__).parent / "assets"
+
 TITLE = "Работа с оттоком получателей заработной платы"
 SUBTITLE = "Кого потеряли, вернули ли и что с этим делали"
 
@@ -34,15 +38,17 @@ def build(ctx: Context) -> str:
     """Отчёт по оттоку: банк целиком и по вкладке на каждый ТБ."""
     b = bank.load(ctx)
     hist = analyze.load_history(ctx, b)
+    clients = analyze.load_clients(ctx, b)
 
     levels_tb = sorted(((int(r.tb_id), str(r.tb_short_name), str(r.tb_full_name))
                         for r in b.tbs.itertuples()), key=lambda x: th._ru_key(x[1]))
     progress.step("Уровень СБ: отток по всему банку")
-    sb = analyze.prepare(b, hist, None, "СБ", "Сбербанк — все территориальные банки")
+    sb = analyze.prepare(b, hist, clients, None, "СБ",
+                         "Сбербанк — все территориальные банки")
     levels = [sb]
     for i, (tb_id, short, full) in enumerate(levels_tb, start=1):
         progress.step(f"═══ ТБ {short} ({i} из {len(levels_tb)}) ═══")
-        levels.append(analyze.prepare(b, hist, tb_id, short, full))
+        levels.append(analyze.prepare(b, hist, clients, tb_id, short, full))
     _log(sb)
 
     # карточка ТБ на главном экране знает номер вкладки своего разбора
@@ -60,11 +66,175 @@ def build(ctx: Context) -> str:
         title=TITLE, subtitle=SUBTITLE, meta=meta,
         body=(base._BOOT_JS + base._LEGEND + _tabs(levels) + bodies
               + base._GD_JS + base._LVL_JS + base._OF_JS),
-        css=base._asset("ux.css") + base._asset("ux-fix.css"),
+        # своя тема идёт ПОСЛЕ файлов дизайнера и переопределяет только токены
+        # и те компоненты, по которым отчёты должны различаться
+        css=(base._asset("ux.css") + base._asset("ux-fix.css")
+             + base._asset("help.css") + _asset("theme.css")),
         tail=(f'<script>{base._asset("ux.js.txt")}</script>\n'
-              f'{base._HUB_JS}\n{base._REVEAL_JS}\n{base._XLS_JS}\n'
+              f'{base._HUB_JS}\n{base._REVEAL_JS}\n{base._XLS_JS}\n{_CELLS_JS}\n'
+              # памятка: своя разметка, свой скрипт (свой ключ «не показывать»),
+              # а шаги листает общий скрипт первого отчёта — он про разметку, а
+              # не про содержание, и дублировать его нечем
+              f'{_asset("help.html")}<script>\n{_asset("help.js")}</script>\n'
+              f'{base._HELP_STEPS_JS}\n'
               f'<div id="print-root" aria-hidden="true"></div>'),
     )
+
+
+def _asset(name: str) -> str:
+    """Файл оформления этого отчёта (свои стили лежат рядом с его кодом)."""
+    with open(_ASSETS / name, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+# Раскрытие ячейки матрицы. Таблица собирается СКРИПТОМ из данных уровня: готовая
+# разметка на все ячейки всех уровней весит в разы больше самих чисел, а
+# открывают за сеанс одну-две.
+_CELLS_JS = """
+<script>
+(function(){
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  }
+  function num(n){ return Number(n || 0).toLocaleString('ru-RU'); }
+  function clear(card){
+    var on = card.querySelectorAll('td.of-cell.on');
+    for(var i = 0; i < on.length; i++) on[i].classList.remove('on');
+  }
+  function scope(el){
+    /* у каждого разреза своя вкладка и своя плашка клиентов: искать по .card
+       нельзя — нашлась бы плашка первого разреза, а открыт другой */
+    return el.closest('.of-pane') || el.closest('.card');
+  }
+  window.ofDrillClose = function(el){
+    var box = el.classList && el.classList.contains('of-drill')
+      ? el : (scope(el) || document).querySelector('.of-drill');
+    if(box){ box.hidden = true; box.dataset.key = ''; }
+    var sc = scope(el);
+    if(sc){
+      clear(sc);
+      var on = sc.querySelectorAll('.gcard.on');
+      for(var i = 0; i < on.length; i++) on[i].classList.remove('on');
+    }
+  };
+  window.ofUnit = function(btn){
+    var pane = scope(btn); if(!pane) return;
+    var box = pane.querySelector('.of-drill'); if(!box) return;
+    var lvl = btn.closest('.lvl');
+    var key = btn.getAttribute('data-unit') || '';
+    var u = ((window.__OFUNITS || {})[lvl ? lvl.id : ''] || {})[key];
+    if(!u) return;
+    if(box.dataset.key === key && !box.hidden){ window.ofDrillClose(box); return; }
+    clear(pane);
+    var cards = pane.querySelectorAll('.gcard.on');
+    for(var i = 0; i < cards.length; i++) cards[i].classList.remove('on');
+    if(btn.closest('.gcard')) btn.closest('.gcard').classList.add('on');
+    var segs = (u.segs || []).map(function(sg){
+      return '<tr><td>' + esc(sg.seg) + '</td><td class="num"><b>'
+           + num(sg.kept) + '</b></td><td class="num">'
+           + (u.kept ? Math.round(sg.kept / u.kept * 100) : 0) + '%</td></tr>';
+    }).join('');
+    /* клиентов собираем из перечней ячеек этого же разреза: список уже лежит в
+       файле, и второй такой же ради карточки клали бы зря */
+    var pref = key.split('|')[0] + '|' + key.split('|')[1] + '|';
+    var all = (window.__OFCELLS || {})[lvl ? lvl.id : ''] || {};
+    var agg = {};
+    Object.keys(all).forEach(function(k){
+      if(k.indexOf(pref) !== 0) return;
+      (all[k].rows || []).forEach(function(r){
+        var c = agg[r.name] || { name: r.name, gone: 0, ret: 0, kept: 0 };
+        c.gone += r.gone; c.ret += r.ret; c.kept += r.kept; agg[r.name] = c;
+      });
+    });
+    var rows = Object.keys(agg).map(function(k){ return agg[k]; })
+      .sort(function(a, b){ return b.kept - a.kept; }).slice(0, 10)
+      .map(function(r){
+        return '<tr><td>' + esc(r.name) + '</td><td class="num">' + num(r.gone)
+             + '</td><td class="num">' + (r.ret ? num(r.ret) : '\u2014')
+             + '</td><td class="num"><b>' + num(r.kept) + '</b></td></tr>';
+      }).join('');
+    var dyn = [];
+    if(u.delta !== null && u.delta !== undefined){
+      dyn.push('к ' + esc(u.prev) + ': ' + (u.delta > 0 ? '+' : '\u2212')
+               + num(Math.abs(u.delta)) + ' чел (было ' + num(u.was) + ')');
+    }
+    if(u.yoy !== null && u.yoy !== undefined){
+      dyn.push('к ' + esc(u.yoy_label) + ': ' + (u.yoy > 0 ? '+' : '\u2212')
+               + num(Math.abs(u.yoy)) + ' чел (было ' + num(u.yoy_was) + ')');
+    }
+    box.innerHTML =
+      '<div class="of-drill-head"><div class="of-drill-t">' + esc(u.name)
+      + ' \u00b7 <span class="of-drill-p">' + esc(u.period) + '</span></div>'
+      + '<button type="button" class="of-drill-x" onclick="ofDrillClose(this)">'
+      + 'Закрыть</button></div>'
+      + '<div class="of-drill-sub">Потеряли безвозвратно ' + num(u.kept)
+      + ' чел \u00b7 ушло ' + num(u.gone) + ' \u00b7 вернулось ' + num(u.ret)
+      + ' \u00b7 ушли из ' + num(u.orgs) + ' организаций'
+      + (dyn.length ? ' \u00b7 ' + dyn.join(' \u00b7 ') : '') + '</div>'
+      + (segs ? '<h4 style="margin:14px 0 6px">По каким сегментам ушли</h4>'
+        + '<table><thead><tr><th>Сегмент</th><th class="num">потери, чел</th>'
+        + '<th class="num">доля</th></tr></thead><tbody>' + segs
+        + '</tbody></table>' : '')
+      + (rows ? '<h4 style="margin:16px 0 6px">Кого потеряли крупнее всего</h4>'
+        + '<table><thead><tr><th>Клиент</th><th class="num">отток, чел</th>'
+        + '<th class="num">возврат, чел</th><th class="num">потери, чел</th></tr>'
+        + '</thead><tbody>' + rows + '</tbody></table>'
+        + '<p class="of-drill-rest">Здесь десять крупнейших. Полный список по '
+        + 'паре подразделение\u2013сегмент открывается в матрице потерь.</p>' : '');
+    box.dataset.key = key;
+    box.hidden = false;
+  };
+  window.ofCellKey = function(e, td){
+    if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); window.ofCell(td); }
+  };
+  window.ofCell = function(td){
+    var card = scope(td); if(!card) return;
+    var box = card.querySelector('.of-drill'); if(!box) return;
+    var lvl = td.closest('.lvl');
+    var key = td.getAttribute('data-cell') || '';
+    var data = ((window.__OFCELLS || {})[lvl ? lvl.id : ''] || {})[key];
+    if(!data) return;
+    /* повторный клик по той же ячейке закрывает плашку: иначе единственный
+       способ её убрать — крестик, и это неочевидно */
+    if(box.dataset.key === key && !box.hidden){ window.ofDrillClose(box); return; }
+    clear(card);
+    td.classList.add('on');
+    var tr = td.closest('tr');
+    var unit = (tr && tr.cells.length) ? tr.cells[0].textContent.trim() : '';
+    var seg = data.seg || '';
+    var rows = (data.rows || []).map(function(r){
+      return '<tr><td>' + esc(r.name) + '</td>'
+           + '<td class="num">' + num(r.gone) + '</td>'
+           + '<td class="num">' + (r.ret ? num(r.ret) : '\u2014') + '</td>'
+           + '<td class="num"><b>' + num(r.kept) + '</b></td></tr>';
+    }).join('');
+    var share = data.ret && data.gone ? Math.round(data.ret / data.gone * 100) : 0;
+    var rest = data.rest_n
+      ? '<p class="of-drill-rest">Ещё ' + num(data.rest_n) + ' '
+        + (data.rest_n % 10 === 1 && data.rest_n % 100 !== 11 ? 'клиент' : 'клиентов')
+        + ' этой пары дают ' + num(data.rest_kept) + ' чел потерь.</p>'
+      : '';
+    var per = key.split('|')[0];
+    var pname = per === 'win' ? 'три месяца' : per;
+    box.innerHTML =
+      '<div class="of-drill-head"><div class="of-drill-t">' + esc(unit) + ' \u00b7 '
+      + esc(seg) + ' \u00b7 <span class="of-drill-p">' + esc(pname) + '</span></div>'
+      + '<button type="button" class="of-drill-x" onclick="ofDrillClose(this)">'
+      + 'Закрыть</button></div>'
+      + '<div class="of-drill-sub">Потеряли безвозвратно ' + num(data.kept)
+      + ' чел \u00b7 ушло ' + num(data.gone) + ' \u00b7 вернулось ' + num(data.ret)
+      + ' (' + share + '%) \u00b7 организаций: ' + num(data.n) + '</div>'
+      + '<table><thead><tr><th>Клиент</th><th class="num">отток, чел</th>'
+      + '<th class="num">возврат, чел</th><th class="num">потери, чел</th></tr>'
+      + '</thead><tbody>' + rows + '</tbody></table>' + rest;
+    box.dataset.key = key;
+    box.hidden = false;
+  };
+})();
+</script>
+"""
 
 
 def _log(sb: analyze.Level) -> None:
@@ -104,7 +274,9 @@ def _level_body(lvl: analyze.Level, b, idx: int, lvl_of: dict | None = None) -> 
             + _hub(lvl, idx, secs) + _reco(lvl)
             + "".join(base._with_id(_with_reco(h, lvl.reco_sec.get(k)),
                                     f"sec-{idx}-{k}") for k, h in secs)
-            + base._contacts())
+            # перечни клиентов и разбор карточек — данными на весь уровень:
+            # их читают и матрица, и детализация
+            + _cells_data(lvl, idx) + base._contacts())
 
 
 def _head(lvl: analyze.Level, idx: int) -> str:
@@ -142,7 +314,7 @@ def _hero(lvl: analyze.Level, b) -> str:
     ret_pct = (t.get("ret_share") or 0) * 100
     delta = t.get("delta_kept")
     if delta is None:
-        dyn = "сравнивать не с чем: истории за предыдущий период в витрине нет"
+        dyn = "сравнить не с чем: данных за предыдущий период нет"
     else:
         col = "var(--bad)" if delta > 0 else "var(--good)"
         sign = "+" if delta > 0 else "−"
@@ -156,8 +328,48 @@ def _hero(lvl: analyze.Level, b) -> str:
         f'вернулось <b>{C.fmt_num(t["ret"])}</b> ({ret_pct:.0f}%) · '
         f'безвозвратные потери <b style="color:var(--bad)">{C.fmt_num(t["kept"])}</b> чел'
         f'</div>'
-        f'<div class="row2">{dyn}</div>')
+        f'<div class="row2">{dyn}</div>{_hero_months(t)}'
+        + _how(
+            '<b>Окно отчёта</b> — три последних закрытых месяца. Месяц считается '
+            'закрытым, когда ведомости по нему собраны полностью; текущий месяц в '
+            'отчёт не попадает, иначе его пришлось бы сравнивать с полными.',
+            '<b>Ушло</b> — люди, которые в этом окне перестали получать у нас '
+            'зарплату. <b>Вернулось</b> — из них те, кто снова её получает. '
+            'Разница между ними и есть <b>безвозвратные потери</b>: именно по ним '
+            'считается всё остальное в отчёте.',
+            '<b>Растут или снижаются</b> — сравнение с предыдущими тремя месяцами. '
+            'Плана по оттоку нет ни в одной витрине, поэтому отчёт не говорит '
+            '«много» или «мало»: он говорит, стало хуже или лучше, чем было.',
+            title='Как считаются эти цифры'))
     return C.card(inner, cls=f"hero {st}")
+
+
+def _hero_months(t: dict) -> str:
+    """Строка вердикта с двумя сравнениями последнего закрытого месяца.
+
+    Окно в три месяца отвечает на вопрос «куда идём», но руководителю нужен и
+    последний месяц: что изменилось только что и что изменилось за год. Обе
+    цифры стоят рядом, потому что порознь они спорят друг с другом — рост к
+    июлю при падении к прошлому августу это сезон, а не ухудшение.
+    """
+    bits = [f'{name} {_delta_b(c["delta"])}'
+            for k, name in (("mom", "месяц к месяцу"), ("yoy", "год к году"))
+            for c in [t.get(k)] if c]
+    if not bits:
+        return ""
+    cur = (t.get("mom") or t.get("yoy"))
+    return (f'<div class="row2">Последний закрытый месяц '
+            f'{C.month_ru(cur["cur_label"])} — потери '
+            f'<b>{C.fmt_num(cur["kept"])}</b> чел: {" · ".join(bits)}</div>')
+
+
+def _delta_b(delta: float) -> str:
+    """Изменение потерь: рост — красным, снижение — зелёным, ноль — обычным."""
+    if not delta:
+        return '<b>без изменений</b>'
+    col = "var(--bad)" if delta > 0 else "var(--good)"
+    sign = "+" if delta > 0 else "−"
+    return f'<b style="color:{col}">{sign}{C.fmt_num(abs(delta))} чел</b>'
 
 
 def _kpis(lvl: analyze.Level) -> str:
@@ -275,19 +487,32 @@ def _hub_facts(lvl: analyze.Level) -> dict:
     out: dict = {}
     if lvl.months:
         worst = max(lvl.months, key=lambda x: x["kept"])
-        out["trend"] = ("Как потери и возвраты шли месяц за месяцем.",
-                        [(f'{len(lvl.months)}', "закрытых месяцев в графике", ""),
-                         (C.fmt_num(worst["kept"]), f'худший месяц — {worst["label"]}',
-                          "bad")])
+        t = lvl.totals or {}
+        # на плашке две строки: сравнения месяца важнее счётчика месяцев в
+        # графике — его и так видно в заголовке раздела
+        nums = []
+        for k, name in (("mom", "чел · месяц к месяцу"), ("yoy", "чел · год к году")):
+            c = t.get(k)
+            if not c:
+                continue
+            sign = "+" if c["delta"] > 0 else ("−" if c["delta"] < 0 else "±")
+            nums.append((f'{sign}{C.fmt_num(abs(c["delta"]))}', name,
+                         "bad" if c["delta"] > 0 else ""))
+        if not nums:
+            nums.append((f'{len(lvl.months)}', "закрытых месяцев в графике", ""))
+        if len(nums) < 2:
+            nums.append((C.fmt_num(worst["kept"]),
+                         f'худший месяц — {worst["label"]}', "bad"))
+        out["trend"] = ("Как потери и возвраты шли месяц за месяцем.", nums[:2])
     if not lvl.matrix.empty:
         n_units = lvl.matrix["unit_id"].nunique()
-        out["matrix"] = (f"Где теряем: каждый {unit} в разрезе сегментов.",
+        out["matrix"] = (f"Где теряем: {unit} и сегмент, за три месяца и помесячно.",
                          [(C.fmt_num(lvl.matrix["kept"].sum()), "чел потерь в матрице",
                            "bad"),
                           (f'{n_units} × {len(lvl.segs)}', f'{unit} и сегментов', "")])
     if lvl.units:
         worst = lvl.units[0]
-        out["units"] = (f"Карточка на каждый {unit}: потери, возврат, динамика.",
+        out["units"] = (f"Потери каждого {unit}, возврат и куда всё это движется.",
                         [(C.fmt_num(len(lvl.units)), f'{unit} в разборе', ""),
                          (C.fmt_num(worst["kept"]), f'худший — {worst["name"][:22]}',
                           "bad")])
@@ -308,7 +533,7 @@ def _hub_facts(lvl: analyze.Level) -> dict:
                         (C.fmt_num(len(o.get("top_worked") or [])),
                          "отработали без результата", "")])
     if lvl.orgs:
-        out["orgs"] = ("Поимённый список крупнейших потерь с выгрузкой.",
+        out["orgs"] = ("Кого потеряли — списком, с выгрузкой в Excel.",
                        [(C.fmt_num(len(lvl.orgs)), "организаций в списке", ""),
                         (C.fmt_num(sum(r["kept"] for r in lvl.orgs)),
                          "чел в них потеряли", "bad")])
@@ -334,12 +559,76 @@ def _trend_section(lvl: analyze.Level) -> str:
             for r in m]
     tbl = C.table(["Месяц", "ушло, чел", "вернулось, чел", "потери, чел",
                    "доля возврата"], rows, num_cols=[1, 2, 3, 4])
+    how = _how(
+        '<b>Месяц</b> — тот, в котором человек перестал получать зарплату, а не '
+        'тот, в котором мы это увидели. Поэтому цифры прошлых месяцев не меняются '
+        'задним числом, даже если возврат случился позже.',
+        '<b>Потери месяца</b> = ушло минус вернулось. Возврат засчитывается '
+        'месяцу ухода: иначе один и тот же человек попал бы в два месяца сразу.',
+        '<b>Сравнения.</b> Месяц к месяцу — с предыдущим календарным месяцем. Год '
+        'к году — с тем же месяцем прошлого года: август сравнивается с августом, '
+        'а не с июлем, поэтому сезонность не выдаёт себя за рост.',
+        '<b>Если сравнивать не с чем</b> — строки просто не будет. Подставлять '
+        'соседний месяц под чужой подписью отчёт не станет.')
     return C.section("Динамика оттока за 12 месяцев",
-                     lead + C.card(_bars(m) + tbl),
+                     lead + _month_cmp(lvl) + C.card(how + _bars(m) + tbl),
                      eyebrow="Ретроспектива потерь",
                      desc="Сколько людей уходило и сколько возвращалось месяц за "
                           "месяцем — чтобы отличить разовый уход крупного клиента "
-                          "от устойчивого роста потерь.")
+                          "от устойчивого роста потерь. Ниже — разрезы окна: "
+                          "три месяца накопительно и каждый месяц с двумя "
+                          "динамиками — к предыдущему месяцу и к тому же месяцу "
+                          "год назад.")
+
+
+def _how(*lines: str, title: str = "Как считаются эти цифры") -> str:
+    """Значок «i» рядом с заголовком: откуда взялось число.
+
+    Раскрывается кликом и закрыт по умолчанию — объяснение нужно один раз, а
+    место на экране нужно всегда. Внутри — про смысл числа, а не про таблицы и
+    поля витрины: руководителю они ничего не говорят.
+    """
+    return base._gd_help(*lines, title=title)
+
+
+def _month_cmp(lvl: analyze.Level) -> str:
+    """Разрезы окна: накопительно и каждый месяц — с обеими динамиками.
+
+    Четыре карточки рядом, без переключателя: сравнивают их друг с другом, а не
+    читают по очереди. В месячной карточке главное число — потери месяца, под
+    ним два сравнения: к предыдущему месяцу и к тому же месяцу год назад. Первое
+    отвечает «что изменилось только что», второе снимает сезонность.
+    """
+    if not lvl.periods:
+        return ""
+    cards = "".join(_cmp_card(p) for p in lvl.periods)
+    return f'<div class="grid cols-2">{cards}</div>' if cards else ""
+
+
+def _cmp_card(p: dict) -> str:
+    """Карточка одного разреза: потери периода и его динамика."""
+    t = p.get("totals") or {}
+    if not t:
+        return ""
+    if p.get("is_month"):
+        lines = [_cmp_line(t.get("mom"), "к предыдущему месяцу"),
+                 _cmp_line(t.get("yoy"), "к тому же месяцу год назад")]
+        lines = [x for x in lines if x]
+        body = (f'<div class="delta">{lines[0]}</div>' if lines else "")
+        foot = ("".join(f'<div>{x}</div>' for x in lines[1:])
+                + f'<div>ушло {C.fmt_num(t["gone"])} чел · вернулось '
+                  f'{C.fmt_num(t["ret"])} ({(t.get("ret_share") or 0) * 100:.0f}%)</div>')
+    else:
+        d = t.get("delta_kept")
+        prev = ", ".join(_m(x) for x in (t.get("prev_months") or []))
+        body = (f'<div class="delta">к предыдущим трём месяцам '
+                f'({C.esc(prev)}) {_delta_b(d)}</div>' if d is not None else "")
+        foot = (f'<div>ушло {C.fmt_num(t["gone"])} чел · вернулось '
+                f'{C.fmt_num(t["ret"])} ({(t.get("ret_share") or 0) * 100:.0f}%)</div>')
+    return C.card(
+        f'<div class="label">{C.esc(p["label"])}</div>'
+        f'<div class="value" style="color:var(--bad)">{C.fmt_num(t["kept"])} чел</div>'
+        f'{body}<div class="foot">{foot}</div>', cls="kpi")
 
 
 def _bars(months: list) -> str:
@@ -376,94 +665,247 @@ def _bars(months: list) -> str:
             f'</svg></div>')
 
 
+def _cmp_line(c: dict | None, name: str) -> str:
+    """Строка сравнения: «к предыдущему месяцу +20 430 чел (+218%) — май 2026»."""
+    if not c:
+        return ""
+    pct = c.get("pct")
+    sign = "+" if c["delta"] > 0 else "−"
+    pct_s = (f' ({sign}{abs(pct):.0f}%)' if pct is not None and c["delta"] else "")
+    return (f'{name} {_delta_b(c["delta"])}{pct_s} — было '
+            f'{C.fmt_num(c["base_kept"])} в {C.esc(c["base_label"])}')
+
+
 # --------------------------------------------------------------------------- #
 def _matrix_section(lvl: analyze.Level, idx: int) -> str:
-    """Матрица «единица × сегмент» по безвозвратным потерям.
+    """Матрица «единица × сегмент» по безвозвратным потерям — в четырёх разрезах.
 
-    Цвет здесь НЕ статус выполнения плана (его у оттока нет), а вес ячейки:
-    чем темнее, тем большую часть потерь уровня даёт эта пара. Поэтому шкала
-    своя, а не общая с первым отчётом, — иначе один и тот же красный означал бы
-    в двух отчётах разное.
+    Переключатель вверху: три месяца накопительно и каждый месяц отдельно. Одна
+    матрица на окно отвечала только «где теряем вообще» — по месяцам видно, где
+    потери пришли разом, а где идут ровным фоном, и это разные разговоры.
+
+    Цвет — не статус выполнения плана (его у оттока нет), а вес ячейки: чем
+    темнее, тем большую часть потерь СВОЕГО разреза даёт эта пара.
+
+    Ячейка раскрывается: под таблицей появляется плашка с перечнем клиентов,
+    которые эти потери и составили, — за тот же период, что и сама матрица.
     """
-    m = lvl.matrix
-    if m.empty or not lvl.segs:
+    if not lvl.periods:
+        return ""
+    items = []
+    for p in lvl.periods:
+        html = _matrix_table(lvl, p)
+        if not html:
+            continue
+        t = p.get("totals") or {}
+        items.append((p["short"], f'потери {C.fmt_num(t.get("kept", 0))} чел', html))
+    if not items:
+        return ""
+    hint = ('<p class="sub" style="font-size:14px;margin:-4px 0 12px">'
+            'В ячейке — сколько человек потеряли безвозвратно за выбранный период. '
+            'Чем темнее, тем большая часть потерь приходится на эту пару. '
+            '<b>Нажмите на ячейку</b> — под таблицей появятся клиенты, из '
+            'которых она сложилась.</p>')
+    how = _how(
+        f'<b>В ячейке</b> — сколько человек {lvl.unit_label} потерял безвозвратно '
+        'в этом сегменте за выбранный период. Три месяца в сумме дают ровно '
+        'столько же, сколько накопительный разрез: это одни и те же строки.',
+        '<b>Заливка</b> считается от самой тяжёлой ячейки разреза, а не от общей '
+        'шкалы отчёта. Поэтому тёмное в апреле и тёмное в июне — разные величины, '
+        'сравнивать нужно числа, а не цвет.',
+        '<b>Сегмент</b> берётся из витрины оттока — из той же строки, что и сам '
+        'отток. Справочник клиентов тут не участвует: там сегмент мог смениться '
+        'после ухода, и потери разъехались бы по колонкам.',
+        '<b>Перечень клиентов</b> в раскрытой ячейке — за тот же период, что и '
+        'сама ячейка. Показаны двенадцать крупнейших, остальные свёрнуты в строку '
+        'под таблицей, но в сумму ячейки входят все.')
+    return C.section(f"Матрица потерь {lvl.unit_label}/сегмент",
+                     C.card('<h3>Безвозвратные потери, чел</h3>' + hint + how
+                            + _period_switch(items)),
+                     eyebrow="Где именно теряем",
+                     desc="Где сосредоточен отток: подразделение и сегмент, за "
+                          "три месяца и за каждый месяц. Клик по ячейке "
+                          "показывает клиентов, из которых она сложилась.")
+
+
+def _matrix_table(lvl: analyze.Level, p: dict) -> str:
+    """Таблица матрицы одного разреза плюс место под перечень клиентов."""
+    m = p.get("matrix")
+    segs = p.get("segs") or []
+    if m is None or m.empty or not segs:
         return ""
     units = (m.groupby(["unit_id", "unit_name"])["kept"].sum()
               .reset_index().sort_values("kept", ascending=False))
     cells = {(int(r.unit_id), r.seg_name): float(r.kept) for r in m.itertuples()}
     top = max(cells.values(), default=0) or 1
+    has = lvl.cells or {}
     head = ("<th>" + C.esc(lvl.unit_label) + "</th>"
-            + "".join(f'<th class="num">{C.esc(s)}</th>' for s in lvl.segs)
+            + "".join(f'<th class="num">{C.esc(s)}</th>' for s in segs)
             + '<th class="num">всего</th>')
     rows = []
     for r in units.itertuples():
         uid, name = int(r.unit_id), str(r.unit_name)
         tds = [f'<td>{C.esc(name[:26])}</td>']
-        for s in lvl.segs:
-            v = cells.get((uid, s))
+        for sg in segs:
+            v = cells.get((uid, sg))
             if not v:
                 tds.append('<td class="num" style="color:var(--text-2)">—</td>')
                 continue
             share = v / top
-            bg = f"rgba(255,59,48,{0.08 + share * 0.55:.3f})"
-            tds.append(f'<td class="num heat" style="background:{bg}" '
-                       f'title="{C.esc(name)} · {C.esc(s)}: потеряли '
-                       f'{C.fmt_num(v)} чел">{C.fmt_num(v)}</td>')
+            bg = f"rgba(176,56,46,{0.08 + share * 0.55:.3f})"
+            key = f'{p["key"]}|{uid}|{sg}'
+            # кликабельна только та ячейка, для которой перечень действительно
+            # собран: «нажимается, но ничего не открывает» читается как поломка
+            can_open = key in has
+            attrs = (f' data-cell="{C.esc(key)}" tabindex="0" role="button" '
+                     f'onclick="ofCell(this)" onkeydown="ofCellKey(event,this)"'
+                     if can_open else "")
+            cls = "num heat of-cell" if can_open else "num heat"
+            tip = (f'{C.esc(name)} · {C.esc(sg)}: потеряли {C.fmt_num(v)} чел'
+                   + (" · нажмите, чтобы увидеть клиентов" if can_open else ""))
+            tds.append(f'<td class="{cls}" style="background:{bg}" '
+                       f'title="{tip}"{attrs}>{C.fmt_num(v)}</td>')
         tds.append(f'<td class="num"><b>{C.fmt_num(r.kept)}</b></td>')
         rows.append(f'<tr>{"".join(tds)}</tr>')
-    tbl = (f'<div style="overflow-x:auto"><table class="matrix"><thead><tr>{head}'
-           f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>')
-    hint = ('<p class="sub" style="font-size:14px;margin:-4px 0 12px">'
-            'В ячейке — сколько человек потеряли безвозвратно за окно отчёта. '
-            'Чем темнее заливка, тем большую часть потерь уровня даёт эта пара; '
-            'сегмент берётся из витрины оттока, а не из справочника клиентов.</p>')
-    return C.section(f"Матрица потерь {lvl.unit_label}/сегмент",
-                     C.card('<h3>Безвозвратные потери, чел</h3>' + hint + tbl),
-                     eyebrow="Где именно теряем",
-                     desc="Потери в разрезе подразделений и сегментов — чтобы "
-                          "увидеть, где сосредоточен отток, прежде чем идти в "
-                          "детали по клиентам.")
+    return (f'<div style="overflow-x:auto"><table class="matrix"><thead><tr>{head}'
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+            f'<div class="of-drill" hidden aria-live="polite"></div>')
+
+
+def _cells_data(lvl: analyze.Level, idx: int) -> str:
+    """Перечни клиентов ячеек — данными, а не готовой разметкой.
+
+    Ключ ячейки — «разрез|единица|сегмент»: разрезов четыре, и перечень июня не
+    должен открыться под матрицей апреля. Разметка на все ячейки всех разрезов
+    весит в разы больше самих чисел, а открывают за сеанс одну-две, поэтому в
+    файл кладутся данные, а таблицу собирает скрипт в момент клика.
+    """
+    if not lvl.cells:
+        return ""
+    data = json.dumps(lvl.cells, ensure_ascii=False).replace("<", "\\u003c")
+    units = {k: v for p in (lvl.periods or [])
+             for k, v in (p.get("unit_cards") or {}).items()}
+    udata = json.dumps(units, ensure_ascii=False).replace("<", "\\u003c")
+    return (f'<script>window.__OFCELLS=window.__OFCELLS||{{}};'
+            f'window.__OFCELLS["lvl-{idx}"]={data};'
+            f'window.__OFUNITS=window.__OFUNITS||{{}};'
+            f'window.__OFUNITS["lvl-{idx}"]={udata};</script>')
+
+
+def _period_switch(items: list) -> str:
+    """Переключатель разрезов — та же механика, что у списков работы.
+
+    Отдельного скрипта здесь нет намеренно: `ofTab` из первого отчёта умеет
+    ровно это и уже проверен. Без JS страница покажет все разрезы подряд, а не
+    потеряет три из четырёх.
+    """
+    if not items:
+        return ""
+    if len(items) == 1:
+        return f'<div class="of-wrap"><div class="of-pane">{items[0][2]}</div></div>'
+    tabs = "".join(
+        f'<button type="button" class="of-tab{" on" if i == 0 else ""}" role="tab" '
+        f'aria-selected="{"true" if i == 0 else "false"}" onclick="ofTab(this,{i})">'
+        f'<span class="of-tab-t">{C.esc(t)}</span>'
+        f'<span class="of-tab-n">{C.esc(sub)}</span></button>'
+        for i, (t, sub, _h) in enumerate(items))
+    panes = "".join(f'<div class="of-pane" role="tabpanel">{h}</div>'
+                    for _t, _s, h in items)
+    lead = ('<p class="sub" style="font-size:14px;margin:0 0 10px">'
+            'Можно смотреть три месяца сразу или каждый месяц отдельно.</p>')
+    return (f'<div class="of-wrap">{lead}'
+            f'<div class="of-tabs" role="tablist">{tabs}</div>{panes}</div>')
 
 
 def _units_section(lvl: analyze.Level, idx: int, lvl_of: dict | None = None) -> str:
-    """Карточки единиц: потери, возврат и куда двигается каждая единица.
+    """Карточки единиц в четырёх разрезах: окно и каждый месяц отдельно.
 
     На уровне банка карточка ТБ ведёт в его собственный разбор — это и есть
-    переход СБ → ТБ, тот же, что в первом отчёте.
+    переход СБ → ТБ, тот же, что в первом отчёте. Переход стоит только в
+    накопительном разрезе: он открывает уровень целиком, а не выбранный месяц,
+    и ставить его под месячной карточкой значило бы обещать не то.
     """
-    if not lvl.units:
+    if not lvl.periods:
         return ""
+    items = []
+    for p in lvl.periods:
+        html = _unit_cards(lvl, p, lvl_of if not p.get("is_month") else None)
+        if not html:
+            continue
+        t = p.get("totals") or {}
+        items.append((p["short"], f'потери {C.fmt_num(t.get("kept", 0))} чел', html))
+    if not items:
+        return ""
+    how = _how(
+        f'<b>Потери</b> — ушло минус вернулось по всем клиентам этого '
+        f'{lvl.unit_label} за выбранный период.',
+        '<b>Сколько организаций</b> — это разные клиенты: одна организация считается '
+        'один раз, даже если люди уходили из неё два месяца подряд.',
+        '<b>Стрелка динамики</b> в месячном разрезе смотрит на предыдущий месяц, '
+        'в накопительном — на предыдущие три. Год к году показан там же, где '
+        'месяц: он снимает сезонность.',
+        '<b>Цвет карточки</b> — по направлению движения: потери выросли, держатся '
+        'или снизились. Норматива «сколько терять можно» нет, и отчёт его не '
+        'придумывает.')
+    return C.section(f"Потери по {lvl.unit_label}",
+                     C.card(how + _period_switch(items)),
+                     eyebrow=f"Детализация по {lvl.unit_label}",
+                     desc="Сколько потерял каждый ГОСБ или ТБ — за три месяца "
+                          "и за каждый месяц. В месячном разрезе карточка "
+                          "сравнивает месяц с предыдущим и с тем же месяцем год "
+                          "назад, а раскрытая карточка показывает, из каких "
+                          "сегментов и клиентов сложились потери.")
+
+
+def _unit_cards(lvl: analyze.Level, p: dict, lvl_of: dict | None) -> str:
+    """Карточки подразделений одного разреза.
+
+    Карточка раскрывается: под сеткой появляется разбор — из каких сегментов
+    сложились потери и какие клиенты в них крупнейшие. До этого карточка
+    показывала итог и упиралась в тупик: дальше идти было некуда, а первый же
+    вопрос к любому числу — «из чего оно».
+    """
+    units = p.get("units") or []
+    if not units:
+        return ""
+    is_month = bool(p.get("is_month"))
     cards = []
-    for u in lvl.units:
+    for u in units:
         delta = u.get("delta")
         st = _status(delta)
         if delta is None:
-            dyn = '<div class="g-act">сравнить не с чем: истории за предыдущий период нет</div>'
+            dyn = '<div class="g-act">сравнить не с чем: прошлого периода нет</div>'
         else:
-            col = "var(--bad)" if delta > 0 else "var(--good)"
-            sign = "+" if delta > 0 else "−"
-            dyn = (f'<div class="g-act">к предыдущим трём месяцам '
-                   f'<b style="color:{col}">{sign}{C.fmt_num(abs(delta))} чел</b> '
+            base = (f'к {C.month_ru(u.get("prev_label", ""), "dat")}' if is_month
+                    else "к прошлым трём месяцам")
+            dyn = (f'<div class="g-act">{base} {_delta_b(delta)} '
                    f'(было {C.fmt_num(u["was_kept"])})</div>')
+        if is_month and u.get("yoy_delta") is not None:
+            dyn += (f'<div class="g-act">к {C.month_ru(u.get("yoy_label", ""), "dat")} '
+                    f'{_delta_b(u["yoy_delta"])} '
+                    f'(было {C.fmt_num(u["yoy_kept"])})</div>')
         ret_pct = (u.get("ret_share") or 0) * 100
+        n = int(u.get("orgs") or 0)
         inner = (
             f'<div class="g-head"><h3 style="margin:0">{C.esc(u["name"])}</h3>'
             f'<span class="g-ex {st}"><i>потери</i>{C.fmt_num(u["kept"])}</span></div>'
             f'<div class="g-fc">ушло {C.fmt_num(u["gone"])} · вернулось '
             f'{C.fmt_num(u["ret"])} ({ret_pct:.0f}%)</div>'
             f'<div style="margin:2px 0 6px">'
-            + C.badge(f'{u["orgs"]} строк оттока за окно', "warn") + '</div>'
+            + C.badge(f'ушли из {C.fmt_num(n)} '
+                      f'{C.plural(n, "организации", "организаций", "организаций")}',
+                      "warn") + '</div>'
             + dyn)
         go = (lvl_of or {}).get(u["id"])
+        more = (f'<button type="button" class="g-more u-open" '
+                f'data-unit="{p["key"]}|{u["id"]}" onclick="ofUnit(this)">'
+                f'Показать, из чего сложились потери</button>')
         drill = (f'<div class="g-more g-drill" onclick="event.stopPropagation();'
                  f'lvlGo({go})">Открыть разбор {C.esc(u["name"])} →</div>'
                  if go else "")
-        cards.append(f'<div class="card gcard {st}">{inner}{drill}</div>')
-    grid = f'<div class="gcards">{"".join(cards)}</div>'
-    return C.section(f"Детализация по {lvl.unit_label}",
-                     grid, eyebrow=f"Детализация по {lvl.unit_label}",
-                     desc="Потери каждого подразделения за окно отчёта и куда "
-                          "они сдвинулись к предыдущим трём месяцам.")
+        cards.append(f'<div class="card gcard {st}">{inner}{more}{drill}</div>')
+    return (f'<div class="gcards">{"".join(cards)}</div>'
+            f'<div class="of-drill" hidden aria-live="polite"></div>')
 
 
 def _reasons_section(lvl: analyze.Level) -> str:

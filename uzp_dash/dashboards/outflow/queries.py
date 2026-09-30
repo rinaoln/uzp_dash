@@ -38,3 +38,33 @@ WHERE f.outflow_qty >= :out_min
   AND f.report_dt BETWEEN :hist_from AND :ref_closed
 GROUP BY g.new_gosb_id, g.tb_id, f.report_dt, f.segment_name
 """
+
+
+# Клиенты внутри ячейки матрицы: тот же грейн, что и история, плюс ИНН.
+#
+# Месяц оставлен в грейне: отчёт показывает и три месяца накопительно, и
+# каждый месяц отдельно, а сворачивать месяцы в Python дешевле, чем ходить
+# в самую большую таблицу четыре раза.
+#
+# Источник и фильтр ТЕ ЖЕ, что в OUTFLOW_HISTORY, — иначе список клиентов ячейки
+# не сходился бы с числом в самой ячейке, а расхождение в отчёте правления хуже
+# отсутствия списка. Окно берётся только отчётное (три закрытых месяца), потому
+# что матрица построена по нему же.
+OUTFLOW_CLIENTS = """
+WITH gmap AS (""" + _GMAP + """)
+SELECT g.new_gosb_id                                           AS unit_id,
+       g.tb_id,
+       f.report_dt,
+       f.segment_name                                          AS seg_name,
+       f.inn,
+       sum(f.outflow_qty)                                      AS out_qty,
+       sum(COALESCE(r.return_qty, 0))                          AS ret_qty,
+       sum(GREATEST(f.outflow_qty - COALESCE(r.return_qty, 0), 0)) AS out_kept
+FROM {schema}.uzp_dwh_fact_outflow f
+JOIN gmap g ON g.old_gosb_id = f.gosb_id
+LEFT JOIN {schema}.uzp_data_outflow_return_detail r
+       ON r.report_dt = f.report_dt AND r.gosb_id = f.gosb_id AND r.inn = f.inn
+WHERE f.outflow_qty >= :out_min
+  AND f.report_dt BETWEEN :out_from AND :ref_closed
+GROUP BY g.new_gosb_id, g.tb_id, f.report_dt, f.segment_name, f.inn
+"""

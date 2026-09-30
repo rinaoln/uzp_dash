@@ -1,0 +1,208 @@
+/* ============================================================================
+   Оформление отчёта «Работа с оттоком».
+
+   Отдельная тема, а не копия первого отчёта. Причина не в украшательстве: два
+   отчёта лежат в одной папке и открываются в соседних вкладках, и если они
+   выглядят одинаково, читатель теряет, в каком из них находится, — а числа в
+   них разные и отвечают на разные вопросы. Поэтому здесь другая палитра, другой
+   вердикт (тёмная панель вместо светлой карточки), другие плашки разделов и
+   другая шапка таблиц.
+
+   Файл подключается ПОСЛЕ ux.css и ux-fix.css и переопределяет только токены и
+   те компоненты, по которым отчёты должны различаться. Сами файлы дизайнера не
+   трогаются: правки в них запрещены, и обходить это через копию нельзя.
+   ========================================================================= */
+
+:root {
+  --bg: #e9ecef;                 /* холодная бумага вместо тёплой серой */
+  --surface: #ffffff;
+  --surface-solid: #ffffff;
+  --elevated: #ffffff;
+  --text: #16212b;
+  --text-2: #5b6a76;
+  --separator: rgba(22, 33, 43, 0.12);
+  --accent: #0f6b63;             /* глубокий сине-зелёный: не спорит с красным */
+  --good: #2c7a52;
+  --warn: #a9711a;
+  --bad: #b0382e;                /* приглушённый кирпичный: читается и в печати */
+  --ink: #16212b;                /* тёмная панель вердикта и шапок таблиц */
+  --ink-2: #26343f;
+  --shadow: 0 1px 0 rgba(22, 33, 43, 0.04), 0 6px 18px rgba(22, 33, 43, 0.06);
+  --radius: 10px;
+}
+
+/* Тёмной схемы здесь нет намеренно: первый отчёт уже решено показывать всегда
+   светлым, независимо от системной настройки, и инструкция описывает светлый
+   экран. Два отчёта, один из которых у части читателей чёрный, — это не «две
+   темы», а разное поведение одного продукта. */
+
+body { background: var(--bg); }
+
+/* --- Ритм страницы: документ, а не лента карточек ------------------------- */
+.wrap { max-width: 1180px; padding-top: 40px; }
+h2 { font-size: 27px; font-weight: 700; letter-spacing: -0.02em; }
+h3 { font-size: 18px; font-weight: 650; }
+.eyebrow {
+  color: var(--text-2); font-size: 11.5px; font-weight: 700;
+  letter-spacing: 0.14em; text-transform: uppercase;
+}
+section { border-top: 2px solid var(--ink); padding-top: 14px; margin-top: 18px; }
+
+.card {
+  background: var(--surface-solid);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius);
+  box-shadow: none;
+}
+.card:hover { box-shadow: none; }
+
+/* --- Вердикт: тёмная панель. Главное отличие от первого отчёта ------------ */
+.card.hero {
+  background: linear-gradient(135deg, var(--ink) 0%, var(--ink-2) 100%);
+  border: 0; border-radius: var(--radius);
+  color: #f2f6f8; padding: 28px 30px 26px;
+  position: relative; overflow: hidden;
+}
+.card.hero::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px;
+  background: var(--warn);
+}
+.card.hero.good::before { background: var(--good); }
+.card.hero.bad::before { background: var(--bad); }
+.card.hero .eyebrow { color: rgba(242, 246, 248, 0.62); }
+.card.hero .verdict { color: #ffffff; font-weight: 700; }
+.card.hero .row2 { color: rgba(242, 246, 248, 0.82); }
+.card.hero .row2.row2-fot { color: rgba(242, 246, 248, 0.88); }
+.card.hero .row2.row2-fot .row2-num { color: #ffffff; }
+.card.hero .row2 b { color: #ffffff; }
+/* цвет динамики внутри тёмной панели задаётся разметкой (var(--bad)/--good) —
+   на тёмном они тусклые, поэтому подсвечиваем их светлее */
+.card.hero .row2 b[style*="--bad"] { color: #ff8d80 !important; }
+.card.hero .row2 b[style*="--good"] { color: #79d6a3 !important; }
+
+/* --- Показатели: плоские плитки с верхней линией -------------------------- */
+.card.kpi {
+  border-top: 3px solid var(--accent);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.kpi .label { font-size: 12.5px; font-weight: 700; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--text-2); }
+.kpi .value { font-size: 38px; font-weight: 700; }
+.kpi .delta { font-weight: 600; }
+
+/* --- Плашки разделов: нумерованный маршрут, без синих стрелок -------------- */
+.hub { counter-reset: hubn; }
+.hub-tile {
+  background: var(--surface-solid);
+  border: 1px solid var(--separator);
+  border-radius: var(--radius);
+  box-shadow: none;
+  padding: 18px 20px 16px;
+}
+.hub-tile::before { display: none; }         /* цветной кант первого отчёта */
+.hub-tile:hover {
+  border-color: var(--accent);
+  box-shadow: 0 6px 18px rgba(22, 33, 43, 0.10);
+  transform: none;
+}
+.hub-h {
+  counter-increment: hubn;
+  font-size: 17px; font-weight: 700; align-items: center;
+}
+.hub-h::before {
+  content: counter(hubn, decimal-leading-zero);
+  font-size: 12px; font-weight: 700; letter-spacing: 0.08em;
+  color: var(--accent); margin-right: 10px; flex: none;
+}
+.hub-h i {                                    /* кружок со стрелкой → плоский знак */
+  background: none; color: var(--accent); width: auto; height: auto;
+  font-size: 18px; font-weight: 400;
+}
+.hub-tile:hover .hub-h i { transform: translateX(2px); }
+.hub-nums { border-top: 1px solid var(--separator); }
+.hub-n b { font-size: 18px; }
+.hub-lead { color: var(--text-2); }
+
+/* --- Таблицы: тёмная шапка и зебра ---------------------------------------- */
+th {
+  background: var(--ink); color: #e8eef2;
+  font-size: 11.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; border-bottom: 0;
+}
+th:first-child { border-top-left-radius: 6px; }
+th:last-child { border-top-right-radius: 6px; }
+tbody tr:nth-child(even) td { background: rgba(22, 33, 43, 0.025); }
+tbody tr:hover td { background: rgba(15, 107, 99, 0.06); }
+td:first-child { font-weight: 560; }
+
+/* --- Матрица: ячейка раскрывается ----------------------------------------- */
+table.matrix th { background: var(--ink); }
+td.of-cell { cursor: pointer; position: relative; }
+td.of-cell:hover { outline: 2px solid var(--accent); outline-offset: -2px; }
+td.of-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+td.of-cell.on { outline: 2px solid var(--ink); outline-offset: -2px; }
+
+.of-drill {
+  margin-top: 16px; padding: 18px 20px;
+  border: 1px solid var(--separator); border-left: 4px solid var(--accent);
+  border-radius: 8px; background: var(--surface-solid);
+}
+.of-drill-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 12px; margin-bottom: 4px;
+}
+.of-drill-t { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+.of-drill-x {
+  border: 1px solid var(--separator); background: var(--surface-solid);
+  color: var(--text-2); border-radius: 6px; padding: 4px 10px;
+  font-size: 13px; cursor: pointer; flex: none;
+}
+.of-drill-x:hover { color: var(--text); border-color: var(--text-2); }
+.of-drill-sub { color: var(--text-2); font-size: 14px; margin-bottom: 12px; }
+.of-drill-p { color: var(--accent); font-weight: 600; }
+/* Вкладки разрезов: их четыре, и они уже плашек со списками работы. Базовый
+   flex-basis 280px ломал их на 3+1, а разрезы читаются как один ряд. */
+.of-wrap > .of-tabs > .of-tab { flex: 1 1 150px; }
+.of-drill-rest { color: var(--text-2); font-size: 13px; margin-top: 10px; }
+
+/* --- Переключатель списков и рекомендации --------------------------------- */
+.of-tab { border-radius: 8px; }
+.of-tab.on { border-color: var(--accent); }
+.card.reco { border-left: 4px solid var(--accent); }
+.card.reco.reco-sec { background: rgba(15, 107, 99, 0.04); }
+
+/* --- Вкладки уровней ------------------------------------------------------ */
+.lvls { background: color-mix(in srgb, var(--bg) 88%, transparent); }
+.lvl-tab { border-radius: 6px; font-weight: 600; }
+.lvl-tab.on { background: var(--ink); color: #ffffff; }
+.lvl-pdf, .xls-btn, .gd-export {
+  border: 1.5px solid var(--accent); color: var(--accent);
+  border-radius: 6px;
+}
+
+/* --- Печать: раскрытая плашка клиентов уходит в PDF вместе с матрицей ------ */
+@media print {
+  .card.hero { background: #ffffff; color: var(--text); border: 1px solid var(--separator); }
+  .card.hero .verdict, .card.hero .row2, .card.hero .row2 b { color: var(--text); }
+  th { background: #e9ecef; color: var(--text); }
+  .of-drill { break-inside: avoid; }
+}
+
+/* --- Значок «i»: откуда взялось число ------------------------------------- */
+/* В первом отчёте это «?» — там подсказка объясняет, как читать блок. Здесь она
+   объясняет РАСЧЁТ, и «i» читается однозначнее: вопрос задаёт читатель, а
+   справку даёт отчёт. */
+.gd-help > summary::before { content: "i"; font-style: italic; font-weight: 700; }
+.gd-help > summary { color: var(--accent); }
+.gd-help-b { border-left: 3px solid var(--accent); }
+
+/* --- Карточка подразделения раскрывается ---------------------------------- */
+.g-more.u-open {
+  display: inline-block; margin-top: 10px; padding: 6px 12px;
+  border: 1px solid var(--separator); border-radius: 6px;
+  background: var(--surface-solid); color: var(--accent);
+  font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+}
+.g-more.u-open:hover { border-color: var(--accent); }
+.gcard.on { outline: 2px solid var(--accent); outline-offset: -2px; }
+.of-drill h4 { margin: 14px 0 6px; font-size: 15px; font-weight: 700; }

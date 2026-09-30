@@ -1803,7 +1803,11 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
     if fc is None or fc.empty or src not in fc:
         return {}
     fc = fc.dropna(subset=[src])
-    fc = fc[forecast.num(fc, "out_kept") > 0]
+    # В разбор берём не только тех, кого потеряли: клиент, вернувшийся ЦЕЛИКОМ,
+    # для списка возвратов — такой же факт, как и невернувшийся, а по фильтру
+    # «потери > 0» он выпадал из расчёта совсем, и возврат по нему нигде не
+    # показывался. Списки потерь ниже собираются уже по строкам с потерями.
+    fc = fc[(forecast.num(fc, "out_kept") > 0) | (forecast.num(fc, "ret_qty") > 0)]
     if fc.empty:
         return {}
 
@@ -1867,6 +1871,11 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
                 "out_reason": (pidx.get(k) or {}).get("reason", ""),
                 "out_reason_src": (pidx.get(k) or {}).get("reason_src", ""),
             })
+    # Дальше «rows» — только строки с потерями: на них считаются топ, свод причин
+    # и обе группы работы. Полностью вернувшиеся живут в all_rows и нужны списку
+    # возвратов, но в «крупнейших потерях» им места нет — там потерь ноль.
+    all_rows = rows
+    rows = [r for r in all_rows if r["kept"] > 0]
     rows.sort(key=lambda x: x["kept"], reverse=True)
     top = rows[:top_n]
     # ДВЕ ГРУППЫ РАЗДЕЛА. Обе про один и тот же факт — люди ушли и не вернулись, —
@@ -1887,7 +1896,7 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
     # таблицы, и по ней же понятно, закрыта работа или ещё идёт.
     # Организации с частичным возвратом во вторую группу не попадают: результат там
     # всё-таки есть, и «без результата» было бы неправдой.
-    for r in rows:
+    for r in all_rows:
         p = r.get("promise") or {}
         qty = p.get("qty")
         r["promise_broken"] = bool(p) and (
@@ -1895,6 +1904,13 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
     promised = [r for r in rows if r["promise_broken"]]
     worked = [r for r in rows
               if not r["promise_broken"] and r["tasks"] and r["ret"] <= 0]
+    # ТРЕТЬЯ ГРУППА — те, кто вернулся. Две первые отвечают на вопрос «где не
+    # получилось», а руководителю нужен и обратный срез: сколько людей вернули и
+    # по каким клиентам. Возврат берётся из витрины возвратов, а не из задач,
+    # поэтому в списке есть и клиенты, по которым задач не заводили вовсе, — это
+    # честно и важно: часть возвратов происходит без нашей работы.
+    returned = sorted((r for r in all_rows if r["ret"] > 0),
+                      key=lambda x: (-x["ret"], -x["gone"]))
     reasons, known_n, known_kept = _outflow_reasons(rows)
     return {
         "rows": top,
@@ -1912,6 +1928,15 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
         "n_worked": len(worked),
         "kept_worked": sum(r["kept"] for r in worked),
         "n_unknown": sum(1 for r in rows if not r["known"]),
+        # возвраты поимённо
+        "top_returned": returned[:TOP_CLIENTS],
+        "n_returned": len(returned),
+        "ret_returned": sum(r["ret"] for r in returned),
+        "n_ret_full": sum(1 for r in returned if r["kept"] <= 0),
+        "ret_full": sum(r["ret"] for r in returned if r["kept"] <= 0),
+        "n_ret_task": sum(1 for r in returned if r["tasks"]),
+        "ret_task": sum(r["ret"] for r in returned if r["tasks"]),
+        "n_ret_promise": sum(1 for r in returned if r.get("promise")),
     }
 
 
