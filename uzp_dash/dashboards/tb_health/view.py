@@ -19,7 +19,7 @@ from ...registry import Context, dashboard
 from ...render import components as C
 from ...render import page
 from ... import progress
-from . import analyze, bank, prompts, segments, snapshot, summary_xlsx
+from . import analyze, bank, prompts, queries, segments, snapshot
 
 SEG_ORDER = segments.ORDER   # короткие названия сегментов (КСБ, РГС, …)
 
@@ -190,11 +190,9 @@ def build(ctx: Context) -> str:
                       "сказано прямо")
     snapshot.save(ctx.output_dir, ref_cur, [sb] + preps)
 
-    # Сводка по всем ТБ и ГОСБ в шаблоне банка «Портфель ФЛ_Summary ТБ» —
-    # отдельным файлом рядом с отчётом. Собирается здесь, а не отдельным
-    # прогоном: все её числа уже прочитаны для самого отчёта, и второй заход
-    # в витрину ради того же среза был бы лишним.
-    summary_xlsx.save(ctx.output_dir, b)
+    # Сводку в шаблоне «Портфель ФЛ_Summary ТБ» сборка БОЛЬШЕ НЕ ПИШЕТ: файл
+    # рядом с отчётом никто не забирал, а на проме он стоил лишнего времени.
+    # Сам сборщик остался в summary_xlsx — если понадобится, его зовут отдельно.
 
     # Выводы по разделам — по вызову LLM на уровень, и это основное время отчёта.
     # ПОСЛЕДОВАТЕЛЬНО: параллельный вариант пробовали, корпоративный шлюз отвечает на
@@ -277,6 +275,7 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     if a.level != "sb":
         secs.append(("orgs", _orgs(a, story.get("orgs"), idx)))
     secs.append(("outflow", _outflow_section(a, story.get("outflow"))))
+    secs.append(("flow", _flow_section(a)))
     secs = [(key, html) for key, html in secs if html]
     return (
         _lvl_head(a, idx)
@@ -382,6 +381,13 @@ def _hub_facts(a: analyze.Analysis) -> dict:
              (C.fmt_num(o.get("ret_returned") or 0), "чел вернули", "good"),
              (C.fmt_num(len(o.get("top_promised") or [])),
               "обещали вернуться, но не вернулись", "")],
+        )
+    f = a.flow or {}
+    if f.get("base"):
+        out["flow"] = (
+            "Портфель уменьшился — но ушли ли люди на самом деле.",
+            [(C.fmt_num(f.get("gone", 0)), "чел потеряли совсем", "bad"),
+             (C.fmt_num(f.get("left", 0)), "перестали получать зарплату", "")],
         )
     return out
 
@@ -2295,6 +2301,99 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
             f'{cand}.</p>{help_html}')
     return C.section("Потенциал организаций", C.card(head + explorer) + _ai(ai),
                      eyebrow="Потенциал организаций")
+
+
+def _flow_section(a: analyze.Analysis) -> str:
+    """Куда делись получатели за последний закрытый месяц.
+
+    Отчёт до этого говорил «портфель уменьшился на N» и на этом останавливался.
+    Между тем «стало меньше» — это четыре разных события: человек ушёл совсем,
+    ушёл в другую организацию, получил меньше порога или остался клиентом, но уже
+    не зарплатным. Разговор по каждому свой, и валить их в одно число нельзя.
+
+    Имён и ФИО здесь нет намеренно: раздел отвечает на вопрос «сколько и куда», а
+    не «кто именно». Поимённо работают со списком организаций и с оттоком.
+    """
+    f = a.flow or {}
+    if not f.get("base"):
+        return ""
+    left, came, base = f["left"], f["came"], f["base"]
+    net = f["net"]
+    col = "var(--good)" if net > 0 else ("var(--bad)" if net < 0 else "var(--text)")
+    sign = "+" if net > 0 else ("−" if net < 0 else "")
+    head = (
+        f'<h3>Движение получателей за {C.month_ru(f["m_cur"])}</h3>'
+        f'<p class="sub" style="font-size:15px;margin:-4px 0 12px">'
+        f'В {C.month_ru(f["m_prev"], "pre")} зарплату у нас получали '
+        f'<b>{C.fmt_num(base)}</b> человек. За месяц '
+        f'<b style="color:var(--bad)">{C.fmt_num(left)}</b> из них перестали, '
+        f'пришли <b style="color:var(--good)">{C.fmt_num(came)}</b> — '
+        f'чистое изменение <b style="color:{col}">{sign}{C.fmt_num(abs(net))}</b> '
+        f'человек.</p>'
+        + _gd_help(
+            '<b>Получатель — это пара «человек и организация», а не человек.</b> '
+            'Совместитель числится в двух организациях сразу, и его переход между '
+            'ними виден как уход в одной и приход в другой: иначе портфель '
+            'подразделения не сойдётся.',
+            '<b>Порог.</b> Получателем считается тот, кому за месяц пришло больше '
+            f'{C.fmt_num(queries.SALARY_AMT_MIN)} ₽ зарплатными зачислениями. '
+            'Сумма ниже — человек не потерян, но в портфель месяца он не входит.',
+            '<b>Зарплатные и незарплатные зачисления.</b> Зарплатой считается '
+            'закрытый список видов зачислений. Пенсия, пособие, стипендия, '
+            'субсидия зарплатой не считаются: деньги на счёт идут, но получателем '
+            'зарплаты человек быть перестал.',
+            '<b>Месяцы.</b> Сравниваются два последних закрытых месяца целиком. '
+            'Текущий месяц не берётся: по нему ведомости ещё не собраны, и любое '
+            'сравнение с ним показало бы обвал, которого нет.',
+            title="Как считается движение")
+    )
+    rows = []
+    for _code, title, note, val in f["left_kinds"]:
+        rows.append([
+            f'{C.esc(title)}<div class="gd-emp">{C.esc(note)}</div>',
+            C.fmt_num(val),
+            f'{val / left * 100:.0f}%' if left else "—",
+            f'{val / base * 100:.1f}%' if base else "—"])
+    left_tbl = C.table(["Перестали получать зарплату", "чел",
+                        "доля ушедших", "доля портфеля"], rows, num_cols=[1, 2, 3])
+    rows2 = []
+    for _code, title, note, val in f["came_kinds"]:
+        rows2.append([
+            f'{C.esc(title)}<div class="gd-emp">{C.esc(note)}</div>',
+            C.fmt_num(val),
+            f'{val / came * 100:.0f}%' if came else "—"])
+    came_tbl = C.table(["Начали получать зарплату", "чел", "доля пришедших"],
+                       rows2, num_cols=[1, 2])
+    unit = f.get("unit_label", "ГОСБ")
+    urows = []
+    for u in f["units"]:
+        urows.append([
+            C.esc(u["name"]),
+            C.fmt_num(u["base"]),
+            f'<b style="color:var(--bad)">{C.fmt_num(u["left"])}</b>',
+            C.fmt_num(u["gone"]),
+            C.fmt_num(u["moved"]),
+            C.fmt_num(u["below"]),
+            C.fmt_num(u["other"]),
+            f'<b style="color:var(--good)">{C.fmt_num(u["came"])}</b>',
+            # не _delta_html: он подписывает «к плану», а плана по движению
+            # получателей не существует — это просто разница пришедших и ушедших
+            (f'<b style="color:{"var(--good)" if u["net"] > 0 else "var(--bad)"}">'
+             f'{"+" if u["net"] > 0 else "−"}{C.fmt_num(abs(u["net"]))}</b>'
+             if u["net"] else "0")])
+    unit_tbl = C.table(
+        [unit, "было, чел", "перестали", "из них совсем", "в другой организации",
+         "ниже порога", "незарплатные", "начали", "чистое изменение"],
+        urows, num_cols=[1, 2, 3, 4, 5, 6, 7, 8])
+    return C.section(
+        "Куда делись люди",
+        C.card(head + left_tbl + came_tbl)
+        + C.card(f'<h3>По каждому {C.esc(unit)}</h3>' + unit_tbl),
+        eyebrow="Движение получателей",
+        desc="Портфель уменьшился — но ушли ли люди. Здесь видно, сколько "
+             "человек перестали получать зарплату совсем, сколько получают её "
+             "уже от другой организации, сколько не дотянули до порога и у "
+             "скольких остались только незарплатные выплаты.")
 
 
 def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:

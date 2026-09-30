@@ -91,6 +91,7 @@ class Analysis:
     sim: dict
     gosb_plan: dict = field(default_factory=dict)   # new_gosb_id -> потребность под план
     insights: dict = field(default_factory=dict)   # (gosb_id, inn) -> reason/action/…
+    flow: dict = field(default_factory=dict)       # движение получателей за месяц
     themes: str = "—"
     llm_stats: dict = field(default_factory=dict)
     dates: dict = field(default_factory=dict)      # ref_cur / ref_closed / out_months / …
@@ -389,7 +390,98 @@ def _assemble(b: Bank, tb_short: str, tb_id: int, tb_full: str, ref_date: str,
     )
     a.orgs, a.orgs_fc, a.detail, a.seg_gaps = orgs, orgs_fc, detail, seg_gaps
     a.cell_top = _cell_top(detail, unit_src, b.seg_by_inn)
+    a.flow = _flow(b, None if level == "sb" else tb_id, unit_label)
     return a
+
+
+# --------------------------------------------------------------------------- #
+# КУДА ДЕЛИСЬ ЛЮДИ.
+#
+# Портфель уменьшился — но человек мог не уйти: он мог получить зарплату от
+# другой организации, получить меньше порога (отпуск, больничный, неполный
+# месяц) или остаться клиентом, которому идут уже не зарплатные выплаты. Это
+# четыре разных события и четыре разных разговора, а в отчёте до сих пор они
+# складывались в одно число «стало меньше».
+#
+# Считается парами (человек, организация): получатель — это пара. Совместитель
+# числится в двух организациях, и переход между ними обязан быть виден как уход
+# в одной и приход в другой, иначе портфель подразделения не сойдётся.
+FLOW_LEFT = (
+    ("moved", "получают зарплату в другой организации",
+     "человек остался нашим клиентом — зарплату ему платит уже другой работодатель"),
+    ("below", "получили меньше порога",
+     "зарплата пришла, но за месяц вышло меньше порога: отпуск, больничный, "
+     "неполный месяц"),
+    ("other", "приходят только незарплатные выплаты",
+     "деньги на счёт идут, но это уже не зарплата — пенсия, пособие, стипендия "
+     "и подобное"),
+    ("gone", "зарплаты у нас больше нет",
+     "зачислений нет ни от этой организации, ни от какой-либо другой — это и есть "
+     "потеря"),
+)
+FLOW_CAME = (
+    ("from_other", "перешли из другой организации",
+     "человек был нашим получателем и в прошлом месяце, но от другого работодателя"),
+    ("new", "новые получатели",
+     "в прошлом месяце зарплату у нас не получали"),
+)
+
+
+def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
+    """Движение получателей уровня: сколько было, кто ушёл и куда, кто пришёл."""
+    df = getattr(b, "flow", None)
+    if df is None or df.empty:
+        return {}
+    key = "tb_id" if tb_id is None else "unit_id"
+    cur = df if tb_id is None else df[df["tb_id"] == tb_id]
+    if cur.empty:
+        return {}
+    by_kind = cur.groupby(["side", "kind"])["fl"].sum().to_dict()
+
+    def k(side, kind):
+        return float(by_kind.get((side, kind), 0.0))
+
+    base = sum(k("was", x) for x in ("stay", "moved", "below", "other", "gone"))
+    left = base - k("was", "stay")
+    came = k("came", "from_other") + k("came", "new")
+    units = []
+    name_of = _flow_names(b, tb_id)
+    g = cur.pivot_table(index=key, columns=["side", "kind"], values="fl",
+                        aggfunc="sum", fill_value=0.0)
+    for uid, row in g.iterrows():
+        def v(side, kind):
+            return float(row.get((side, kind), 0.0))
+        u_base = sum(v("was", x) for x in ("stay", "moved", "below", "other", "gone"))
+        u_left = u_base - v("was", "stay")
+        u_came = v("came", "from_other") + v("came", "new")
+        units.append({
+            "id": int(uid), "name": name_of.get(int(uid), str(uid)),
+            "base": u_base, "left": u_left, "came": u_came,
+            "net": u_came - u_left,
+            "gone": v("was", "gone"), "moved": v("was", "moved"),
+            "below": v("was", "below"), "other": v("was", "other"),
+            "from_other": v("came", "from_other"), "new": v("came", "new"),
+            "left_share": (u_left / u_base) if u_base else None,
+            "gone_share": (v("was", "gone") / u_left) if u_left else None})
+    units.sort(key=lambda x: -x["gone"])
+    return {
+        "unit_label": unit_label,
+        "m_prev": df.attrs.get("m_prev", ""), "m_cur": df.attrs.get("m_cur", ""),
+        "base": base, "stay": k("was", "stay"), "left": left, "came": came,
+        "net": came - left,
+        "gone": k("was", "gone"), "moved": k("was", "moved"),
+        "below": k("was", "below"), "other": k("was", "other"),
+        "left_kinds": [(code, title, note, k("was", code)) for code, title, note in FLOW_LEFT],
+        "came_kinds": [(code, title, note, k("came", code)) for code, title, note in FLOW_CAME],
+        "units": units}
+
+
+def _flow_names(b: Bank, tb_id: int | None) -> dict:
+    """Имена единиц уровня для таблицы движения."""
+    if tb_id is None:
+        return {int(r.tb_id): str(r.tb_short_name) for r in b.tbs.itertuples()}
+    return {int(gid): str(nm) for gid, nm in (b.gosb_name or {}).items()
+            if b.tb_of.get(int(gid)) == tb_id}
 
 
 def _cell_top(detail: pd.DataFrame, unit_src: str, seg_by_inn: dict,

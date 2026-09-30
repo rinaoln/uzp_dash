@@ -69,6 +69,7 @@ class Bank:
     # (ГОСБ, организация) -> обещание вернуть получателей из задачи по оттоку
     promises: pd.DataFrame = field(default_factory=pd.DataFrame)
     params: dict = field(default_factory=dict)     # параметры запуска (ctx.params)
+    flow: pd.DataFrame = field(default_factory=pd.DataFrame)  # движение ФЛ за месяц
     fc_stats: dict = field(default_factory=dict)   # диагностика оттока и пайплайна
 
 
@@ -183,7 +184,7 @@ def load(ctx) -> Bank:
                 unit_tot_fot=unit_tot_fot,
                 orgs=orgs, orgs_tb=orgs_tb, fagg=fagg, act_tot=act_tot, act_brk=act_brk,
                 fmonths=fmonths, orgs_fc=orgs_fc, conv=conv, seg_by_inn=seg_by_inn,
-                promises=promises,
+                promises=promises, flow=payroll_flow(e, d, ctx.params or {}),
                 params=dict(ctx.params or {}), fc_stats=stats)
 
 
@@ -311,6 +312,44 @@ def audit_texts(engine, b: Bank, inns: list) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
+def payroll_flow(engine, d: dict, params: dict) -> pd.DataFrame:
+    """Куда делись получатели за последний закрытый месяц.
+
+    Ведомости — единственная витрина с физлицами, и вопрос «человек ушёл или
+    просто получил меньше порога» решается только по ним. Запрос тяжёлый (две
+    партиции самой большой таблицы прома), поэтому его можно выключить
+    параметром people_flow=False — тогда раздела в отчёте просто не будет.
+    """
+    if not params.get("people_flow", True):
+        progress.done("Раздел «Куда делись люди» отключён (people_flow=False)")
+        return pd.DataFrame()
+    cur = pd.Timestamp(d["ref_closed"])
+    prev = (cur.to_period("M") - 1).to_timestamp("M")
+    progress.step(f"Движение получателей: {prev:%m.%Y} → {cur:%m.%Y} по ведомостям")
+    df = read_sql(engine, Q.PAYROLL_FLOW,
+                  {"m_prev": prev.date(), "m_cur": cur.date(),
+                   "salary_codes": tuple(Q.SALARY_CODES),
+                   "amt_min": Q.SALARY_AMT_MIN})
+    if df.empty:
+        progress.warn("Ведомости за эти месяцы пусты — раздела «Куда делись люди» "
+                      "в отчёте не будет")
+        return df
+    df["unit_id"] = df["unit_id"].astype("int64")
+    df["tb_id"] = df["tb_id"].astype("int64")
+    df["fl"] = forecast.num(df, "fl")
+    was = df[df["side"] == "was"]
+    base = float(was["fl"].sum())
+    left = float(was[was["kind"] != "stay"]["fl"].sum())
+    came = float(df[df["side"] == "came"]["fl"].sum())
+    progress.done(
+        f"Движение получателей: было {base:,.0f} пар (человек, организация) · "
+        f"ушло {left:,.0f} · пришло {came:,.0f} · "
+        f"месяцы {prev:%m.%Y} и {cur:%m.%Y}".replace(",", " "))
+    df.attrs["m_prev"] = f"{prev:%m.%Y}"
+    df.attrs["m_cur"] = f"{cur:%m.%Y}"
+    return df
+
+
 def dates(engine, params: dict) -> dict:
     """Опорные даты дэша. Считаются ОДИН раз на отчёт.
 

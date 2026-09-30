@@ -39,16 +39,32 @@ def build(ctx: Context) -> str:
     b = bank.load(ctx)
     hist = analyze.load_history(ctx, b)
     clients = analyze.load_clients(ctx, b)
+    # Разбор комментариев по клиентам: один пул на весь отчёт и один запрос
+    # текстов. Уровни его не пересчитывают — они берут готовые выводы: тексты
+    # одни и те же, а двенадцать проходов по самой большой таблице стоили бы
+    # минут и денег на вызовах модели.
+    ins_gosb, ins_tb = {}, {}
+    if th.audit_enabled(ctx):
+        pool = analyze.audit_pool(b)
+        texts = bank.audit_texts(ctx.engine, b,
+                                 sorted({int(x) for x in pool["inn"]}) if not pool.empty
+                                 else [])
+        ins_gosb, _stats = analyze.audit(ctx, b, pool, texts)
+        ins_tb = analyze.audit_by_tb(ins_gosb, b.tb_of, pool)
+    else:
+        progress.done("Разбор комментариев отключён (llm_max_calls=0): у клиентов "
+                      "останутся причина ухода и обещание из чек-листа")
 
     levels_tb = sorted(((int(r.tb_id), str(r.tb_short_name), str(r.tb_full_name))
                         for r in b.tbs.itertuples()), key=lambda x: th._ru_key(x[1]))
     progress.step("Уровень СБ: отток по всему банку")
     sb = analyze.prepare(b, hist, clients, None, "СБ",
-                         "Сбербанк — все территориальные банки")
+                         "Сбербанк — все территориальные банки", ins_tb)
     levels = [sb]
     for i, (tb_id, short, full) in enumerate(levels_tb, start=1):
         progress.step(f"═══ ТБ {short} ({i} из {len(levels_tb)}) ═══")
-        levels.append(analyze.prepare(b, hist, clients, tb_id, short, full))
+        levels.append(analyze.prepare(b, hist, clients, tb_id, short, full,
+                                      ins_gosb))
     _log(sb)
 
     # карточка ТБ на главном экране знает номер вкладки своего разбора
@@ -113,6 +129,10 @@ _CELLS_JS = """
     if(r.reason) bits.push(esc(r.reason)
       + (r.rsrc ? ' <i style="color:var(--text-2)">(' + esc(r.rsrc) + ')</i>' : ''));
     if(r.promise) bits.push(esc(r.promise));
+    /* вывод разбора комментариев: что мешает и что делать. Отбит цветом, чтобы
+       не путать с тем, что сотрудник записал в задачу своими руками */
+    if(r.aud) bits.push('<span class="of-aud">' + esc(r.aud) + '</span>');
+    if(r.aud_do) bits.push('<span class="of-aud-do">→ ' + esc(r.aud_do) + '</span>');
     return bits.length ? bits.join('<br>') : '\u2014';
   }
   function clear(card){
@@ -164,6 +184,7 @@ _CELLS_JS = """
         c.gone += r.gone; c.ret += r.ret; c.kept += r.kept;
         if(!c.reason && r.reason){ c.reason = r.reason; c.rsrc = r.rsrc; }
         if(!c.promise && r.promise) c.promise = r.promise;
+        if(!c.aud && r.aud){ c.aud = r.aud; c.aud_do = r.aud_do; }
         agg[r.name] = c;
       });
     });
@@ -747,7 +768,12 @@ def _matrix_section(lvl: analyze.Level, idx: int) -> str:
         'после ухода, и потери разъехались бы по колонкам.',
         '<b>Перечень клиентов</b> в раскрытой ячейке — за тот же период, что и '
         'сама ячейка. Показаны двенадцать крупнейших, остальные свёрнуты в строку '
-        'под таблицей, но в сумму ячейки входят все.')
+        'под таблицей, но в сумму ячейки входят все.',
+        '<b>Колонка «что сказано в задаче»</b> собрана из текста задач: причина '
+        'ухода и обещание вернуть людей — так, как их записал сотрудник, с '
+        'пометкой, из чек-листа это или из комментария. Зелёным ниже — вывод '
+        'разбора комментариев: что мешает вернуть и что делать. Прочерк означает '
+        'только одно: в тексте задач об этом ничего нет.')
     return C.section(f"Матрица потерь {lvl.unit_label}/сегмент",
                      C.card('<h3>Безвозвратные потери, чел</h3>' + hint + how
                             + _period_switch(items)),
@@ -998,7 +1024,9 @@ def _orgs_section(lvl: analyze.Level) -> str:
             f'<b style="color:var(--bad)">−{C.fmt_num(r["kept"])}</b>',
             C.esc(", ".join(r.get("months") or [])),
             C.esc(r.get("out_reason") or "причина не зафиксирована"),
-            C.esc(r.get("group", "")),
+            (C.esc(r.get("group", ""))
+             + (f'<div class="gd-emp">разбор: {C.esc(r["action"])}</div>'
+                if r.get("action") else "")),
         ])
     tbl = C.table(["Организация · ответственный", lvl.unit_label, "ушло, чел",
                    "вернулось, чел", "потери, чел", "период оттока",

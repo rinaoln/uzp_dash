@@ -28,7 +28,7 @@ import pandas as pd
 from ... import progress
 from ...render import components as C
 from ..tb_health import analyze as th
-from ..tb_health import forecast, segments
+from ..tb_health import forecast, prompts, segments, text_rules
 
 HIST_MONTHS = 12          # месяцев в графике динамики
 CARD_TOP_N = 8            # сколько организаций называем в карточке единицы
@@ -57,7 +57,7 @@ class Level:
 
 
 def prepare(b, hist: pd.DataFrame, clients: pd.DataFrame, tb_id: int | None,
-            short: str, full: str) -> Level:
+            short: str, full: str, insights: dict | None = None) -> Level:
     """Собрать уровень: банк (tb_id=None) или один ТБ."""
     unit_label = "ТБ" if tb_id is None else "ГОСБ"
     lvl = Level(key="sb" if tb_id is None else str(tb_id), tb_id=tb_id,
@@ -74,14 +74,14 @@ def prepare(b, hist: pd.DataFrame, clients: pd.DataFrame, tb_id: int | None,
     # накопительно сглаживают разовый уход, а месяц отвечает на вопрос «что
     # происходит сейчас». Считаются они из одних и тех же строк, поэтому сумма
     # трёх месяцев равна накопительному итогу, и это проверяется глазами.
-    lvl.periods = _periods(h, clients, b, window, tb_id)
+    lvl.periods = _periods(h, clients, b, window, tb_id, insights)
     base = lvl.periods[0] if lvl.periods else {}
     lvl.units = base.get("units") or []
     lvl.matrix = base.get("matrix") if base.get("matrix") is not None else pd.DataFrame()
     lvl.segs = base.get("segs") or []
     # ячейки всех разрезов в одном словаре: ключ начинается с кода разреза
     lvl.cells = {k: v for p in lvl.periods for k, v in (p.get("cells") or {}).items()}
-    lvl.outflow = _work_lists(b, tb_id)
+    lvl.outflow = _work_lists(b, tb_id, insights)
     lvl.reasons = (lvl.outflow or {}).get("reasons_block") or {}
     lvl.orgs = _orgs(lvl.outflow)
     lvl.reco_sec = _reco_sections(lvl)
@@ -560,7 +560,7 @@ def _totals_month(h: pd.DataFrame, m) -> dict:
 
 
 def _periods(h: pd.DataFrame, clients: pd.DataFrame, b, window: list,
-             tb_id: int | None) -> list:
+             tb_id: int | None, insights: dict | None = None) -> list:
     """Разрезы отчёта: окно накопительно и каждый его месяц отдельно.
 
     Первым идёт накопительный: он и есть вердикт уровня, на нём считаются
@@ -576,7 +576,7 @@ def _periods(h: pd.DataFrame, clients: pd.DataFrame, b, window: list,
             "label": f"Три месяца накопительно · {_lbl(ms[0])} — {_lbl(ms[-1])}",
             "months": list(window), "is_month": False,
             "totals": _totals(h, window), "units": units, "matrix": matrix,
-            "segs": segs, "cells": _cells(clients, b, tb_id, window, "win")}]
+            "segs": segs, "cells": _cells(clients, b, tb_id, window, "win", insights)}]
     for m in sorted(window, reverse=True):
         u, mx, sg = _units(h, [m], tb_id, with_yoy=True,
                            n_orgs=_n_orgs(clients, tb_id, [m]))
@@ -584,7 +584,7 @@ def _periods(h: pd.DataFrame, clients: pd.DataFrame, b, window: list,
                     "label": C.month_ru(_lbl(m)).capitalize(),
                     "months": [m], "is_month": True,
                     "totals": _totals_month(h, m), "units": u, "matrix": mx,
-                    "segs": sg, "cells": _cells(clients, b, tb_id, [m], _lbl(m))})
+                    "segs": sg, "cells": _cells(clients, b, tb_id, [m], _lbl(m), insights)})
     for p in out:
         p["unit_cards"] = _unit_payload(p, tb_id)
     return out
@@ -712,7 +712,7 @@ CELL_TOP_N = 12           # клиентов в раскрытой ячейке 
 
 
 def _cells(clients: pd.DataFrame, b, tb_id: int | None, months: list,
-           pkey: str) -> dict:
+           pkey: str, insights: dict | None = None) -> dict:
     """Клиенты внутри каждой ячейки матрицы: {«единица|сегмент»: {...}}.
 
     Считается из той же витрины и тем же фильтром, что и сама матрица, только на
@@ -744,6 +744,7 @@ def _cells(clients: pd.DataFrame, b, tb_id: int | None, months: list,
     said = th._promise_index(getattr(b, "promises", None),
                              "tb_id" if tb_id is None else "new_gosb_id",
                              getattr(b, "tb_of", None))
+    ins = insights or {}
     out: dict = {}
     for (uid, seg), part in g.groupby([key, "seg_name"], dropna=False):
         part = part.sort_values("out_kept", ascending=False)
@@ -753,6 +754,7 @@ def _cells(clients: pd.DataFrame, b, tb_id: int | None, months: list,
                    "gone": float(r.out_qty), "ret": float(r.ret_qty),
                    "kept": float(r.out_kept)}
             row.update(_said(said.get((int(uid), int(r.inn)))))
+            row.update(_audit_row(ins.get((int(uid), int(r.inn)))))
             rows.append(row)
         tail = part.iloc[CELL_TOP_N:]
         out[f"{pkey}|{int(uid)}|{seg}"] = {
@@ -794,6 +796,18 @@ def _said(p: dict | None) -> dict:
     return out
 
 
+def _audit_row(v: dict | None) -> dict:
+    """Вывод разбора комментариев для строки клиента: что мешает и что делать."""
+    if not v:
+        return {}
+    out = {}
+    if v.get("reason"):
+        out["aud"] = str(v["reason"])
+    if v.get("action"):
+        out["aud_do"] = str(v["action"])
+    return out
+
+
 def _name_by_inn(b) -> dict:
     """ИНН → название организации.
 
@@ -808,6 +822,141 @@ def _name_by_inn(b) -> dict:
         nm = str(getattr(r, "company_name", "") or "").strip()
         if nm:
             out.setdefault(int(r.inn), nm)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# АУДИТ КОММЕНТАРИЕВ ПО КЛИЕНТУ.
+#
+# Причина ухода и обещание вернуть читаются правилами и показываются у каждого
+# клиента. Но в задачах пишут и то, чего правилами не возьмёшь: что предлагали,
+# чем кончился разговор, кто мешает вернуть людей. Ради этого и нужен разбор
+# свободного текста — он отвечает на вопрос «почему не вернули», а не «что
+# записали в чек-лист».
+#
+# Логику разбора не копируем: её двести строк живут в tb_health и уже проверены
+# на проме. Здесь только свой ПУЛ (клиенты с безвозвратными потерями, а не
+# кандидаты под план) и свой порядок — без переклассификации списков отбора,
+# которой в этом отчёте нет.
+AUDIT_MIN_KEPT = 1.0          # ниже этого порога разбирать нечего
+
+
+def audit_pool(b, min_kept: float = AUDIT_MIN_KEPT) -> pd.DataFrame:
+    """Кого разбирать: пары (ГОСБ, организация), где людей потеряли насовсем.
+
+    Порядок — по убыванию потерь: бюджет вызовов модели тратится на крупных
+    первыми, а хвост, если бюджет кончится, уходит на правила.
+    """
+    fc = getattr(b, "orgs_fc", None)
+    if fc is None or fc.empty or "out_kept" not in fc:
+        return pd.DataFrame()
+    kept = forecast.num(fc, "out_kept")
+    pool = fc[kept >= min_kept].dropna(subset=["new_gosb_id"]).copy()
+    if pool.empty:
+        return pool
+    pool["new_gosb_id"] = pool["new_gosb_id"].astype("int64")
+    pool["inn"] = pool["inn"].astype("int64")
+    return pool.sort_values("out_kept", ascending=False)
+
+
+def audit(ctx, b, pool: pd.DataFrame, text_df: pd.DataFrame) -> tuple[dict, dict]:
+    """Разбор комментариев по клиентам оттока. Возвращает (выводы, статистика).
+
+    Порядок тот же, что в первом отчёте: чек-лист → названный в тексте срок →
+    ключевые слова → модель → правила для того, что не влезло в бюджет. Дешёвые
+    способы идут первыми не ради экономии: ответ из чек-листа точнее любого
+    разбора текста, и спрашивать модель там, где сотрудник уже ответил по форме,
+    незачем.
+    """
+    stats = {"pool": 0, "checklist": 0, "keyword": 0, "llm": 0, "no_text": 0,
+             "fallback": 0, "batches": 0, "capped": 0}
+    if pool is None or pool.empty or text_df is None or text_df.empty:
+        return {}, stats
+    batch = int(ctx.params.get("llm_batch", th.LLM_BATCH_DEFAULT))
+    max_calls = int(ctx.params.get("llm_max_calls", th.LLM_MAX_CALLS_DEFAULT))
+    if max_calls <= 0:
+        return {}, stats
+    d = b.dates or {}
+    ref_ym = (pd.Timestamp(d["ref_funnel"]).year, pd.Timestamp(d["ref_funnel"]).month)
+    stats["pool"] = len(pool)
+    progress.step(f"Разбор комментариев: {len(pool)} пар (подразделение, организация) "
+                  f"с безвозвратными потерями")
+
+    out: dict = {}
+    all_texts: list[str] = []
+    notes = th._collect_notes(text_df, pool, all_texts)
+    need_llm = []
+    for r in pool.itertuples():
+        key = (int(r.new_gosb_id), int(r.inn))
+        item_notes = notes.get(key, [])
+        facts = th._facts(r)
+        facts["deadline"] = text_rules.deadline(
+            " ".join(n.get("comment") or "" for n in item_notes), ref_ym)
+        multi_author = len({n["author"] for n in item_notes}) >= 2
+        det = th._deterministic(item_notes, multi_author, facts)
+        if det:
+            out[key] = det
+            stats["checklist" if det["source"].startswith("чек-лист") else "keyword"] += 1
+        elif any(n.get("for_llm") for n in item_notes):
+            llm_notes = [n for n in item_notes if n.get("for_llm")]
+            llm_notes.sort(key=lambda n: n.get("_sort") or pd.Timestamp.min)
+            need_llm.append({"gosb_id": key[0], "inn": key[1],
+                             "segment": str(getattr(r, "seg_name", "") or ""),
+                             "lever": str(getattr(r, "lever", "") or ""),
+                             "facts": facts, "notes": llm_notes})
+        else:
+            stats["no_text"] += 1
+
+    if need_llm:
+        ref_label = f"{ref_ym[1]:02d}.{ref_ym[0]}"
+        got, nb = prompts.text_insights(ctx, need_llm, batch=batch,
+                                        max_calls=max_calls, ref_label=ref_label)
+        stats["batches"] = nb
+        for it in need_llm:
+            key = (it["gosb_id"], it["inn"])
+            if key in got:
+                out[key] = th._finalize(got[key], it["facts"])
+                stats["llm"] += 1
+            else:
+                out[key] = th._fallback_insight(it["notes"], it["facts"])
+                stats["fallback"] += 1
+        stats["capped"] = sum(1 for it in need_llm
+                              if (it["gosb_id"], it["inn"]) not in got)
+    named = sum(1 for v in out.values() if (v.get("reason") or v.get("action")))
+    progress.done(
+        f"Разбор комментариев: вывод есть по {named} клиентам · чек-лист "
+        f"{stats['checklist']} · ключевые слова {stats['keyword']} · модель "
+        f"{stats['llm']} (батчей {stats['batches']}) · правила {stats['fallback']} · "
+        f"без содержательного текста {stats['no_text']}")
+    if stats["capped"]:
+        progress.warn(f"Не влезло в бюджет вызовов ({max_calls}): {stats['capped']} "
+                      f"пар разобраны правилами")
+    return out, stats
+
+
+def audit_by_tb(insights: dict, tb_of: dict | None, pool: pd.DataFrame) -> dict:
+    """Те же выводы на грейне ТБ: берём разбор ГОСБ, где потеряли больше.
+
+    На уровне банка единица — ТБ, и у организации, обслуживаемой в нескольких его
+    ГОСБ, выводов столько же. Складывать их нельзя (это текст), выбирать наугад —
+    тем более: берём тот, что относится к самой крупной потере.
+    """
+    if not insights:
+        return {}
+    kept = {}
+    if pool is not None and not pool.empty:
+        for r in pool.itertuples():
+            kept[(int(r.new_gosb_id), int(r.inn))] = float(getattr(r, "out_kept", 0) or 0)
+    out, best = {}, {}
+    for key, v in insights.items():
+        gid, inn = key
+        tb = (tb_of or {}).get(int(gid))
+        if tb is None:
+            continue
+        k = (int(tb), int(inn))
+        w = kept.get(key, 0.0)
+        if k not in out or w > best.get(k, -1):
+            out[k], best[k] = v, w
     return out
 
 
@@ -836,7 +985,7 @@ def load_clients(ctx, b) -> pd.DataFrame:
     return c
 
 
-def _work_lists(b, tb_id: int | None) -> dict:
+def _work_lists(b, tb_id: int | None, insights: dict | None = None) -> dict:
     """Списки работы по оттоку — расчётом дэша tb_health, без копии логики.
 
     Группы «обещали вернуться, но не вернулись», «отработали, но без результата»
@@ -863,7 +1012,7 @@ def _work_lists(b, tb_id: int | None) -> dict:
         detail = detail.assign(tb_id=detail["new_gosb_id"].map(b.tb_of))
     names = _unit_names(b, tb_id)
     a = SimpleNamespace(orgs_fc=fc, unit_src=src, gosb_gap=names, detail=detail,
-                        insights={}, dates=b.dates)
+                        insights=insights or {}, dates=b.dates)
     return th._outflow_top(a, b.fmonths, b.promises, b.tb_of)
 
 

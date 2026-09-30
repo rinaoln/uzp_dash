@@ -211,3 +211,5 @@ td.of-cell.on { outline: 2px solid var(--ink); outline-offset: -2px; }
    таблицу — ширину ограничиваем, длинные причины переносим по словам. */
 td.of-said { font-size: 13px; line-height: 1.4; color: var(--text-2); max-width: 280px; }
 td.of-said i { font-style: normal; }
+.of-aud { color: var(--text); }
+.of-aud-do { color: var(--accent); }

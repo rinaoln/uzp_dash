@@ -743,3 +743,86 @@ FROM {schema}.uzp_data_mzp_motivation_detail_corr
 WHERE metric_id = :m_np
   AND report_dt >= CAST(:plan_from AS date) AND report_dt <= CAST(:ref_cur AS date)
 """
+
+
+# --------------------------------------------------------------------------- #
+# ДВИЖЕНИЕ ПОЛУЧАТЕЛЕЙ: куда делись люди.
+#
+# Единственная витрина с физлицами — ведомости. Все остальные отдают уже
+# количества по организации, и вопрос «человек ушёл или просто получил меньше
+# порога» по ним не решается вовсе.
+#
+# Считается ПАРАМИ (человек, организация): получатель — это пара, а не человек.
+# Совместитель числится в двух организациях, и переход между ними обязан быть
+# виден как уход в одной и приход в другой, иначе портфель ГОСБ не сойдётся.
+#
+# Запрос читает РОВНО два месяца: таблица партиционирована по report_dt, и без
+# этого ограничения он пойдёт по всей истории — это самая большая таблица прома.
+# Свёртка до ГОСБ делается в БД: наружу выходит сотня строк вместо миллионов.
+#
+# Коды зачислений, которые считаются зарплатой, задал заказчик — тот же список,
+# что в генераторе синтетики. Всё, что вне списка (пенсии, пособия, стипендии,
+# субсидии), зарплатой не считается: деньги на счёт идут, но получателем ЗП
+# человек быть перестал, и для отчёта это отдельное событие.
+SALARY_CODES = (1, 2, 16, 18, 19, 26, 28, 33, 38, 39, 40, 42, 49,
+                82, 87, 88, 94, 95)
+SALARY_AMT_MIN = 2500       # порог получателя: сумма за месяц строго БОЛЬШЕ
+
+PAYROLL_FLOW = """
+WITH gmap AS (""" + _GMAP + """),
+src AS (
+  SELECT report_dt, epk_id, inn, enrollment_type, amt, sys_gosb_id
+  FROM {schema}.uzp_data_payroll_m
+  WHERE report_dt IN (:m_prev, :m_cur)
+),
+pay AS (
+  SELECT report_dt, epk_id, inn,
+         min(sys_gosb_id) AS old_gosb_id, sum(amt) AS amt
+  FROM src
+  WHERE enrollment_type IN :salary_codes
+  GROUP BY report_dt, epk_id, inn
+  HAVING sum(amt) > :amt_min
+),
+prev AS (SELECT * FROM pay WHERE report_dt = :m_prev),
+cur  AS (SELECT * FROM pay WHERE report_dt = :m_cur),
+cur_epk AS (SELECT DISTINCT epk_id FROM cur),
+prev_epk AS (SELECT DISTINCT epk_id FROM prev),
+cur_any AS (
+  SELECT epk_id, inn,
+         bool_or(enrollment_type IN :salary_codes) AS has_salary
+  FROM src WHERE report_dt = :m_cur
+  GROUP BY epk_id, inn
+),
+was AS (
+  SELECT p.old_gosb_id,
+         CASE
+           WHEN EXISTS (SELECT 1 FROM cur c
+                        WHERE c.epk_id = p.epk_id AND c.inn = p.inn) THEN 'stay'
+           WHEN EXISTS (SELECT 1 FROM cur_epk e
+                        WHERE e.epk_id = p.epk_id) THEN 'moved'
+           WHEN EXISTS (SELECT 1 FROM cur_any a
+                        WHERE a.epk_id = p.epk_id AND a.inn = p.inn
+                          AND a.has_salary) THEN 'below'
+           WHEN EXISTS (SELECT 1 FROM cur_any a
+                        WHERE a.epk_id = p.epk_id AND a.inn = p.inn) THEN 'other'
+           ELSE 'gone'
+         END AS kind
+  FROM prev p
+),
+came AS (
+  SELECT c.old_gosb_id,
+         CASE WHEN EXISTS (SELECT 1 FROM prev_epk e
+                           WHERE e.epk_id = c.epk_id) THEN 'from_other'
+              ELSE 'new' END AS kind
+  FROM cur c
+  WHERE NOT EXISTS (SELECT 1 FROM prev p
+                    WHERE p.epk_id = c.epk_id AND p.inn = c.inn)
+)
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'was' AS side, w.kind, count(*) AS fl
+FROM was w JOIN gmap g ON g.old_gosb_id = w.old_gosb_id
+GROUP BY g.new_gosb_id, g.tb_id, w.kind
+UNION ALL
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'came' AS side, c.kind, count(*) AS fl
+FROM came c JOIN gmap g ON g.old_gosb_id = c.old_gosb_id
+GROUP BY g.new_gosb_id, g.tb_id, c.kind
+"""

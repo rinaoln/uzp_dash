@@ -644,6 +644,8 @@ def orgs_explorer(table_id: str, rows: list[dict], gosb_options: list[str],
 # на совещании, и «Факт 06.2026» в них звучит как код, а не как месяц.
 _MONTHS_NOM = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль",
                "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
+_MONTHS_PRE = ("январе", "феврале", "марте", "апреле", "мае", "июне", "июле",
+               "августе", "сентябре", "октябре", "ноябре", "декабре")
 _MONTHS_DAT = ("январю", "февралю", "марту", "апрелю", "маю", "июню", "июлю",
                "августу", "сентябрю", "октябрю", "ноябрю", "декабрю")
 _MONTHS_GEN = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
@@ -660,7 +662,8 @@ def month_ru(label: str, case: str = "nom") -> str:
     m = re.fullmatch(r"\s*(\d{1,2})\.(\d{4})\s*", str(label or ""))
     if not m or not 1 <= int(m.group(1)) <= 12:
         return esc(label or "")
-    names = {"gen": _MONTHS_GEN, "dat": _MONTHS_DAT}.get(case, _MONTHS_NOM)
+    names = {"gen": _MONTHS_GEN, "dat": _MONTHS_DAT,
+             "pre": _MONTHS_PRE}.get(case, _MONTHS_NOM)
     return f"{names[int(m.group(1)) - 1]} {m.group(2)}"
 
 
