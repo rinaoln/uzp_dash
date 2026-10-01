@@ -94,7 +94,10 @@ def build(ctx: Context) -> str:
               # окно разбора подразделения — прямо в <body>, вне уровней:
               # <dialog> внутри скрытого поддерева открывается нулевого размера
               f'{_UNIT_DLG}\n'
-              f'{_asset("help.html")}<script>\n{_asset("help.js")}</script>\n'
+              # .js.txt, а не .js: корпоративная почта режет вложения с
+              # расширением .js, и архив с отчётом переставал доходить. Файлы
+              # дизайнера названы так же и по той же причине.
+              f'{_asset("help.html")}<script>\n{_asset("help.js.txt")}</script>\n'
               f'{base._HELP_STEPS_JS}\n'
               f'<div id="print-root" aria-hidden="true"></div>'),
     )
