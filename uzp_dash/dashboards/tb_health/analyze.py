@@ -464,8 +464,10 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
             "left_share": (u_left / u_base) if u_base else None,
             "gone_share": (v("was", "gone") / u_left) if u_left else None})
     units.sort(key=lambda x: -x["gone"])
+    segs, same, cross = _flow_segments(cur, b)
     return {
         "unit_label": unit_label,
+        "seg_moves": segs, "move_same": same, "move_cross": cross,
         "m_prev": df.attrs.get("m_prev", ""), "m_cur": df.attrs.get("m_cur", ""),
         "base": base, "stay": k("was", "stay"), "left": left, "came": came,
         "net": came - left,
@@ -474,6 +476,44 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
         "left_kinds": [(code, title, note, k("was", code)) for code, title, note in FLOW_LEFT],
         "came_kinds": [(code, title, note, k("came", code)) for code, title, note in FLOW_CAME],
         "units": units}
+
+
+def _flow_segments(cur: pd.DataFrame, b: Bank) -> tuple[list, float, float]:
+    """Переток между сегментами: из какого сегмента в какой ушли люди.
+
+    Это случай, из-за которого «снижение» читается неправильно. Человек получал
+    зарплату от организации сегмента РГС, перешёл в организацию сегмента КСБ — и
+    по РГС видно падение, хотя клиента банк не потерял: он просто считается
+    теперь в другом сегменте.
+
+    Сегмент берётся по организации из того же справочника, что и везде в отчёте.
+    У организации вне разбора сегмента нет — такие направления так и называются,
+    домысливать их нельзя.
+    """
+    mv = cur[cur["side"] == "move"] if "side" in cur else pd.DataFrame()
+    if mv.empty:
+        return [], 0.0, 0.0
+    seg = b.seg_by_inn or {}
+    pairs: dict = {}
+    def seg_of(x: str) -> str:
+        # ИНН в ведомостях — текст, и нечисловые там есть. Такую организацию в
+        # справочнике не найти, но человека это не отменяет: направление
+        # остаётся в таблице с честной подписью, а не исчезает из неё
+        try:
+            return seg.get(int(x)) or "сегмент не определён"
+        except ValueError:
+            return "сегмент не определён"
+
+    for r in mv.itertuples():
+        a, _, z = str(r.kind).partition(">")
+        key = (seg_of(a), seg_of(z))
+        pairs[key] = pairs.get(key, 0.0) + float(r.fl)
+    out = [{"from": a, "to": z, "fl": v, "same": a == z}
+           for (a, z), v in pairs.items()]
+    out.sort(key=lambda x: -x["fl"])
+    same = sum(x["fl"] for x in out if x["same"])
+    cross = sum(x["fl"] for x in out if not x["same"])
+    return out, same, cross
 
 
 def _flow_names(b: Bank, tb_id: int | None) -> dict:

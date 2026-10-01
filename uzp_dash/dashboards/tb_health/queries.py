@@ -817,6 +817,20 @@ came AS (
   FROM cur c
   WHERE NOT EXISTS (SELECT 1 FROM prev p
                     WHERE p.epk_id = c.epk_id AND p.inn = c.inn)
+),
+-- КУДА ушёл человек, сменивший организацию. Одна строка на человека: если
+-- зарплата пришла от двух новых работодателей, берём того, от кого больше —
+-- иначе один и тот же переток посчитался бы дважды и сумма направлений
+-- разошлась бы с числом перешедших.
+dest AS (
+  SELECT DISTINCT ON (epk_id) epk_id, inn FROM cur ORDER BY epk_id, amt DESC
+),
+moves AS (
+  SELECT p.old_gosb_id, p.inn AS inn_from, d.inn AS inn_to
+  FROM prev p JOIN dest d ON d.epk_id = p.epk_id
+  WHERE d.inn <> p.inn
+    AND NOT EXISTS (SELECT 1 FROM cur c
+                    WHERE c.epk_id = p.epk_id AND c.inn = p.inn)
 )
 SELECT g.new_gosb_id AS unit_id, g.tb_id, 'was' AS side, w.kind, count(*) AS fl
 FROM was w JOIN gmap g ON g.old_gosb_id = w.old_gosb_id
@@ -825,4 +839,11 @@ UNION ALL
 SELECT g.new_gosb_id AS unit_id, g.tb_id, 'came' AS side, c.kind, count(*) AS fl
 FROM came c JOIN gmap g ON g.old_gosb_id = c.old_gosb_id
 GROUP BY g.new_gosb_id, g.tb_id, c.kind
+UNION ALL
+-- направления перетока: «откуда» и «куда» организациями, сегмент к ним
+-- подставляется уже в разборе — из того же справочника, что и весь отчёт
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'move' AS side,
+       m.inn_from::text || '>' || m.inn_to::text AS kind, count(*) AS fl
+FROM moves m JOIN gmap g ON g.old_gosb_id = m.old_gosb_id
+GROUP BY g.new_gosb_id, g.tb_id, m.inn_from, m.inn_to
 """
