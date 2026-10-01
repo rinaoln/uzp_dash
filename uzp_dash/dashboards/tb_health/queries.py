@@ -847,3 +847,31 @@ SELECT g.new_gosb_id AS unit_id, g.tb_id, 'move' AS side,
 FROM moves m JOIN gmap g ON g.old_gosb_id = m.old_gosb_id
 GROUP BY g.new_gosb_id, g.tb_id, m.inn_from, m.inn_to
 """
+
+
+# Почему раздела «Переток ФЛ» не получилось. Запускается ТОЛЬКО когда основной
+# запрос вернул пусто: на проме причин ровно три — нет ведомостей за эти месяцы,
+# не те коды зачислений, не сходится номер подразделения со справочником. Разбор
+# по логу занимает часы, этот запрос отвечает за секунды.
+PAYROLL_FLOW_DIAG = """
+WITH gmap AS (""" + _GMAP + """),
+src AS (
+  SELECT report_dt, sys_gosb_id, gosb_id, enrollment_type, amt
+  FROM {schema}.uzp_data_payroll_m
+  WHERE report_dt IN (:m_prev, :m_cur)
+)
+SELECT
+  count(*)                                                        AS rows_all,
+  count(*) FILTER (WHERE report_dt = :m_prev)                     AS rows_prev,
+  count(*) FILTER (WHERE report_dt = :m_cur)                      AS rows_cur,
+  count(*) FILTER (WHERE enrollment_type IN :salary_codes)        AS rows_salary,
+  count(*) FILTER (WHERE enrollment_type IN :salary_codes
+                     AND amt > :amt_min)                          AS rows_above,
+  count(DISTINCT sys_gosb_id)                                     AS sys_ids,
+  count(DISTINCT gosb_id)                                         AS legacy_ids,
+  count(DISTINCT sys_gosb_id) FILTER (
+      WHERE sys_gosb_id IN (SELECT old_gosb_id FROM gmap))        AS sys_matched,
+  count(DISTINCT gosb_id) FILTER (
+      WHERE gosb_id IN (SELECT old_gosb_id FROM gmap))            AS legacy_matched
+FROM src
+"""

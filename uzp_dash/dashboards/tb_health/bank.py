@@ -331,8 +331,7 @@ def payroll_flow(engine, d: dict, params: dict) -> pd.DataFrame:
                    "salary_codes": tuple(Q.SALARY_CODES),
                    "amt_min": Q.SALARY_AMT_MIN})
     if df.empty:
-        progress.warn("Ведомости за эти месяцы пусты — раздела «Куда делись люди» "
-                      "в отчёте не будет")
+        _flow_diag(engine, prev, cur)
         return df
     df["unit_id"] = df["unit_id"].astype("int64")
     df["tb_id"] = df["tb_id"].astype("int64")
@@ -348,6 +347,60 @@ def payroll_flow(engine, d: dict, params: dict) -> pd.DataFrame:
     df.attrs["m_prev"] = f"{prev:%m.%Y}"
     df.attrs["m_cur"] = f"{cur:%m.%Y}"
     return df
+
+
+def _flow_diag(engine, prev, cur) -> None:
+    """Сказать, ПОЧЕМУ раздела «Переток ФЛ» не будет.
+
+    Пустой результат объясняется ровно тремя вещами, и все три видны одним
+    маленьким запросом. Без него на проме пришлось бы гадать по логу: «раздела
+    нет» — это не диагноз.
+    """
+    try:
+        g = read_sql(engine, Q.PAYROLL_FLOW_DIAG,
+                     {"m_prev": prev.date(), "m_cur": cur.date(),
+                      "salary_codes": tuple(Q.SALARY_CODES),
+                      "amt_min": Q.SALARY_AMT_MIN}).iloc[0]
+    except Exception as ex:                    # noqa: BLE001 — диагностика не должна ронять отчёт
+        progress.warn(f"Раздела «Переток ФЛ» не будет, и проверить причину не "
+                      f"удалось: {type(ex).__name__}: {ex}")
+        return
+    if not int(g["rows_all"]):
+        progress.warn(f"Раздела «Переток ФЛ» не будет: в ведомостях нет строк за "
+                      f"{prev:%m.%Y} и {cur:%m.%Y}. Проверьте, закрыты ли эти "
+                      f"месяцы в витрине ведомостей.")
+        return
+    progress.warn(
+        f"Раздела «Переток ФЛ» не будет. Строк в ведомостях: "
+        f"{int(g['rows_prev'])} за {prev:%m.%Y} и {int(g['rows_cur'])} за "
+        f"{cur:%m.%Y}; из них по зарплатным кодам {int(g['rows_salary'])}, "
+        f"выше порога {int(g['rows_above'])}")
+    if not int(g["rows_salary"]):
+        progress.warn(
+            f"Причина: ни одна строка не попала в зарплатные коды "
+            f"{list(Q.SALARY_CODES)}. Список кодов задан заказчиком — если на "
+            f"проме он другой, поправьте SALARY_CODES в queries.py.")
+        return
+    if not int(g["rows_above"]):
+        progress.warn(f"Причина: ни одна сумма за месяц не превысила порог "
+                      f"{Q.SALARY_AMT_MIN} ₽ (SALARY_AMT_MIN в queries.py).")
+        return
+    sys_m, leg_m = int(g["sys_matched"]), int(g["legacy_matched"])
+    if not sys_m:
+        hint = (f" При этом по колонке gosb_id сошлось {leg_m} — значит на проме "
+                f"подразделение ведомостей лежит именно в ней, и в запросе нужно "
+                f"поменять sys_gosb_id на gosb_id." if leg_m else
+                " По колонке gosb_id тоже не сошлось ничего — расходится сам "
+                "справочник подразделений.")
+        progress.warn(
+            f"Причина: ни один номер подразделения из ведомостей не нашёлся в "
+            f"справочнике (sys_gosb_id: {int(g['sys_ids'])} разных значений, "
+            f"совпало 0).{hint}")
+        return
+    progress.warn(f"Строки есть и подразделения сходятся ({sys_m} из "
+                  f"{int(g['sys_ids'])}) — значит ни один человек не менял "
+                  f"состояние между месяцами. Так бывает при одинаковых "
+                  f"выгрузках двух месяцев.")
 
 
 def dates(engine, params: dict) -> dict:
