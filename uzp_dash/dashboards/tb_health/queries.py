@@ -770,83 +770,74 @@ SALARY_AMT_MIN = 2500       # порог получателя: сумма за �
 
 PAYROLL_FLOW = """
 WITH gmap AS (""" + _GMAP + """),
-src AS (
-  SELECT report_dt, epk_id, inn, enrollment_type, amt, sys_gosb_id
+-- ОДИН проход по партициям и ОДНА свёртка. Всё остальное считается join-ами по
+-- уже свёрнутому набору: коррелированные EXISTS по десяткам миллионов строк
+-- планировщик разворачивал в nested loop, и запрос умирал на spill > 3 Тб.
+agg AS (
+  SELECT report_dt, epk_id, inn,
+         min(sys_gosb_id)                                          AS old_gosb_id,
+         sum(CASE WHEN enrollment_type IN :salary_codes
+                  THEN amt ELSE 0 END)                             AS sal_amt
   FROM {schema}.uzp_data_payroll_m
   WHERE report_dt IN (:m_prev, :m_cur)
-),
-pay AS (
-  SELECT report_dt, epk_id, inn,
-         min(sys_gosb_id) AS old_gosb_id, sum(amt) AS amt
-  FROM src
-  WHERE enrollment_type IN :salary_codes
   GROUP BY report_dt, epk_id, inn
-  HAVING sum(amt) > :amt_min
 ),
-prev AS (SELECT * FROM pay WHERE report_dt = :m_prev),
-cur  AS (SELECT * FROM pay WHERE report_dt = :m_cur),
-cur_epk AS (SELECT DISTINCT epk_id FROM cur),
-prev_epk AS (SELECT DISTINCT epk_id FROM prev),
-cur_any AS (
-  SELECT epk_id, inn,
-         bool_or(enrollment_type IN :salary_codes) AS has_salary
-  FROM src WHERE report_dt = :m_cur
-  GROUP BY epk_id, inn
-),
+p AS (SELECT epk_id, inn, old_gosb_id, sal_amt FROM agg WHERE report_dt = :m_prev),
+c AS (SELECT epk_id, inn, old_gosb_id, sal_amt FROM agg WHERE report_dt = :m_cur),
+-- получатели месяца: пара с зарплатой выше порога
+pr AS (SELECT * FROM p WHERE sal_amt > :amt_min),
+cu AS (SELECT * FROM c WHERE sal_amt > :amt_min),
+-- получает ли человек зарплату хоть где-то: по ЧЕЛОВЕКУ, а не по паре
+c_per AS (SELECT epk_id FROM cu GROUP BY epk_id),
+p_per AS (SELECT epk_id FROM pr GROUP BY epk_id),
 was AS (
-  SELECT p.old_gosb_id,
+  SELECT pr.old_gosb_id, pr.epk_id, pr.inn,
          CASE
-           WHEN EXISTS (SELECT 1 FROM cur c
-                        WHERE c.epk_id = p.epk_id AND c.inn = p.inn) THEN 'stay'
-           WHEN EXISTS (SELECT 1 FROM cur_epk e
-                        WHERE e.epk_id = p.epk_id) THEN 'moved'
-           WHEN EXISTS (SELECT 1 FROM cur_any a
-                        WHERE a.epk_id = p.epk_id AND a.inn = p.inn
-                          AND a.has_salary) THEN 'below'
-           WHEN EXISTS (SELECT 1 FROM cur_any a
-                        WHERE a.epk_id = p.epk_id AND a.inn = p.inn) THEN 'other'
+           WHEN COALESCE(c.sal_amt, 0) > :amt_min      THEN 'stay'
+           WHEN c_per.epk_id IS NOT NULL               THEN 'moved'
+           WHEN COALESCE(c.sal_amt, 0) > 0             THEN 'below'
+           WHEN c.epk_id IS NOT NULL                   THEN 'other'
            ELSE 'gone'
          END AS kind
-  FROM prev p
+  FROM pr
+  LEFT JOIN c     ON c.epk_id = pr.epk_id AND c.inn = pr.inn
+  LEFT JOIN c_per ON c_per.epk_id = pr.epk_id
 ),
 came AS (
-  SELECT c.old_gosb_id,
-         CASE WHEN EXISTS (SELECT 1 FROM prev_epk e
-                           WHERE e.epk_id = c.epk_id) THEN 'from_other'
-              ELSE 'new' END AS kind
-  FROM cur c
-  WHERE NOT EXISTS (SELECT 1 FROM prev p
-                    WHERE p.epk_id = c.epk_id AND p.inn = c.inn)
+  SELECT cu.old_gosb_id,
+         CASE WHEN p_per.epk_id IS NOT NULL THEN 'from_other' ELSE 'new' END AS kind
+  FROM cu
+  LEFT JOIN pr    ON pr.epk_id = cu.epk_id AND pr.inn = cu.inn
+  LEFT JOIN p_per ON p_per.epk_id = cu.epk_id
+  WHERE pr.epk_id IS NULL
 ),
--- КУДА ушёл человек, сменивший организацию. Одна строка на человека: если
--- зарплата пришла от двух новых работодателей, берём того, от кого больше —
--- иначе один и тот же переток посчитался бы дважды и сумма направлений
--- разошлась бы с числом перешедших.
+-- КУДА ушёл сменивший организацию. Сортировка идёт уже по сменившим, а не по
+-- всем получателям месяца: их на три порядка меньше, и окно обходится дёшево.
+moved AS (SELECT epk_id, inn AS inn_from, old_gosb_id FROM was WHERE kind = 'moved'),
 dest AS (
-  SELECT DISTINCT ON (epk_id) epk_id, inn FROM cur ORDER BY epk_id, amt DESC
+  SELECT DISTINCT ON (cu.epk_id) cu.epk_id, cu.inn
+  FROM cu JOIN moved m ON m.epk_id = cu.epk_id
+  ORDER BY cu.epk_id, cu.sal_amt DESC
 ),
 moves AS (
-  SELECT p.old_gosb_id, p.inn AS inn_from, d.inn AS inn_to
-  FROM prev p JOIN dest d ON d.epk_id = p.epk_id
-  WHERE d.inn <> p.inn
-    AND NOT EXISTS (SELECT 1 FROM cur c
-                    WHERE c.epk_id = p.epk_id AND c.inn = p.inn)
+  SELECT m.old_gosb_id, m.inn_from, d.inn AS inn_to
+  FROM moved m JOIN dest d ON d.epk_id = m.epk_id
+  WHERE d.inn <> m.inn_from
 )
 SELECT g.new_gosb_id AS unit_id, g.tb_id, 'was' AS side, w.kind, count(*) AS fl
 FROM was w JOIN gmap g ON g.old_gosb_id = w.old_gosb_id
 GROUP BY g.new_gosb_id, g.tb_id, w.kind
 UNION ALL
-SELECT g.new_gosb_id AS unit_id, g.tb_id, 'came' AS side, c.kind, count(*) AS fl
-FROM came c JOIN gmap g ON g.old_gosb_id = c.old_gosb_id
-GROUP BY g.new_gosb_id, g.tb_id, c.kind
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'came' AS side, c2.kind, count(*) AS fl
+FROM came c2 JOIN gmap g ON g.old_gosb_id = c2.old_gosb_id
+GROUP BY g.new_gosb_id, g.tb_id, c2.kind
 UNION ALL
--- направления перетока: «откуда» и «куда» организациями, сегмент к ним
--- подставляется уже в разборе — из того же справочника, что и весь отчёт
 SELECT g.new_gosb_id AS unit_id, g.tb_id, 'move' AS side,
        m.inn_from::text || '>' || m.inn_to::text AS kind, count(*) AS fl
 FROM moves m JOIN gmap g ON g.old_gosb_id = m.old_gosb_id
 GROUP BY g.new_gosb_id, g.tb_id, m.inn_from, m.inn_to
 """
+
 
 
 # Почему раздела «Переток ФЛ» не получилось. Запускается ТОЛЬКО когда основной

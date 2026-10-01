@@ -313,7 +313,7 @@ def audit_texts(engine, b: Bank, inns: list) -> pd.DataFrame:
 
 # --------------------------------------------------------------------------- #
 def payroll_flow(engine, d: dict, params: dict) -> pd.DataFrame:
-    """Куда делись получатели за последний закрытый месяц.
+    """Переток ФЛ: куда делись получатели за последний закрытый месяц.
 
     Ведомости — единственная витрина с физлицами, и вопрос «человек ушёл или
     просто получил меньше порога» решается только по ним. Запрос тяжёлый (две
@@ -321,15 +321,30 @@ def payroll_flow(engine, d: dict, params: dict) -> pd.DataFrame:
     параметром people_flow=False — тогда раздела в отчёте просто не будет.
     """
     if not params.get("people_flow", True):
-        progress.done("Раздел «Куда делись люди» отключён (people_flow=False)")
+        progress.done("Раздел «Переток ФЛ» отключён (people_flow=False)")
         return pd.DataFrame()
     cur = pd.Timestamp(d["ref_closed"])
     prev = (cur.to_period("M") - 1).to_timestamp("M")
     progress.step(f"Движение получателей: {prev:%m.%Y} → {cur:%m.%Y} по ведомостям")
-    df = read_sql(engine, Q.PAYROLL_FLOW,
-                  {"m_prev": prev.date(), "m_cur": cur.date(),
-                   "salary_codes": tuple(Q.SALARY_CODES),
-                   "amt_min": Q.SALARY_AMT_MIN})
+    # Раздел «Переток ФЛ» — единственное место отчёта, которое ходит в ведомости,
+    # и запрос там тяжёлый по определению: две партиции самой большой таблицы.
+    # Если регулятор ресурсов снимет его (на проме это «Запрос прерван SDP
+    # Beholder, правила: SPILL Size > …»), ВЕСЬ отчёт падать не должен: остальные
+    # его разделы к ведомостям отношения не имеют. Поэтому сбой здесь гасится, а
+    # отчёт собирается без одного раздела — и в логе написано, почему.
+    try:
+        df = read_sql(engine, Q.PAYROLL_FLOW,
+                      {"m_prev": prev.date(), "m_cur": cur.date(),
+                       "salary_codes": tuple(Q.SALARY_CODES),
+                       "amt_min": Q.SALARY_AMT_MIN})
+    except Exception as ex:                   # noqa: BLE001 — отчёт важнее раздела
+        msg = str(ex).split("\n")[0][:300]
+        progress.warn(f"Запрос движения получателей не выполнился: "
+                      f"{type(ex).__name__}: {msg}")
+        progress.warn("Отчёт собирается БЕЗ раздела «Переток ФЛ». Если запрос "
+                      "снимает регулятор ресурсов, поставьте people_flow=False "
+                      "в параметрах — тогда он даже не будет запускаться.")
+        return pd.DataFrame()
     if df.empty:
         _flow_diag(engine, prev, cur)
         return df
