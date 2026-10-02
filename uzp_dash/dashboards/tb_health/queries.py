@@ -768,26 +768,45 @@ SALARY_CODES = (1, 2, 16, 18, 19, 26, 28, 33, 38, 39, 40, 42, 49,
                 82, 87, 88, 94, 95)
 SALARY_AMT_MIN = 2500       # порог получателя: сумма за месяц строго БОЛЬШЕ
 
+# Шаг 1. Свернуть ведомости в узкую таблицу «пара × месяц» — ОДИН раз за прогон.
+#
+# У ресурсной группы на проме потолок памяти около 1,8 Гб, и 29 млн пар в один
+# приём в него не влезают никаким планом. Поэтому тяжёлый скан делается один раз
+# в temp-таблицу, а весь разбор идёт уже по ней — она узкая и раскладывается по
+# сегментам ПО ЧЕЛОВЕКУ, из-за чего все дальнейшие соединения локальные: данные
+# между сегментами не ездят, а именно это и съедало память.
+PAYROLL_FLOW_TMP = """
+CREATE TEMP TABLE uzp_flow_pairs AS
+SELECT report_dt, epk_id, inn,
+       min(sys_gosb_id)                                          AS old_gosb_id,
+       sum(CASE WHEN enrollment_type IN :salary_codes
+                THEN amt ELSE 0 END)                             AS sal_amt
+FROM {schema}.uzp_data_payroll_m
+WHERE false
+GROUP BY report_dt, epk_id, inn
+"""
+# Наполнение — отдельным оператором и, если нужно, частями: свёртка всех
+# ведомостей разом тоже может не влезть в потолок памяти ресурсной группы.
+PAYROLL_FLOW_FILL = """
+INSERT INTO uzp_flow_pairs
+SELECT report_dt, epk_id, inn,
+       min(sys_gosb_id)                                          AS old_gosb_id,
+       sum(CASE WHEN enrollment_type IN :salary_codes
+                THEN amt ELSE 0 END)                             AS sal_amt
+FROM {schema}.uzp_data_payroll_m
+WHERE report_dt IN (:m_prev, :m_cur)
+  AND mod(abs(epk_id), :parts) = :part
+GROUP BY report_dt, epk_id, inn
+"""
+# Раскладка по ЧЕЛОВЕКУ: дописывается только там, где она есть (Greenplum).
+PAYROLL_FLOW_TMP_DIST = "\nDISTRIBUTED BY (epk_id)"
+
+# Шаг 2. Разбор по узкой таблице. Считается частями по остатку от деления
+# идентификатора человека: все пары одного человека всегда попадают в одну
+# часть, поэтому разбиение не меняет ни одной цифры, а памяти нужно во столько
+# же раз меньше, сколько частей.
 PAYROLL_FLOW = """
 WITH gmap AS (""" + _GMAP + """),
--- ОДИН линейный конвейер: скан -> свёртка -> одно сопоставление месяцев ->
--- один проход по людям -> один итоговый подсчёт.
---
--- Прошлая версия раскладывалась в план на ~190 срезов: каждая ветка UNION и
--- каждое обращение к CTE добавляли свой скан и своё перераспределение, и
--- сегмент падал по памяти. Здесь у каждого CTE не больше двух потребителей, а
--- все категории считаются ОДНИМ CASE — это и есть лекарство от Out of memory.
-agg AS (
-  SELECT report_dt, epk_id, inn,
-         min(sys_gosb_id)                                          AS old_gosb_id,
-         sum(CASE WHEN enrollment_type IN :salary_codes
-                  THEN amt ELSE 0 END)                             AS sal_amt
-  FROM {schema}.uzp_data_payroll_m
-  WHERE report_dt IN (:m_prev, :m_cur)
-  GROUP BY report_dt, epk_id, inn
-),
--- пара «человек и организация» сразу в двух месяцах: одно соединение вместо
--- четырёх подзапросов
 pair AS (
   SELECT COALESCE(p.epk_id, c.epk_id)                              AS epk_id,
          COALESCE(p.inn, c.inn)                                    AS inn,
@@ -796,12 +815,12 @@ pair AS (
          (c.epk_id IS NOT NULL AND c.sal_amt > :amt_min)           AS is_rcp,
          (c.epk_id IS NOT NULL)                                    AS has_rows_cur,
          COALESCE(c.sal_amt, 0)                                    AS cur_sal
-  FROM      (SELECT * FROM agg WHERE report_dt = :m_prev) p
-  FULL JOIN (SELECT * FROM agg WHERE report_dt = :m_cur)  c
+  FROM      (SELECT * FROM uzp_flow_pairs
+             WHERE report_dt = :m_prev AND mod(abs(epk_id), :parts) = :part) p
+  FULL JOIN (SELECT * FROM uzp_flow_pairs
+             WHERE report_dt = :m_cur  AND mod(abs(epk_id), :parts) = :part) c
          ON c.epk_id = p.epk_id AND c.inn = p.inn
 ),
--- человек целиком: получал ли зарплату хоть где-то, получает ли сейчас и
--- осталась ли у него работа, которая была и раньше (это и есть совместитель)
 per AS (
   SELECT epk_id,
          bool_or(was_rcp)               AS was_any,
@@ -824,8 +843,6 @@ cls AS (
          END AS kind
   FROM pair x JOIN per e ON e.epk_id = x.epk_id
 ),
--- куда ушёл сменивший организацию: соединяются только сменившие (их на три
--- порядка меньше) с парами текущего месяца
 dest AS (
   SELECT DISTINCT ON (m.epk_id) m.epk_id, m.inn AS inn_from,
          m.old_gosb_id, t.inn AS inn_to
@@ -844,6 +861,7 @@ SELECT g.new_gosb_id AS unit_id, g.tb_id, 'move' AS side,
 FROM dest d JOIN gmap g ON g.old_gosb_id = d.old_gosb_id
 GROUP BY g.new_gosb_id, g.tb_id, d.inn_from, d.inn_to
 """
+
 
 
 

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 
 from ... import progress
-from ...db import read_sql
+from ...db import execute, read_sql, session
 from . import forecast, queries as Q, segments, text_rules
 
 RUB_TO_MLN = 1e6
@@ -316,52 +316,138 @@ def payroll_flow(engine, d: dict, params: dict) -> pd.DataFrame:
     """Переток ФЛ: куда делись получатели за последний закрытый месяц.
 
     Ведомости — единственная витрина с физлицами, и вопрос «человек ушёл или
-    просто получил меньше порога» решается только по ним. Запрос тяжёлый (две
-    партиции самой большой таблицы прома), поэтому его можно выключить
-    параметром people_flow=False — тогда раздела в отчёте просто не будет.
+    просто получил меньше порога» решается только по ним. Считается в два шага:
+
+      1) тяжёлый скан один раз — свёртка в узкую temp-таблицу «пара × месяц»;
+      2) разбор по ней ЧАСТЯМИ, по остатку от деления идентификатора человека.
+
+    Второй шаг нужен из-за потолка памяти ресурсной группы: 29 млн пар в один
+    приём в него не влезают. Все пары одного человека всегда попадают в одну
+    часть, поэтому разбиение не меняет ни одной цифры — меняется только пик
+    памяти. Число частей подбирается само: если не вышло, пробуем мельче.
+
+    people_flow=False — не считать вовсе. people_flow_parts=N — сразу делить на
+    N частей, не пробуя крупнее.
     """
     if not params.get("people_flow", True):
         progress.done("Раздел «Переток ФЛ» отключён (people_flow=False)")
         return pd.DataFrame()
     cur = pd.Timestamp(d["ref_closed"])
     prev = (cur.to_period("M") - 1).to_timestamp("M")
+    q = {"m_prev": prev.date(), "m_cur": cur.date(),
+         "salary_codes": tuple(Q.SALARY_CODES), "amt_min": Q.SALARY_AMT_MIN}
+    forced = params.get("people_flow_parts")
+    tries = [int(forced)] if forced else [1, 4, 12, 36]
     progress.step(f"Движение получателей: {prev:%m.%Y} → {cur:%m.%Y} по ведомостям")
-    # Раздел «Переток ФЛ» — единственное место отчёта, которое ходит в ведомости,
-    # и запрос там тяжёлый по определению: две партиции самой большой таблицы.
-    # Если регулятор ресурсов снимет его (на проме это «Запрос прерван SDP
-    # Beholder, правила: SPILL Size > …»), ВЕСЬ отчёт падать не должен: остальные
-    # его разделы к ведомостям отношения не имеют. Поэтому сбой здесь гасится, а
-    # отчёт собирается без одного раздела — и в логе написано, почему.
-    try:
-        df = read_sql(engine, Q.PAYROLL_FLOW,
-                      {"m_prev": prev.date(), "m_cur": cur.date(),
-                       "salary_codes": tuple(Q.SALARY_CODES),
-                       "amt_min": Q.SALARY_AMT_MIN})
-    except Exception as ex:                   # noqa: BLE001 — отчёт важнее раздела
-        msg = str(ex).split("\n")[0][:300]
-        progress.warn(f"Запрос движения получателей не выполнился: "
-                      f"{type(ex).__name__}: {msg}")
-        progress.warn("Отчёт собирается БЕЗ раздела «Переток ФЛ». Если запрос "
-                      "снимает регулятор ресурсов, поставьте people_flow=False "
-                      "в параметрах — тогда он даже не будет запускаться.")
+    with session(engine) as conn:
+        try:
+            _flow_stage(engine, conn, q)
+        except Exception as ex:                # noqa: BLE001 — отчёт важнее раздела
+            _flow_failed("подготовка выборки", ex)
+            return pd.DataFrame()
+        df = None
+        for parts in tries:
+            try:
+                frames = []
+                for part in range(parts):
+                    if parts > 1:
+                        progress.step(f"  часть {part + 1} из {parts}")
+                    frames.append(read_sql(engine, Q.PAYROLL_FLOW,
+                                           {**q, "parts": parts, "part": part},
+                                           conn=conn))
+                df = pd.concat(frames, ignore_index=True)
+                break
+            except Exception as ex:            # noqa: BLE001 — пробуем мельче
+                msg = str(ex).split("\n")[0][:200]
+                if parts == tries[-1]:
+                    _flow_failed(f"разбор частями по {parts}", ex)
+                    return pd.DataFrame()
+                progress.warn(f"Частей {parts} — не хватило ресурсов ({msg}). "
+                              f"Пробуем мельче.")
+                # соединение после отката запроса пригодно, но temp-таблица
+                # остаётся: пересоздавать её не нужно
+                try:
+                    conn.rollback()
+                except Exception:              # noqa: BLE001
+                    pass
+    if df is None or df.empty:
+        _flow_diag_empty(engine, prev, cur)
         return pd.DataFrame()
-    if df.empty:
-        _flow_diag(engine, prev, cur)
-        return df
+    df = (df.groupby(["unit_id", "tb_id", "side", "kind"], as_index=False)["fl"]
+            .sum())
     df["unit_id"] = df["unit_id"].astype("int64")
     df["tb_id"] = df["tb_id"].astype("int64")
     df["fl"] = forecast.num(df, "fl")
-    was = df[df["side"] == "was"]
-    base = float(was["fl"].sum())
-    left = float(was[was["kind"] != "stay"]["fl"].sum())
-    came = float(df[df["side"] == "came"]["fl"].sum())
+    flow = df[df["side"] == "flow"]
+    stay = float(flow[flow["kind"] == "stay"]["fl"].sum())
+    base = float(flow[~flow["kind"].isin(["from_other", "add_second", "new"])]["fl"].sum())
+    came = float(flow[flow["kind"].isin(["from_other", "add_second", "new"])]["fl"].sum())
     progress.done(
         f"Движение получателей: было {base:,.0f} пар (человек, организация) · "
-        f"ушло {left:,.0f} · пришло {came:,.0f} · "
+        f"ушло {base - stay:,.0f} · пришло {came:,.0f} · "
         f"месяцы {prev:%m.%Y} и {cur:%m.%Y}".replace(",", " "))
     df.attrs["m_prev"] = f"{prev:%m.%Y}"
     df.attrs["m_cur"] = f"{cur:%m.%Y}"
     return df
+
+
+def _flow_stage(engine, conn, q: dict) -> None:
+    """Свернуть ведомости в temp-таблицу. Один тяжёлый скан на весь раздел.
+
+    Раскладку по человеку (DISTRIBUTED BY) понимает только Greenplum: на
+    обычном Postgres открытого контура этой конструкции нет, и там она просто
+    не дописывается.
+    """
+    execute(engine, "DROP TABLE IF EXISTS uzp_flow_pairs", conn=conn)
+    try:
+        execute(engine, Q.PAYROLL_FLOW_TMP + Q.PAYROLL_FLOW_TMP_DIST, q, conn=conn)
+    except Exception:                          # noqa: BLE001 — Postgres без раскладки
+        _rollback(conn)
+        execute(engine, Q.PAYROLL_FLOW_TMP, q, conn=conn)
+    # Наполняем: сначала одним проходом, при нехватке памяти — частями. Каждая
+    # часть заново читает партиции, поэтому крупный проход пробуем первым.
+    for parts in (1, 6, 24):
+        try:
+            for part in range(parts):
+                if parts > 1:
+                    progress.step(f"  свёртка ведомостей, часть {part + 1} из {parts}")
+                execute(engine, Q.PAYROLL_FLOW_FILL,
+                        {**q, "parts": parts, "part": part}, conn=conn)
+            break
+        except Exception as ex:                # noqa: BLE001 — пробуем мельче
+            _rollback(conn)
+            if parts == 24:
+                raise
+            progress.warn(f"Свёртка ведомостей одним проходом ({parts}) не "
+                          f"прошла: {str(ex).split(chr(10))[0][:160]}. Делим мельче.")
+            execute(engine, "TRUNCATE uzp_flow_pairs", conn=conn)
+    execute(engine, "ANALYZE uzp_flow_pairs", conn=conn)
+    n = read_sql(engine, "SELECT count(*) AS n FROM uzp_flow_pairs", conn=conn)
+    progress.done(f"Выборка по ведомостям готова: {int(n['n'][0]):,} пар "
+                  f"(человек, организация) за два месяца".replace(",", " "))
+
+
+def _rollback(conn) -> None:
+    """Откатить оборванный запрос, не роняя отчёт из-за самого отката."""
+    try:
+        conn.rollback()
+    except Exception:                          # noqa: BLE001
+        pass
+
+
+def _flow_failed(step: str, ex: Exception) -> None:
+    """Сказать, что раздела не будет, и что с этим делать."""
+    msg = str(ex).split("\n")[0][:300]
+    progress.warn(f"Переток ФЛ, {step}: {type(ex).__name__}: {msg}")
+    progress.warn("Отчёт собирается БЕЗ раздела «Переток ФЛ». Если дело в "
+                  "нехватке памяти — поставьте people_flow_parts=36 (или больше) "
+                  "в параметрах: считать будет дольше, но мельче. Совсем "
+                  "выключить раздел — people_flow=False.")
+
+
+def _flow_diag_empty(engine, prev, cur) -> None:
+    """Разбор вернул пусто — назвать причину."""
+    _flow_diag(engine, prev, cur)
 
 
 def _flow_diag(engine, prev, cur) -> None:
