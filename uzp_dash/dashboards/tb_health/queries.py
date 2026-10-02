@@ -804,12 +804,25 @@ was AS (
   LEFT JOIN c_per ON c_per.epk_id = pr.epk_id
 ),
 came AS (
-  SELECT cu.old_gosb_id,
+  SELECT cu.old_gosb_id, cu.epk_id,
          CASE WHEN p_per.epk_id IS NOT NULL THEN 'from_other' ELSE 'new' END AS kind
   FROM cu
   LEFT JOIN pr    ON pr.epk_id = cu.epk_id AND pr.inn = cu.inn
   LEFT JOIN p_per ON p_per.epk_id = cu.epk_id
   WHERE pr.epk_id IS NULL
+),
+-- СОВМЕСТИТЕЛИ. Человек может получать зарплату в двух организациях сразу, и
+-- тогда потеря одной работы — не уход из банка, а приход второй — не новый
+-- клиент. Признак считаем только для тех, кого коснулось движение: список
+-- маленький, и полный DISTINCT по всем получателям месяца здесь не нужен.
+touched AS (
+  SELECT epk_id FROM was WHERE kind = 'moved'
+  UNION
+  SELECT epk_id FROM came WHERE kind = 'from_other'
+),
+stay_per AS (
+  SELECT w.epk_id FROM was w JOIN touched t ON t.epk_id = w.epk_id
+  WHERE w.kind = 'stay' GROUP BY w.epk_id
 ),
 -- КУДА ушёл сменивший организацию. Сортировка идёт уже по сменившим, а не по
 -- всем получателям месяца: их на три порядка меньше, и окно обходится дёшево.
@@ -836,6 +849,31 @@ SELECT g.new_gosb_id AS unit_id, g.tb_id, 'move' AS side,
        m.inn_from::text || '>' || m.inn_to::text AS kind, count(*) AS fl
 FROM moves m JOIN gmap g ON g.old_gosb_id = m.old_gosb_id
 GROUP BY g.new_gosb_id, g.tb_id, m.inn_from, m.inn_to
+UNION ALL
+-- сколько РАЗНЫХ людей стоит за парами подразделения: разница с числом пар и
+-- есть вторые работы внутри него
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'people' AS side, 'people' AS kind,
+       count(DISTINCT pr.epk_id) AS fl
+FROM pr JOIN gmap g ON g.old_gosb_id = pr.old_gosb_id
+GROUP BY g.new_gosb_id, g.tb_id
+UNION ALL
+-- ушёл ли человек совсем из этой организации или просто потерял одну из двух работ
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'split_out' AS side,
+       CASE WHEN sp.epk_id IS NOT NULL THEN 'lost_second' ELSE 'switched' END AS kind,
+       count(*) AS fl
+FROM was w JOIN gmap g ON g.old_gosb_id = w.old_gosb_id
+     LEFT JOIN stay_per sp ON sp.epk_id = w.epk_id
+WHERE w.kind = 'moved'
+GROUP BY g.new_gosb_id, g.tb_id, 3, 4
+UNION ALL
+-- пришёл вместо прежней работы или добавил вторую, не бросив первую
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'split_in' AS side,
+       CASE WHEN sp.epk_id IS NOT NULL THEN 'add_second' ELSE 'switched_in' END AS kind,
+       count(*) AS fl
+FROM came c3 JOIN gmap g ON g.old_gosb_id = c3.old_gosb_id
+     LEFT JOIN stay_per sp ON sp.epk_id = c3.epk_id
+WHERE c3.kind = 'from_other'
+GROUP BY g.new_gosb_id, g.tb_id, 3, 4
 """
 
 

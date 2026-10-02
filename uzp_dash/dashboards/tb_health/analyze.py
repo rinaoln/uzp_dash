@@ -454,7 +454,11 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
         u_base = sum(v("was", x) for x in ("stay", "moved", "below", "other", "gone"))
         u_left = u_base - v("was", "stay")
         u_came = v("came", "from_other") + v("came", "new")
+        people = v("people", "people")
         units.append({
+            "people": people,
+            # вторая работа ВНУТРИ этого подразделения: пар больше, чем людей
+            "second": max(u_base - people, 0.0),
             "id": int(uid), "name": name_of.get(int(uid), str(uid)),
             "base": u_base, "left": u_left, "came": u_came,
             "net": u_came - u_left,
@@ -473,6 +477,11 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
         "net": came - left,
         "gone": k("was", "gone"), "moved": k("was", "moved"),
         "below": k("was", "below"), "other": k("was", "other"),
+        # совместители: из чего состоят уход в другую организацию и приход из неё
+        "switched": k("split_out", "switched"),
+        "lost_second": k("split_out", "lost_second"),
+        "switched_in": k("split_in", "switched_in"),
+        "add_second": k("split_in", "add_second"),
         "left_kinds": [(code, title, note, k("was", code)) for code, title, note in FLOW_LEFT],
         "came_kinds": [(code, title, note, k("came", code)) for code, title, note in FLOW_CAME],
         "units": units}
