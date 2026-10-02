@@ -770,9 +770,13 @@ SALARY_AMT_MIN = 2500       # порог получателя: сумма за �
 
 PAYROLL_FLOW = """
 WITH gmap AS (""" + _GMAP + """),
--- ОДИН проход по партициям и ОДНА свёртка. Всё остальное считается join-ами по
--- уже свёрнутому набору: коррелированные EXISTS по десяткам миллионов строк
--- планировщик разворачивал в nested loop, и запрос умирал на spill > 3 Тб.
+-- ОДИН линейный конвейер: скан -> свёртка -> одно сопоставление месяцев ->
+-- один проход по людям -> один итоговый подсчёт.
+--
+-- Прошлая версия раскладывалась в план на ~190 срезов: каждая ветка UNION и
+-- каждое обращение к CTE добавляли свой скан и своё перераспределение, и
+-- сегмент падал по памяти. Здесь у каждого CTE не больше двух потребителей, а
+-- все категории считаются ОДНИМ CASE — это и есть лекарство от Out of memory.
 agg AS (
   SELECT report_dt, epk_id, inn,
          min(sys_gosb_id)                                          AS old_gosb_id,
@@ -782,99 +786,65 @@ agg AS (
   WHERE report_dt IN (:m_prev, :m_cur)
   GROUP BY report_dt, epk_id, inn
 ),
-p AS (SELECT epk_id, inn, old_gosb_id, sal_amt FROM agg WHERE report_dt = :m_prev),
-c AS (SELECT epk_id, inn, old_gosb_id, sal_amt FROM agg WHERE report_dt = :m_cur),
--- получатели месяца: пара с зарплатой выше порога
-pr AS (SELECT * FROM p WHERE sal_amt > :amt_min),
-cu AS (SELECT * FROM c WHERE sal_amt > :amt_min),
--- получает ли человек зарплату хоть где-то: по ЧЕЛОВЕКУ, а не по паре
-c_per AS (SELECT epk_id FROM cu GROUP BY epk_id),
-p_per AS (SELECT epk_id FROM pr GROUP BY epk_id),
-was AS (
-  SELECT pr.old_gosb_id, pr.epk_id, pr.inn,
+-- пара «человек и организация» сразу в двух месяцах: одно соединение вместо
+-- четырёх подзапросов
+pair AS (
+  SELECT COALESCE(p.epk_id, c.epk_id)                              AS epk_id,
+         COALESCE(p.inn, c.inn)                                    AS inn,
+         COALESCE(p.old_gosb_id, c.old_gosb_id)                    AS old_gosb_id,
+         (p.epk_id IS NOT NULL AND p.sal_amt > :amt_min)           AS was_rcp,
+         (c.epk_id IS NOT NULL AND c.sal_amt > :amt_min)           AS is_rcp,
+         (c.epk_id IS NOT NULL)                                    AS has_rows_cur,
+         COALESCE(c.sal_amt, 0)                                    AS cur_sal
+  FROM      (SELECT * FROM agg WHERE report_dt = :m_prev) p
+  FULL JOIN (SELECT * FROM agg WHERE report_dt = :m_cur)  c
+         ON c.epk_id = p.epk_id AND c.inn = p.inn
+),
+-- человек целиком: получал ли зарплату хоть где-то, получает ли сейчас и
+-- осталась ли у него работа, которая была и раньше (это и есть совместитель)
+per AS (
+  SELECT epk_id,
+         bool_or(was_rcp)               AS was_any,
+         bool_or(is_rcp)                AS is_any,
+         bool_or(was_rcp AND is_rcp)    AS has_stay
+  FROM pair GROUP BY epk_id
+),
+cls AS (
+  SELECT x.old_gosb_id, x.epk_id, x.inn,
          CASE
-           WHEN COALESCE(c.sal_amt, 0) > :amt_min      THEN 'stay'
-           WHEN c_per.epk_id IS NOT NULL               THEN 'moved'
-           WHEN COALESCE(c.sal_amt, 0) > 0             THEN 'below'
-           WHEN c.epk_id IS NOT NULL                   THEN 'other'
-           ELSE 'gone'
+           WHEN x.was_rcp AND x.is_rcp                        THEN 'stay'
+           WHEN x.was_rcp AND e.is_any  AND e.has_stay        THEN 'lost_second'
+           WHEN x.was_rcp AND e.is_any                        THEN 'moved'
+           WHEN x.was_rcp AND x.cur_sal > 0                   THEN 'below'
+           WHEN x.was_rcp AND x.has_rows_cur                  THEN 'other'
+           WHEN x.was_rcp                                     THEN 'gone'
+           WHEN x.is_rcp  AND e.was_any AND e.has_stay        THEN 'add_second'
+           WHEN x.is_rcp  AND e.was_any                       THEN 'from_other'
+           WHEN x.is_rcp                                      THEN 'new'
          END AS kind
-  FROM pr
-  LEFT JOIN c     ON c.epk_id = pr.epk_id AND c.inn = pr.inn
-  LEFT JOIN c_per ON c_per.epk_id = pr.epk_id
+  FROM pair x JOIN per e ON e.epk_id = x.epk_id
 ),
-came AS (
-  SELECT cu.old_gosb_id, cu.epk_id,
-         CASE WHEN p_per.epk_id IS NOT NULL THEN 'from_other' ELSE 'new' END AS kind
-  FROM cu
-  LEFT JOIN pr    ON pr.epk_id = cu.epk_id AND pr.inn = cu.inn
-  LEFT JOIN p_per ON p_per.epk_id = cu.epk_id
-  WHERE pr.epk_id IS NULL
-),
--- СОВМЕСТИТЕЛИ. Человек может получать зарплату в двух организациях сразу, и
--- тогда потеря одной работы — не уход из банка, а приход второй — не новый
--- клиент. Признак считаем только для тех, кого коснулось движение: список
--- маленький, и полный DISTINCT по всем получателям месяца здесь не нужен.
-touched AS (
-  SELECT epk_id FROM was WHERE kind = 'moved'
-  UNION
-  SELECT epk_id FROM came WHERE kind = 'from_other'
-),
-stay_per AS (
-  SELECT w.epk_id FROM was w JOIN touched t ON t.epk_id = w.epk_id
-  WHERE w.kind = 'stay' GROUP BY w.epk_id
-),
--- КУДА ушёл сменивший организацию. Сортировка идёт уже по сменившим, а не по
--- всем получателям месяца: их на три порядка меньше, и окно обходится дёшево.
-moved AS (SELECT epk_id, inn AS inn_from, old_gosb_id FROM was WHERE kind = 'moved'),
+-- куда ушёл сменивший организацию: соединяются только сменившие (их на три
+-- порядка меньше) с парами текущего месяца
 dest AS (
-  SELECT DISTINCT ON (cu.epk_id) cu.epk_id, cu.inn
-  FROM cu JOIN moved m ON m.epk_id = cu.epk_id
-  ORDER BY cu.epk_id, cu.sal_amt DESC
-),
-moves AS (
-  SELECT m.old_gosb_id, m.inn_from, d.inn AS inn_to
-  FROM moved m JOIN dest d ON d.epk_id = m.epk_id
-  WHERE d.inn <> m.inn_from
+  SELECT DISTINCT ON (m.epk_id) m.epk_id, m.inn AS inn_from,
+         m.old_gosb_id, t.inn AS inn_to
+  FROM cls m
+  JOIN cls t ON t.epk_id = m.epk_id AND t.kind IN ('from_other', 'add_second')
+  WHERE m.kind IN ('moved', 'lost_second')
+  ORDER BY m.epk_id, t.inn
 )
-SELECT g.new_gosb_id AS unit_id, g.tb_id, 'was' AS side, w.kind, count(*) AS fl
-FROM was w JOIN gmap g ON g.old_gosb_id = w.old_gosb_id
-GROUP BY g.new_gosb_id, g.tb_id, w.kind
-UNION ALL
-SELECT g.new_gosb_id AS unit_id, g.tb_id, 'came' AS side, c2.kind, count(*) AS fl
-FROM came c2 JOIN gmap g ON g.old_gosb_id = c2.old_gosb_id
-GROUP BY g.new_gosb_id, g.tb_id, c2.kind
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'flow' AS side, c.kind, count(*) AS fl
+FROM cls c JOIN gmap g ON g.old_gosb_id = c.old_gosb_id
+WHERE c.kind IS NOT NULL
+GROUP BY g.new_gosb_id, g.tb_id, c.kind
 UNION ALL
 SELECT g.new_gosb_id AS unit_id, g.tb_id, 'move' AS side,
-       m.inn_from::text || '>' || m.inn_to::text AS kind, count(*) AS fl
-FROM moves m JOIN gmap g ON g.old_gosb_id = m.old_gosb_id
-GROUP BY g.new_gosb_id, g.tb_id, m.inn_from, m.inn_to
-UNION ALL
--- сколько РАЗНЫХ людей стоит за парами подразделения: разница с числом пар и
--- есть вторые работы внутри него
-SELECT g.new_gosb_id AS unit_id, g.tb_id, 'people' AS side, 'people' AS kind,
-       count(DISTINCT pr.epk_id) AS fl
-FROM pr JOIN gmap g ON g.old_gosb_id = pr.old_gosb_id
-GROUP BY g.new_gosb_id, g.tb_id
-UNION ALL
--- ушёл ли человек совсем из этой организации или просто потерял одну из двух работ
-SELECT g.new_gosb_id AS unit_id, g.tb_id, 'split_out' AS side,
-       CASE WHEN sp.epk_id IS NOT NULL THEN 'lost_second' ELSE 'switched' END AS kind,
-       count(*) AS fl
-FROM was w JOIN gmap g ON g.old_gosb_id = w.old_gosb_id
-     LEFT JOIN stay_per sp ON sp.epk_id = w.epk_id
-WHERE w.kind = 'moved'
-GROUP BY g.new_gosb_id, g.tb_id, 3, 4
-UNION ALL
--- пришёл вместо прежней работы или добавил вторую, не бросив первую
-SELECT g.new_gosb_id AS unit_id, g.tb_id, 'split_in' AS side,
-       CASE WHEN sp.epk_id IS NOT NULL THEN 'add_second' ELSE 'switched_in' END AS kind,
-       count(*) AS fl
-FROM came c3 JOIN gmap g ON g.old_gosb_id = c3.old_gosb_id
-     LEFT JOIN stay_per sp ON sp.epk_id = c3.epk_id
-WHERE c3.kind = 'from_other'
-GROUP BY g.new_gosb_id, g.tb_id, 3, 4
+       d.inn_from::text || '>' || d.inn_to::text AS kind, count(*) AS fl
+FROM dest d JOIN gmap g ON g.old_gosb_id = d.old_gosb_id
+GROUP BY g.new_gosb_id, g.tb_id, d.inn_from, d.inn_to
 """
+
 
 
 

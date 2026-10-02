@@ -428,7 +428,14 @@ FLOW_CAME = (
 
 
 def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
-    """Движение получателей уровня: сколько было, кто ушёл и куда, кто пришёл."""
+    """Движение получателей уровня: сколько было, кто ушёл и куда, кто пришёл.
+
+    Запрос отдаёт разбор на грейне «подразделение × событие». Две категории
+    приходят РАЗДЕЛЁННЫМИ по признаку совместителя: уход в другую организацию —
+    это «сменил работодателя» плюс «потерял одну из двух работ», приход из
+    другой — «пришёл вместо прежней» плюс «добавил вторую». Для читателя
+    категории те же, что были; разделение нужно блоку про совместителей.
+    """
     df = getattr(b, "flow", None)
     if df is None or df.empty:
         return {}
@@ -438,52 +445,56 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
         return {}
     by_kind = cur.groupby(["side", "kind"])["fl"].sum().to_dict()
 
-    def k(side, kind):
-        return float(by_kind.get((side, kind), 0.0))
+    def k(kind):
+        return float(by_kind.get(("flow", kind), 0.0))
 
-    base = sum(k("was", x) for x in ("stay", "moved", "below", "other", "gone"))
-    left = base - k("was", "stay")
-    came = k("came", "from_other") + k("came", "new")
+    gone, below, other = k("gone"), k("below"), k("other")
+    switched, lost = k("moved"), k("lost_second")
+    switched_in, add = k("from_other"), k("add_second")
+    new = k("new")
+    moved, from_other = switched + lost, switched_in + add
+    base = k("stay") + moved + below + other + gone
+    left = base - k("stay")
+    came = from_other + new
     units = []
     name_of = _flow_names(b, tb_id)
-    g = cur.pivot_table(index=key, columns=["side", "kind"], values="fl",
-                        aggfunc="sum", fill_value=0.0)
+    g = cur[cur["side"] == "flow"].pivot_table(
+        index=key, columns="kind", values="fl", aggfunc="sum", fill_value=0.0)
     for uid, row in g.iterrows():
-        def v(side, kind):
-            return float(row.get((side, kind), 0.0))
-        u_base = sum(v("was", x) for x in ("stay", "moved", "below", "other", "gone"))
-        u_left = u_base - v("was", "stay")
-        u_came = v("came", "from_other") + v("came", "new")
-        people = v("people", "people")
+        def v(kind):
+            return float(row.get(kind, 0.0))
+        u_moved = v("moved") + v("lost_second")
+        u_came = v("from_other") + v("add_second") + v("new")
+        u_base = v("stay") + u_moved + v("below") + v("other") + v("gone")
+        u_left = u_base - v("stay")
         units.append({
-            "people": people,
-            # вторая работа ВНУТРИ этого подразделения: пар больше, чем людей
-            "second": max(u_base - people, 0.0),
             "id": int(uid), "name": name_of.get(int(uid), str(uid)),
             "base": u_base, "left": u_left, "came": u_came,
             "net": u_came - u_left,
-            "gone": v("was", "gone"), "moved": v("was", "moved"),
-            "below": v("was", "below"), "other": v("was", "other"),
-            "from_other": v("came", "from_other"), "new": v("came", "new"),
+            "gone": v("gone"), "moved": u_moved,
+            "below": v("below"), "other": v("other"),
+            "from_other": v("from_other") + v("add_second"), "new": v("new"),
             "left_share": (u_left / u_base) if u_base else None,
-            "gone_share": (v("was", "gone") / u_left) if u_left else None})
+            "gone_share": (v("gone") / u_left) if u_left else None})
     units.sort(key=lambda x: -x["gone"])
     segs, same, cross = _flow_segments(cur, b)
     return {
         "unit_label": unit_label,
         "seg_moves": segs, "move_same": same, "move_cross": cross,
         "m_prev": df.attrs.get("m_prev", ""), "m_cur": df.attrs.get("m_cur", ""),
-        "base": base, "stay": k("was", "stay"), "left": left, "came": came,
+        "base": base, "stay": k("stay"), "left": left, "came": came,
         "net": came - left,
-        "gone": k("was", "gone"), "moved": k("was", "moved"),
-        "below": k("was", "below"), "other": k("was", "other"),
+        "gone": gone, "moved": moved, "below": below, "other": other,
         # совместители: из чего состоят уход в другую организацию и приход из неё
-        "switched": k("split_out", "switched"),
-        "lost_second": k("split_out", "lost_second"),
-        "switched_in": k("split_in", "switched_in"),
-        "add_second": k("split_in", "add_second"),
-        "left_kinds": [(code, title, note, k("was", code)) for code, title, note in FLOW_LEFT],
-        "came_kinds": [(code, title, note, k("came", code)) for code, title, note in FLOW_CAME],
+        "switched": switched, "lost_second": lost,
+        "switched_in": switched_in, "add_second": add,
+        "left_kinds": [(code, title, note,
+                        {"moved": moved, "below": below,
+                         "other": other, "gone": gone}[code])
+                       for code, title, note in FLOW_LEFT],
+        "came_kinds": [(code, title, note,
+                        {"from_other": from_other, "new": new}[code])
+                       for code, title, note in FLOW_CAME],
         "units": units}
 
 
