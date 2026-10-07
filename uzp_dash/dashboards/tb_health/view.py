@@ -221,7 +221,7 @@ def build(ctx: Context) -> str:
         meta=meta,
         body=(_BOOT_JS + _LEGEND + _tabs([a for a, _ in levels]) + bodies
               + _cell_dialog() + _tb_portfolio_dialog(sb, preps, b)
-              + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _TBDYN_JS),
+              + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _TBDYN_JS + _FLOW_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
         css=_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css"),
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
@@ -275,7 +275,7 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     if a.level != "sb":
         secs.append(("orgs", _orgs(a, story.get("orgs"), idx)))
     secs.append(("outflow", _outflow_section(a, story.get("outflow"))))
-    secs.append(("flow", _flow_section(a)))
+    secs.append(("flow", _flow_section(a, idx)))
     secs = [(key, html) for key, html in secs if html]
     return (
         _lvl_head(a, idx)
@@ -1889,6 +1889,20 @@ function exportLevelPdf(idx){
   clone.querySelectorAll('[style]').forEach(function(el){
     if(el.style && el.style.display === 'none') el.style.display = '';
   });
+  /* Подпись в начале КАЖДОГО раздела. Раздел на бумаге начинается с новой
+     страницы, поэтому лист, взятый из середины отчёта, всё равно говорит, чей
+     он и за какой месяц. Через position:fixed это не делается: Chrome ставит
+     такую шапку по-разному от версии к версии и роняет её в подвал. */
+  var name = (lvl.querySelector('.lvl-name') || {}).textContent || '';
+  var meta = (document.querySelector('.meta') || {}).textContent || '';
+  var ctx = ('Анализ портфеля получателей заработной платы · ' + name.trim()
+             + (meta ? ' · ' + meta.trim() : ''));
+  clone.querySelectorAll('section').forEach(function(sec){
+    var h = document.createElement('div');
+    h.className = 'print-sec-head';
+    h.textContent = ctx;
+    sec.insertBefore(h, sec.firstChild);
+  });
   root.appendChild(clone);
   document.body.classList.add('printing-card');
   window.print();
@@ -2303,7 +2317,7 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
                      eyebrow="Потенциал организаций")
 
 
-def _flow_section(a: analyze.Analysis) -> str:
+def _flow_section(a: analyze.Analysis, idx: int = 0) -> str:
     """Куда делись получатели за последний закрытый месяц.
 
     Отчёт до этого говорил «портфель уменьшился на N» и на этом останавливался.
@@ -2384,22 +2398,11 @@ def _flow_section(a: analyze.Analysis) -> str:
     came_tbl = C.table(["Начали получать зарплату", "чел", "доля пришедших"],
                        rows2, num_cols=[1, 2])
     unit = f.get("unit_label", "ГОСБ")
-    urows = []
-    for u in f["units"]:
-        urows.append([
-            C.esc(u["name"]),
-            C.fmt_num(u["base"]),
-            f'<b style="color:var(--bad)">{C.fmt_num(u["left"])}</b>',
-            C.fmt_num(u["gone"]),
-            C.fmt_num(u["moved"]),
-            C.fmt_num(u["below"]),
-            C.fmt_num(u["other"]),
-            f'<b style="color:var(--good)">{C.fmt_num(u["came"])}</b>',
-            # не _delta_html: он подписывает «к плану», а плана по движению
-            # получателей не существует — это просто разница пришедших и ушедших
-            (f'<b style="color:{"var(--good)" if u["net"] > 0 else "var(--bad)"}">'
-             f'{"+" if u["net"] > 0 else "−"}{C.fmt_num(abs(u["net"]))}</b>'
-             if u["net"] else "0")])
+    urows = _flow_unit_rows(f["units"], f.get("base") or 0)
+    unit_tbl = (f'<h4 style="margin:0 0 10px">Движение по каждому {C.esc(unit)}</h4>'
+                + _flow_seg_filter(f, idx) + f'<div id="flow-tbl-{idx}">'
+                + _flow_unit_table(urows, unit) + '</div>'
+                + _flow_units_data(f, idx))
     seg_tbl = ""
     segs = f.get("seg_moves") or []
     if segs:
@@ -2432,22 +2435,171 @@ def _flow_section(a: analyze.Analysis) -> str:
               f'считается теперь в другом сегменте.</p>'
             + C.table(["Откуда → куда", "чел", "доля перетока"], srows,
                       num_cols=[1, 2]))
-    unit_tbl = C.table(
-        [unit, "было, чел", "перестали", "из них совсем", "в другой организации",
-         "ниже порога", "незарплатные", "начали", "чистое изменение"],
-        urows, num_cols=[1, 2, 3, 4, 5, 6, 7, 8])
+
+    # Раздел собран ПЛАШКАМИ, а не свитком. Столбиком он занимал четыре экрана,
+    # и вывод — то, ради чего его читают, — оказывался в самом низу: до него
+    # просто не долистывали. Переключатель держит все заголовки с их итогами на
+    # виду, так что содержимое раздела видно целиком, ещё до чтения таблиц.
+    gone, left, came = f.get("gone", 0), f["left"], f["came"]
+    groups = [
+        {"title": "Итог месяца",
+         "sub": f'портфель {_pct_signed(net / base * 100) if base else "—"} · '
+                f'{"+" if net > 0 else "−"}{C.fmt_num(abs(net))} чел',
+         "html": _flow_impact(f) + _flow_verdict_body(f)},
+        {"title": "Кто перестал и кто начал",
+         "sub": f'перестали {C.fmt_num(left)} · из них совсем '
+                f'{C.fmt_num(gone)} · начали {C.fmt_num(came)}',
+         "html": left_tbl + came_tbl},
+    ]
+    seg_sum = (f.get("move_cross") or 0) + (f.get("move_same") or 0)
+    if seg_tbl or f.get("switched"):
+        groups.append({
+            "title": "Куда ушли и кто совмещает",
+            "sub": (f'перешли в другую организацию {C.fmt_num(seg_sum)} · '
+                    f'потеряли одну из двух работ '
+                    f'{C.fmt_num(f.get("lost_second", 0))}'),
+            "html": seg_tbl + _flow_second_jobs_body(f)})
+    groups.append({
+        "title": f"По каждому {unit}",
+        "sub": f'{C.fmt_num(len(f["units"]))} '
+               f'{_plural(len(f["units"]), "подразделение", "подразделения", "подразделений")}'
+               f' в разборе',
+        "html": unit_tbl})
     return C.section(
         "Переток ФЛ",
-        C.card(head + _flow_impact(f) + left_tbl + came_tbl + seg_tbl)
-        + _flow_second_jobs(f)
-        + _flow_verdict(f)
-        + C.card(f'<h3>По каждому {C.esc(unit)}</h3>' + unit_tbl),
+        C.card(head + _outflow_tabs(groups)),
         eyebrow="Движение получателей",
         desc="Портфель уменьшился — но ушли ли люди. Здесь видно, сколько "
              "человек перестали получать зарплату совсем, сколько получают её "
              "уже от другой организации, сколько не дотянули до порога и у "
              "скольких остались только незарплатные выплаты. Отдельно — переток "
              "между сегментами: он выглядит как снижение, хотя клиент остался.")
+
+
+
+_FLOW_JS = """
+<script>
+(function(){
+  function esc(x){
+    return String(x == null ? '' : x).replace(/[&<>"]/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  }
+  function num(n){ return Number(n || 0).toLocaleString('ru-RU'); }
+  function pc(v, d){ return (v || 0).toFixed(d).replace('.', ','); }
+  window.flowSeg = function(idx){
+    var sel = document.getElementById('flow-seg-' + idx);
+    var box = document.getElementById('flow-tbl-' + idx);
+    var data = (window.__FLOWU || {})[String(idx)];
+    if(!sel || !box || !data) return;
+    var rows = data[sel.value] || [];
+    var note = document.getElementById('flow-seg-note-' + idx);
+    var total = 0, i;
+    for(i = 0; i < rows.length; i++) total += rows[i][1];
+    var body = '';
+    for(i = 0; i < rows.length; i++){
+      var r = rows[i], base = r[1], left = r[2], gone = r[3], came = r[7];
+      var net = came - left;
+      body += '<tr><td>' + esc(r[0]) + '</td>'
+        + '<td class="num">' + num(base) + '<div class="gd-emp">'
+        + pc(total ? base / total * 100 : 0, 1) + '% уровня</div></td>'
+        + '<td class="num"><b style="color:var(--bad)">' + num(left)
+        + '</b><div class="gd-emp">' + pc(base ? left / base * 100 : 0, 1)
+        + '% своих</div></td>'
+        + '<td class="num">' + num(gone) + '<div class="gd-emp">'
+        + pc(left ? gone / left * 100 : 0, 0) + '% ушедших</div></td>'
+        + '<td class="num">' + num(r[4]) + '</td>'
+        + '<td class="num">' + num(r[5]) + '</td>'
+        + '<td class="num">' + num(r[6]) + '</td>'
+        + '<td class="num"><b style="color:var(--good)">' + num(came) + '</b></td>'
+        + '<td class="num">' + (net ? '<b style="color:'
+            + (net > 0 ? 'var(--good)' : 'var(--bad)') + '">'
+            + (net > 0 ? '+' : '\u2212') + num(Math.abs(net)) + '</b>' : '0')
+        + '</td></tr>';
+    }
+    var tb = box.querySelector('tbody');
+    if(tb) tb.innerHTML = body;
+    if(note){
+      note.textContent = sel.value === 'all'
+        ? 'показаны все сегменты'
+        : 'только сегмент ' + sel.value + ': ' + num(total) + ' чел в портфеле';
+    }
+  };
+})();
+</script>
+"""
+
+
+def _flow_unit_rows(units: list, lvl_base: float) -> list:
+    """Строки таблицы подразделений — числами, без разметки.
+
+    Разметку собирает либо Python (первый показ), либо скрипт (после выбора
+    сегмента). Числа одни и те же, и считать проценты в двух местах по-разному
+    нельзя — поэтому здесь только значения.
+    """
+    return [[u["name"], u["base"], u["left"], u["gone"], u["moved"],
+             u["below"], u["other"], u["came"]] for u in units]
+
+
+def _flow_unit_table(rows: list, unit: str) -> str:
+    """Таблица подразделений с долями: сколько это от уровня и от своих.
+
+    Без долей таблица сравнивает несравнимое: 83 ушедших у крупного ТБ и 83 у
+    маленького — это разные события, и видно это только в процентах.
+    """
+    base_all = sum(r[1] for r in rows) or 1
+    out = []
+    for name, base, left, gone, moved, below, other, came in rows:
+        net = came - left
+        out.append([
+            C.esc(name),
+            f'{C.fmt_num(base)}<div class="gd-emp">'
+            f'{base / base_all * 100:.1f}% уровня</div>'.replace(".", ","),
+            f'<b style="color:var(--bad)">{C.fmt_num(left)}</b>'
+            f'<div class="gd-emp">'
+            f'{(left / base * 100 if base else 0):.1f}% своих</div>'.replace(".", ","),
+            f'{C.fmt_num(gone)}<div class="gd-emp">'
+            f'{(gone / left * 100 if left else 0):.0f}% ушедших</div>',
+            C.fmt_num(moved), C.fmt_num(below), C.fmt_num(other),
+            f'<b style="color:var(--good)">{C.fmt_num(came)}</b>',
+            (f'<b style="color:{"var(--good)" if net > 0 else "var(--bad)"}">'
+             f'{"+" if net > 0 else "−"}{C.fmt_num(abs(net))}</b>' if net else "0")])
+    return C.table(
+        [unit, "было, чел", "перестали", "из них совсем", "в другой организации",
+         "ниже порога", "незарплатные", "начали", "чистое изменение"],
+        out, num_cols=[1, 2, 3, 4, 5, 6, 7, 8])
+
+
+def _flow_seg_filter(f: dict, idx: int) -> str:
+    """Выбор сегмента над таблицей подразделений.
+
+    Сегмент берётся по организации, от которой человек получал зарплату. Один
+    и тот же ГОСБ в разных сегментах ведёт себя по-разному, и общая строка это
+    прячет: в РГС могло уйти вдвое больше, чем в ММБ, а в сумме не видно.
+    """
+    segs = f.get("segs") or []
+    if not segs:
+        return ""
+    opts = '<option value="all">все сегменты</option>' + "".join(
+        f'<option value="{C.esc(sg)}">{C.esc(sg)}</option>' for sg in segs)
+    return (f'<div class="flow-seg">'
+            f'<label for="flow-seg-{idx}">Сегмент</label>'
+            f'<select id="flow-seg-{idx}" onchange="flowSeg({idx})">{opts}</select>'
+            f'<span class="flow-seg-note" id="flow-seg-note-{idx}">'
+            f'показаны все сегменты</span></div>')
+
+
+def _flow_units_data(f: dict, idx: int) -> str:
+    """Числа таблицы по каждому сегменту — данными для переключателя."""
+    segs = f.get("segs") or []
+    if not segs:
+        return ""
+    data = {"all": _flow_unit_rows(f.get("units") or [], 0)}
+    for sg in segs:
+        data[sg] = _flow_unit_rows((f.get("seg_units") or {}).get(sg) or [], 0)
+    js = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
+    return (f'<script>window.__FLOWU=window.__FLOWU||{{}};'
+            f'window.__FLOWU["{idx}"]={js};</script>')
 
 
 def _pct_signed(v: float) -> str:
@@ -2515,7 +2667,7 @@ def _flow_impact(f: dict) -> str:
             + C.table(["Событие", "чел", "к портфелю"], trs, num_cols=[1, 2]))
 
 
-def _flow_second_jobs(f: dict) -> str:
+def _flow_second_jobs_body(f: dict) -> str:
     """Совместители: кто получает зарплату сразу в двух организациях.
 
     Из-за них «ушли в другую организацию» и «пришли из другой» никогда не
@@ -2537,6 +2689,7 @@ def _flow_second_jobs(f: dict) -> str:
     ]
     tbl = C.table(["Что произошло с человеком", "в строке «ушли», чел",
                    "в строке «пришли», чел"], rows, num_cols=[1, 2])
+
     # арифметика расхождения: читатель вправе проверить её на бумаге
     diff = (sw - sw_in) + (lost - add)
     parts = []
@@ -2558,10 +2711,10 @@ def _flow_second_jobs(f: dict) -> str:
             f'уход из банка, а появление второй — не новый клиент, и в строках '
             f'«ушли» и «пришли» такие случаи стоят рядом с настоящими '
             f'переходами.{why}</p>')
-    return C.card(lead + tbl)
+    return lead + tbl
 
 
-def _flow_verdict(f: dict) -> str:
+def _flow_verdict_body(f: dict) -> str:
     """Вывод раздела: что переток сделал с портфелем.
 
     Считается по числам раздела, а не моделью. Вывод здесь арифметический —
@@ -2631,7 +2784,8 @@ def _flow_verdict(f: dict) -> str:
             f'клиентами банка или не дотянули до порога: это другой разговор и '
             f'другая работа.')
     body = "".join(f'<p style="margin:0 0 8px">{x}</p>' for x in lines)
-    return C.card('<div class="ai-head">Вывод</div>' + body, cls="ai")
+    return ('<div class="card ai" style="margin-top:18px">'
+            '<div class="ai-head">Вывод</div>' + body + '</div>')
 
 
 def _flow_donor(f: dict) -> tuple | None:

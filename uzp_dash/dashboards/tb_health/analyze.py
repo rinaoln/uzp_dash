@@ -430,11 +430,14 @@ FLOW_CAME = (
 def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
     """Движение получателей уровня: сколько было, кто ушёл и куда, кто пришёл.
 
-    Запрос отдаёт разбор на грейне «подразделение × событие». Две категории
-    приходят РАЗДЕЛЁННЫМИ по признаку совместителя: уход в другую организацию —
-    это «сменил работодателя» плюс «потерял одну из двух работ», приход из
-    другой — «пришёл вместо прежней» плюс «добавил вторую». Для читателя
-    категории те же, что были; разделение нужно блоку про совместителей.
+    Запрос отдаёт разбор на грейне «подразделение × событие × организация».
+    Организация нужна ради СЕГМЕНТА: в ведомостях он пуст, и подставляется по
+    тому же справочнику, что и везде в отчёте. Благодаря этому раздел умеет
+    показывать движение в срезе одного сегмента, не считая ничего заново.
+
+    Две категории приходят разделёнными по признаку совместителя: уход в другую
+    организацию — это «сменил работодателя» плюс «потерял одну из двух работ»,
+    приход из другой — «пришёл вместо прежней» плюс «добавил вторую».
     """
     df = getattr(b, "flow", None)
     if df is None or df.empty:
@@ -443,10 +446,16 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
     cur = df if tb_id is None else df[df["tb_id"] == tb_id]
     if cur.empty:
         return {}
-    by_kind = cur.groupby(["side", "kind"])["fl"].sum().to_dict()
+    flow = cur[cur["side"] == "flow"].copy()
+    seg_by_inn = b.seg_by_inn or {}
+    flow["seg"] = [seg_by_inn.get(int(x)) if pd.notna(x) else None
+                   for x in flow["inn"]]
+    flow["seg"] = flow["seg"].fillna("сегмент не указан")
+
+    tot = flow.groupby("kind")["fl"].sum().to_dict()
 
     def k(kind):
-        return float(by_kind.get(("flow", kind), 0.0))
+        return float(tot.get(kind, 0.0))
 
     gone, below, other = k("gone"), k("below"), k("other")
     switched, lost = k("moved"), k("lost_second")
@@ -454,38 +463,21 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
     new = k("new")
     moved, from_other = switched + lost, switched_in + add
     base = k("stay") + moved + below + other + gone
-    left = base - k("stay")
-    came = from_other + new
-    units = []
+    left, came = base - k("stay"), from_other + new
     name_of = _flow_names(b, tb_id)
-    g = cur[cur["side"] == "flow"].pivot_table(
-        index=key, columns="kind", values="fl", aggfunc="sum", fill_value=0.0)
-    for uid, row in g.iterrows():
-        def v(kind):
-            return float(row.get(kind, 0.0))
-        u_moved = v("moved") + v("lost_second")
-        u_came = v("from_other") + v("add_second") + v("new")
-        u_base = v("stay") + u_moved + v("below") + v("other") + v("gone")
-        u_left = u_base - v("stay")
-        units.append({
-            "id": int(uid), "name": name_of.get(int(uid), str(uid)),
-            "base": u_base, "left": u_left, "came": u_came,
-            "net": u_came - u_left,
-            "gone": v("gone"), "moved": u_moved,
-            "below": v("below"), "other": v("other"),
-            "from_other": v("from_other") + v("add_second"), "new": v("new"),
-            "left_share": (u_left / u_base) if u_base else None,
-            "gone_share": (v("gone") / u_left) if u_left else None})
-    units.sort(key=lambda x: -x["gone"])
-    segs, same, cross = _flow_segments(cur, b)
+    segs = [x for x in segments.ORDER if x in set(flow["seg"])]
+    segs += [x for x in sorted(set(flow["seg"])) if x not in segs]
+    units = _flow_units(flow, key, name_of)
+    seg_units = {sg: _flow_units(flow[flow["seg"] == sg], key, name_of)
+                 for sg in segs}
+    seg_moves, same, cross = _flow_segments(cur, b)
     return {
         "unit_label": unit_label,
-        "seg_moves": segs, "move_same": same, "move_cross": cross,
+        "seg_moves": seg_moves, "move_same": same, "move_cross": cross,
         "m_prev": df.attrs.get("m_prev", ""), "m_cur": df.attrs.get("m_cur", ""),
         "base": base, "stay": k("stay"), "left": left, "came": came,
         "net": came - left,
         "gone": gone, "moved": moved, "below": below, "other": other,
-        # совместители: из чего состоят уход в другую организацию и приход из неё
         "switched": switched, "lost_second": lost,
         "switched_in": switched_in, "add_second": add,
         "left_kinds": [(code, title, note,
@@ -495,7 +487,39 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
         "came_kinds": [(code, title, note,
                         {"from_other": from_other, "new": new}[code])
                        for code, title, note in FLOW_CAME],
-        "units": units}
+        "units": units, "segs": segs, "seg_units": seg_units}
+
+
+def _flow_units(flow: pd.DataFrame, key: str, name_of: dict) -> list:
+    """Карточки подразделений по уже отобранным строкам движения.
+
+    Одна и та же функция считает и весь уровень, и срез одного сегмента —
+    иначе цифры в фильтре пришлось бы собирать вторым способом, и они бы
+    разъехались с общими.
+    """
+    if flow.empty:
+        return []
+    g = flow.pivot_table(index=key, columns="kind", values="fl",
+                         aggfunc="sum", fill_value=0.0)
+    out = []
+    for uid, row in g.iterrows():
+        def v(kind):
+            return float(row.get(kind, 0.0))
+        u_moved = v("moved") + v("lost_second")
+        u_came = v("from_other") + v("add_second") + v("new")
+        u_base = v("stay") + u_moved + v("below") + v("other") + v("gone")
+        u_left = u_base - v("stay")
+        out.append({
+            "id": int(uid), "name": name_of.get(int(uid), str(uid)),
+            "base": u_base, "left": u_left, "came": u_came,
+            "net": u_came - u_left,
+            "gone": v("gone"), "moved": u_moved,
+            "below": v("below"), "other": v("other"),
+            "from_other": v("from_other") + v("add_second"), "new": v("new"),
+            "left_share": (u_left / u_base) if u_base else None,
+            "gone_share": (v("gone") / u_left) if u_left else None})
+    out.sort(key=lambda x: -x["gone"])
+    return out
 
 
 def _flow_segments(cur: pd.DataFrame, b: Bank) -> tuple[list, float, float]:

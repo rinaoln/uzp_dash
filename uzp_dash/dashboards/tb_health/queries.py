@@ -851,13 +851,19 @@ dest AS (
   WHERE m.kind IN ('moved', 'lost_second')
   ORDER BY m.epk_id, t.inn
 )
-SELECT g.new_gosb_id AS unit_id, g.tb_id, 'flow' AS side, c.kind, count(*) AS fl
+-- ИНН остаётся в грейне: сегмент в ведомостях пуст, и подставить его можно
+-- только по организации — тем же справочником, что и во всём отчёте. Соединять
+-- с ним прямо здесь нельзя: это 29 млн строк против миллиона, перераспределение
+-- съест ту самую память. Поэтому сегмент приписывается уже в разборе.
+SELECT g.new_gosb_id AS unit_id, g.tb_id, 'flow' AS side, c.kind,
+       c.inn::text AS inn, count(*) AS fl
 FROM cls c JOIN gmap g ON g.old_gosb_id = c.old_gosb_id
 WHERE c.kind IS NOT NULL
-GROUP BY g.new_gosb_id, g.tb_id, c.kind
+GROUP BY g.new_gosb_id, g.tb_id, c.kind, c.inn
 UNION ALL
 SELECT g.new_gosb_id AS unit_id, g.tb_id, 'move' AS side,
-       d.inn_from::text || '>' || d.inn_to::text AS kind, count(*) AS fl
+       d.inn_from::text || '>' || d.inn_to::text AS kind,
+       NULL::text AS inn, count(*) AS fl
 FROM dest d JOIN gmap g ON g.old_gosb_id = d.old_gosb_id
 GROUP BY g.new_gosb_id, g.tb_id, d.inn_from, d.inn_to
 """

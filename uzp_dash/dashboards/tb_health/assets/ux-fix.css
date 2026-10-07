@@ -376,6 +376,74 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
      разделы идут подряд, плашки и строка возврата не печатаются */
   .hub-wrap, .hub-back { display: none !important; }
   .lvl[data-hub-view] > section { display: block !important; }
+
+  /* --- РАЗБИВКА НА СТРАНИЦЫ ---
+     Браузер сам по себе печатает это плохо: сетки (карточки подразделений,
+     пары показателей) он не умеет разрывать между страницами и накладывает их
+     друг на друга, таблицы режет посреди строки, а заголовок оставляет внизу
+     страницы отдельно от своей таблицы. Поэтому на бумаге:
+     сетки превращаются в столбик, неделимое помечено неделимым, у таблиц
+     повторяется шапка, а каждый раздел начинается с новой страницы. */
+
+  /* 1. Любая сетка на бумаге — обычный столбик. Это главная причина
+        наложений: Chrome не переносит элементы grid через разрыв страницы. */
+  .gcards, .grid, .hub, .kpis { display: block !important; }
+  .gcards > *, .grid > * { margin: 0 0 12px !important; }
+
+  /* 2. Ничего не липнет и не плавает: липкие панели на бумаге наезжают на текст */
+  .lvls, .hub-back, .xls-bar, .read-progress { position: static !important; }
+
+  /* 3. Декоративные канты и подложки карточек рисуются во всю высоту элемента и
+        при разрыве страницы заливают соседний блок. На бумаге они не нужны. */
+  .card::before, .card::after, .hub-tile::before { display: none !important; }
+  .card { box-shadow: none !important; }
+
+  /* 4. Неделимое — целиком на одной странице */
+  .gcard, .kpi, .chart, .gd-block, .gd-grp, .card.ai, .card.reco,
+  details, .flow-seg { break-inside: avoid; }
+
+  /* 5. Таблицы: строка не рвётся, шапка повторяется на каждой странице —
+        иначе со второй страницы колонки становятся безымянными.
+
+        Правила БЕЗ привязки к #print-root намеренно: печатать можно и кнопкой
+        «Скачать PDF» (тогда на бумагу идёт клон уровня внутри #print-root), и
+        обычным Ctrl+P прямо со страницы. Во втором случае правила, написанные
+        только для #print-root, не применяются вовсе — строки рвались именно
+        поэтому. Ячейку помечаем отдельно: в ней живут блоки (вторая строка с
+        причиной, подпись подразделения), и Chrome рвёт страницу внутри них,
+        даже когда самой строке это запрещено. */
+  table { break-inside: auto; }
+  thead { display: table-header-group; }
+  tfoot { display: table-footer-group; }
+  tr { break-inside: avoid !important; page-break-inside: avoid !important; }
+  td, th { break-inside: avoid !important; page-break-inside: avoid !important; }
+
+  /* 6. Заголовок не остаётся один внизу страницы */
+  h2, h3, h4, .eyebrow, .sec-desc, .ch-cap { break-after: avoid; }
+  p, li { orphans: 3; widows: 3; }
+
+  /* 7. Раздел — с новой страницы. Так на каждой странице цельный сюжет, а не
+        хвост предыдущего разбора и начало следующего. */
+  section { break-before: page; break-inside: auto; }
+  section:first-of-type { break-before: auto; }
+
+  /* 8. Ничего не обрезается и не прокручивается: на бумаге прокрутки нет, и
+        «overflow: auto» просто срезает правую часть широкой таблицы */
+  [style*="overflow"], .tbl-scroll, .g-tbl { overflow: visible !important; }
+  #print-root, #print-root *, .lvl, .lvl * { max-height: none !important; }
+
+  /* 8a. Экранные подсказки на бумаге бессмысленны: нажимать нечего */
+  .section-hint, .hub-lead, .flow-seg,
+  .of-wrap > p.sub { display: none !important; }
+
+  /* 9. Подпись в начале каждого раздела: лист из середины отчёта должен сам
+        говорить, чей он и за какой месяц. */
+  .print-sec-head {
+    font-size: 8.5px; letter-spacing: 0.03em; text-transform: uppercase;
+    color: #8e8e93; border-bottom: 1px solid rgba(0,0,0,0.10);
+    padding-bottom: 3px; margin-bottom: 10px; break-after: avoid;
+  }
+
   @page { margin: 12mm; }
 }
 
@@ -604,3 +672,30 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
 .card.reco.reco-sec .reco-do { font-size: 14.5px; }
 /* общий блок под плашками виден только на экране выбора раздела */
 .lvl[data-hub-view="sec"] > .card.reco { display: none; }
+
+/* --- Выбор сегмента над таблицей перетока ---
+   Строка над таблицей, а не сбоку: таблица широкая, и боковой фильтр отнял бы
+   у неё колонку. Подпись справа от списка говорит, что именно сейчас показано —
+   без неё выбранный сегмент теряется из виду при прокрутке. */
+.flow-seg { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }
+.flow-seg label { font-size: 13px; color: var(--text-2); }
+.flow-seg select {
+  font: inherit; font-size: 14px; padding: 6px 10px; border-radius: 8px;
+  border: 1px solid var(--separator); background: var(--surface-solid);
+  color: var(--text);
+}
+.flow-seg-note { font-size: 13px; color: var(--text-2); }
+
+/* --- Памятка: окно постоянного размера ---
+   Шаги у инструкции разной длины, а окно подстраивалось под текст: от шага к
+   шагу оно прыгало по высоте, и кнопки «Назад» и «Далее» уезжали из-под
+   курсора — читатель промахивался мимо них на каждом втором шаге. Поэтому
+   высота задана жёстко, шапка и подвал стоят на месте, а прокручивается только
+   содержание шага. На невысоком экране окно ужимается до 90% его высоты. */
+dialog.hlp { height: min(860px, 90vh); }
+.hlp-sheet { height: 100%; max-height: none; }
+/* тело шага забирает всю оставшуюся высоту и прокручивается внутри себя;
+   min-height: 0 обязателен — без него flex-элемент не даёт себя сжать и
+   подвал уезжает за край окна */
+.hlp-body { flex: 1 1 auto; min-height: 0; }
+.hlp-head, .hlp-rail, .hlp-foot { flex: none; }

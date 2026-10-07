@@ -373,8 +373,9 @@ def payroll_flow(engine, d: dict, params: dict) -> pd.DataFrame:
     if df is None or df.empty:
         _flow_diag_empty(engine, prev, cur)
         return pd.DataFrame()
-    df = (df.groupby(["unit_id", "tb_id", "side", "kind"], as_index=False)["fl"]
-            .sum())
+    df["inn"] = pd.to_numeric(df.get("inn"), errors="coerce")
+    df = (df.groupby(["unit_id", "tb_id", "side", "kind", "inn"],
+                     as_index=False, dropna=False)["fl"].sum())
     df["unit_id"] = df["unit_id"].astype("int64")
     df["tb_id"] = df["tb_id"].astype("int64")
     df["fl"] = forecast.num(df, "fl")
