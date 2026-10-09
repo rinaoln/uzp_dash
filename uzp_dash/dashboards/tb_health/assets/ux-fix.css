@@ -726,3 +726,13 @@ body.pdf-measure #print-root .grid,
 body.pdf-measure #print-root .hub { display: block !important; }
 body.pdf-measure #print-root .of-tabs { display: none !important; }
 body.pdf-measure #print-root .of-pane[hidden] { display: block !important; }
+
+/* ============================================================
+   Вывод в начале карточки ТБ/ГОСБ
+   ============================================================
+   Карточку открывают ради решения, поэтому вывод стоит первым блоком — выше
+   кнопки «Управление портфелем», которую ставит скрипт дизайна. Сам скрипт мы
+   не трогаем: порядок правит gdLift при открытии карточки, а здесь только
+   отступы, чтобы блок не слипался с шапкой и кнопкой. */
+.gd .gd-sum { margin: 14px 0 0; }
+.gd .gd-sum + .mgmt-trigger { margin-top: 12px; }

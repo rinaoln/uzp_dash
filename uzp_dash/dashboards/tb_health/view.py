@@ -347,10 +347,15 @@ def _hub_facts(a: analyze.Analysis) -> dict:
     if not a.matrix.empty:
         n_units = a.matrix["unit_id"].nunique()
         n_segs = a.matrix["seg_name"].nunique()
-        n_bad = int(a.matrix["is_failing"].sum()) if "is_failing" in a.matrix else 0
+        # Считаем ПОДРАЗДЕЛЕНИЯ, а не ячейки: «12 ячеек» — счёт пар
+        # «подразделение × сегмент», и читателю он ничего не говорит, а
+        # «в 5 ТБ план не выполняется хотя бы в одном сегменте» — говорит.
+        n_bad = (int(a.matrix.loc[a.matrix["is_failing"], "unit_id"].nunique())
+                 if "is_failing" in a.matrix else 0)
         out["matrix"] = (
             f"Где именно не выполняется план: {unit} в разрезе сегментов.",
-            [(C.fmt_num(n_bad), "ячеек с невыполнением плана", "bad" if n_bad else ""),
+            [(C.fmt_num(n_bad), f'{unit} с невыполнением плана',
+              "bad" if n_bad else ""),
              (f'{n_units} × {n_segs}', f'{unit} и сегментов', "")],
         )
 
@@ -1073,6 +1078,97 @@ def _gd_help(*lines: str, title: str = "Как считаем этот блок"
             f'<div class="gd-help-b">{body}</div></details>')
 
 
+def _gd_verdict(c: dict, det: dict, d: dict, flow: dict | None,
+                unit_id: int, unit_label: str) -> str:
+    """Вывод в начале карточки: что с планом, чем это вызвано и что делать.
+
+    Карточку открывают, чтобы принять решение, а не прочитать её целиком: до
+    сегментов и оттока доходили не все, а ответ «план закрывается своими
+    организациями» или «своих не хватает» нужен сразу. Числа берутся из тех же
+    полей, что и блоки ниже, — отдельного расчёта здесь нет, и разойтись им не
+    с чем.
+    """
+    pf = (det or {}).get("pf") or {}
+    if not pf:
+        return ""
+    ex = pf.get("exec")
+    plan, fc = pf.get("plan") or 0, pf.get("forecast") or 0
+    gap = max(0.0, plan - fc)
+    lines = []
+    if not plan:
+        lines.append(f'Плана по получателям на этот месяц у {C.esc(unit_label)} нет — '
+                     f'прогноз {C.fmt_num(fc)} чел.')
+    elif gap >= 1:
+        lines.append(f'План не выполняется: прогноз <b>{C.fmt_num(fc)}</b> при плане '
+                     f'{C.fmt_num(plan)} — <b style="color:{_col(ex)}">{_pct(ex)}</b>, '
+                     f'не хватает <b>{C.fmt_num(gap)}</b> чел.')
+    else:
+        lines.append(f'План выполняется: прогноз <b>{C.fmt_num(fc)}</b> при плане '
+                     f'{C.fmt_num(plan)} — <b style="color:{_col(ex)}">{_pct(ex)}</b>, '
+                     f'{_delta_html(fc - plan, "чел")}.')
+
+    bad = c.get("segs_bad") or []
+    if bad:
+        names = ", ".join(f'{C.esc(s["seg"])} (−{C.fmt_num(abs(s["nedobor"]))} чел)'
+                          for s in bad[:3])
+        tail = (f' и ещё {len(bad) - 3} '
+                + _plural(len(bad) - 3, "сегмент", "сегмента", "сегментов")
+                if len(bad) > 3 else "")
+        where = _plural(len(bad), "сегменте", "сегментах", "сегментах")
+        lines.append((f'Общий план вытянут другими сегментами, но не выполняется '
+                      f'в {where} {names}{tail}.' if c.get("seg_only")
+                     else f'Невыполнение сосредоточено в {where} {names}{tail}.'))
+    elif plan:
+        lines.append('План выполняется во всех сегментах.')
+
+    if c.get("n_need"):
+        filler = (f'; дополнительно компенсация за счёт других сегментов — '
+                  f'{c["filler_n"]} орг (+{C.fmt_num(c["filler_fl"])} чел)'
+                  if c.get("filler_n") else "")
+        lines.append(f'Под план отобрано <b>{c["n_need"]}</b> '
+                     + _plural(c["n_need"], "организация", "организации", "организаций")
+                     + f' на +{C.fmt_num(c["fl_need"])} чел: привлечь '
+                     f'{c["n_attract"]}, вернуть {c["n_return"]}{filler}.')
+
+    out_tot, out_n = det.get("out_tot") or 0, det.get("out_n_all") or 0
+    if out_tot:
+        yoy = det.get("yoy_total") or 0
+        yoy_txt = (f' Год к году портфель {"+" if yoy > 0 else "−"}'
+                   f'{C.fmt_num(abs(yoy))} чел.' if yoy else "")
+        lines.append(f'Потери за три закрытых месяца '
+                     f'({C.esc((d or {}).get("out_label", ""))}) — '
+                     f'<b>{C.fmt_num(out_tot)}</b> чел в {C.fmt_num(out_n)} '
+                     + _plural(out_n, "организации", "организациях", "организациях")
+                     + '.' + yoy_txt)
+
+    u = next((x for x in ((flow or {}).get("units") or [])
+              if int(x["id"]) == int(unit_id)), None)
+    if u and u.get("base"):
+        net = u["net"]
+        lines.append(f'Переток за {C.month_ru((flow or {}).get("m_cur", ""))}: '
+                     f'перестали получать {C.fmt_num(u["left"])} чел, из них '
+                     f'<b>{C.fmt_num(u["gone"])}</b> не получают зарплату нигде; '
+                     f'начали {C.fmt_num(u["came"])} — чистое изменение '
+                     f'{"+" if net > 0 else "−"}{C.fmt_num(abs(net))} чел.')
+
+    if gap >= 1 and c.get("n_need"):
+        act = ('Что делать: взять в работу отобранные организации, приоритет — '
+               'сегменты с невыполнением плана.')
+    elif gap >= 1:
+        act = (f'Что делать: собственных организаций {C.esc(unit_label)} на '
+               f'отклонение не хватает — закрывать компенсацией за счёт других '
+               f'сегментов.')
+    elif bad:
+        act = ('Что делать: план в целом выполняется, держать под контролем '
+               'сегменты с невыполнением.')
+    else:
+        act = 'Отработка не требуется: план выполняется во всех сегментах.'
+    lines.append(act)
+
+    body = "".join(f'<p style="margin:6px 0 0">{t}</p>' for t in lines)
+    return C.card('<div class="ai-head">Вывод</div>' + body, cls="ai gd-sum")
+
+
 def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГОСБ",
                  wow: str = "", flow: dict | None = None, unit_id: int = 0) -> str:
     """Оверлей «почему прогноз такой» по одному ГОСБ.
@@ -1126,7 +1222,9 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
         f'<button type="button" class="gd-close" onclick="gdClose(\'{uid}\')" '
         f'aria-label="Закрыть">×</button></div></div>'
 
-        f'<div class="gd-block"><h4>Портфель, потери и приход</h4>{wf_html}</div>'
+        + _gd_verdict(c, det, d, flow, unit_id, unit_label)
+
+        + f'<div class="gd-block"><h4>Портфель, потери и приход</h4>{wf_html}</div>'
 
         f'<div class="gd-block"><h4>Отток по причинам — всего '
         f'{C.fmt_num(det["out_tot"])} чел, {C.fmt_num(n_out)} орг</h4>'
@@ -1871,7 +1969,26 @@ function cellXls(){
 # возвращается браузером. Клик по подложке закрываем вручную — по умолчанию не закрывает.
 _GD_JS = """
 <script>
-function gdOpen(id){var d=document.getElementById('gd-'+id); if(d) d.showModal();}
+/* Вывод держим первым блоком карточки. Скрипт дизайна переставляет блоки
+   карточки при первом показе уровня и вставляет кнопку «Управление портфелем»
+   сразу за шапкой — вывод после этого оказывался под кнопкой. Поднимаем его
+   обратно при каждом открытии: чужой файл при этом не трогаем. */
+function gdLift(d){
+  var sheet = d.querySelector('.gd-sheet'), sum = d.querySelector('.gd-sum');
+  if(!sheet || !sum) return;
+  /* строка возврата остаётся при шапке — это навигация, а не содержимое */
+  var after = sheet.querySelector(':scope > .gd-backnav')
+           || sheet.querySelector(':scope > .gd-head');
+  if(after && sum.previousElementSibling !== after){
+    after.insertAdjacentElement('afterend', sum);
+  }
+}
+function gdOpen(id){
+  var d=document.getElementById('gd-'+id);
+  if(!d) return;
+  gdLift(d);
+  d.showModal();
+}
 function gdClose(id){var d=document.getElementById('gd-'+id); if(d) d.close();}
 document.querySelectorAll('dialog.gd').forEach(function(d){
   d.addEventListener('click', function(e){ if(e.target===d) d.close(); });
