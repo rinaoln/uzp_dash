@@ -794,7 +794,7 @@ SELECT report_dt, epk_id, inn,
        sum(CASE WHEN enrollment_type IN :salary_codes
                 THEN amt ELSE 0 END)                             AS sal_amt
 FROM {schema}.uzp_data_payroll_m
-WHERE report_dt IN (:m_prev, :m_cur)
+WHERE report_dt IN :months
   AND mod(abs(epk_id), :parts) = :part
 GROUP BY report_dt, epk_id, inn
 """
@@ -881,7 +881,7 @@ WITH gmap AS (""" + _GMAP + """),
 src AS (
   SELECT report_dt, sys_gosb_id, gosb_id, enrollment_type, amt
   FROM {schema}.uzp_data_payroll_m
-  WHERE report_dt IN (:m_prev, :m_cur)
+  WHERE report_dt IN :months
 )
 SELECT
   count(*)                                                        AS rows_all,

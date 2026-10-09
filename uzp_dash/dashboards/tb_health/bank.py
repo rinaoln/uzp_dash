@@ -313,83 +313,120 @@ def audit_texts(engine, b: Bank, inns: list) -> pd.DataFrame:
 
 # --------------------------------------------------------------------------- #
 def payroll_flow(engine, d: dict, params: dict) -> pd.DataFrame:
-    """Переток ФЛ: куда делись получатели за последний закрытый месяц.
+    """Переток ФЛ: куда делись получатели и как это менялось по месяцам.
 
-    Ведомости — единственная витрина с физлицами, и вопрос «человек ушёл или
-    просто получил меньше порога» решается только по ним. Считается в два шага:
+    Считается в два шага:
 
-      1) тяжёлый скан один раз — свёртка в узкую temp-таблицу «пара × месяц»;
-      2) разбор по ней ЧАСТЯМИ, по остатку от деления идентификатора человека.
+      1) тяжёлый скан один раз — свёртка нужных месяцев в узкую temp-таблицу
+         «пара × месяц»;
+      2) разбор каждой пары соседних месяцев по ней, ЧАСТЯМИ, по остатку от
+         деления идентификатора человека.
 
-    Второй шаг нужен из-за потолка памяти ресурсной группы: 29 млн пар в один
-    приём в него не влезают. Все пары одного человека всегда попадают в одну
-    часть, поэтому разбиение не меняет ни одной цифры — меняется только пик
-    памяти. Число частей подбирается само: если не вышло, пробуем мельче.
+    Месяцев берём people_flow_months + 1: один месяц даёт снимок, несколько —
+    динамику. Скан от этого дорожает линейно, а разбор не дорожает вовсе: он и
+    так идёт по узкой таблице. Если многомесячная свёртка не прошла, пробуем
+    снова на двух месяцах: лучше отчёт без динамики, чем без раздела.
 
-    people_flow=False — не считать вовсе. people_flow_parts=N — сразу делить на
-    N частей, не пробуя крупнее.
+    people_flow=False — не считать вовсе. people_flow_parts=N — сразу делить
+    разбор на N частей, не пробуя крупнее.
     """
     if not params.get("people_flow", True):
         progress.done("Раздел «Переток ФЛ» отключён (people_flow=False)")
         return pd.DataFrame()
     cur = pd.Timestamp(d["ref_closed"])
-    prev = (cur.to_period("M") - 1).to_timestamp("M")
-    q = {"m_prev": prev.date(), "m_cur": cur.date(),
-         "salary_codes": tuple(Q.SALARY_CODES), "amt_min": Q.SALARY_AMT_MIN}
+    back = max(1, int(params.get("people_flow_months", 3)))
+    for n in (back, 1):
+        months = [(cur.to_period("M") - i).to_timestamp("M").date()
+                  for i in range(n, -1, -1)]
+        df = _flow_run(engine, months, params)
+        if df is not None:
+            return df
+        if n > 1:
+            progress.warn(f"Свёртка за {n + 1} месяцев не прошла — пробуем два "
+                          f"месяца, без динамики перетока")
+    return pd.DataFrame()
+
+
+def _flow_run(engine, months: list, params: dict) -> "pd.DataFrame | None":
+    """Один прогон: свёртка месяцев и разбор всех соседних пар. None — не вышло."""
+    q = {"months": tuple(months), "salary_codes": tuple(Q.SALARY_CODES),
+         "amt_min": Q.SALARY_AMT_MIN}
     forced = params.get("people_flow_parts")
     tries = [int(forced)] if forced else [1, 4, 12, 36]
-    progress.step(f"Движение получателей: {prev:%m.%Y} → {cur:%m.%Y} по ведомостям")
+    progress.step(f"Движение получателей: {len(months)} закрытых "
+                  f"{_plural_mon(len(months))} по ведомостям, "
+                  f"{months[0]:%m.%Y} — {months[-1]:%m.%Y}")
     with session(engine) as conn:
         try:
             _flow_stage(engine, conn, q)
         except Exception as ex:                # noqa: BLE001 — отчёт важнее раздела
             _flow_failed("подготовка выборки", ex)
-            return pd.DataFrame()
-        df = None
-        for parts in tries:
-            try:
-                frames = []
-                for part in range(parts):
-                    if parts > 1:
-                        progress.step(f"  часть {part + 1} из {parts}")
-                    frames.append(read_sql(engine, Q.PAYROLL_FLOW,
-                                           {**q, "parts": parts, "part": part},
-                                           conn=conn))
-                df = pd.concat(frames, ignore_index=True)
-                break
-            except Exception as ex:            # noqa: BLE001 — пробуем мельче
-                msg = str(ex).split("\n")[0][:200]
-                if parts == tries[-1]:
-                    _flow_failed(f"разбор частями по {parts}", ex)
-                    return pd.DataFrame()
-                progress.warn(f"Частей {parts} — не хватило ресурсов ({msg}). "
-                              f"Пробуем мельче.")
-                # соединение после отката запроса пригодно, но temp-таблица
-                # остаётся: пересоздавать её не нужно
-                try:
-                    conn.rollback()
-                except Exception:              # noqa: BLE001
-                    pass
-    if df is None or df.empty:
-        _flow_diag_empty(engine, prev, cur)
-        return pd.DataFrame()
+            return None
+        frames = []
+        for prev, cur in zip(months, months[1:]):
+            got = _flow_pair(engine, conn, q, prev, cur, tries)
+            if got is None:
+                if not frames:
+                    return None
+                progress.warn(f"Пара {prev:%m.%Y} → {cur:%m.%Y} не разобралась — "
+                              f"в динамике её не будет")
+                continue
+            got["month"] = f"{cur:%m.%Y}"
+            got["prev_month"] = f"{prev:%m.%Y}"
+            frames.append(got)
+    if not frames:
+        return None
+    df = pd.concat(frames, ignore_index=True)
     df["inn"] = pd.to_numeric(df.get("inn"), errors="coerce")
-    df = (df.groupby(["unit_id", "tb_id", "side", "kind", "inn"],
-                     as_index=False, dropna=False)["fl"].sum())
+    df = (df.groupby(["month", "prev_month", "unit_id", "tb_id", "side", "kind",
+                      "inn"], as_index=False, dropna=False)["fl"].sum())
     df["unit_id"] = df["unit_id"].astype("int64")
     df["tb_id"] = df["tb_id"].astype("int64")
     df["fl"] = forecast.num(df, "fl")
-    flow = df[df["side"] == "flow"]
+    last = df["month"].iloc[-1]
+    cur_df = df[df["month"] == last]
+    flow = cur_df[cur_df["side"] == "flow"]
     stay = float(flow[flow["kind"] == "stay"]["fl"].sum())
-    base = float(flow[~flow["kind"].isin(["from_other", "add_second", "new"])]["fl"].sum())
-    came = float(flow[flow["kind"].isin(["from_other", "add_second", "new"])]["fl"].sum())
+    came_k = ["from_other", "add_second", "new"]
+    base = float(flow[~flow["kind"].isin(came_k)]["fl"].sum())
+    came = float(flow[flow["kind"].isin(came_k)]["fl"].sum())
     progress.done(
-        f"Движение получателей: было {base:,.0f} пар (человек, организация) · "
-        f"ушло {base - stay:,.0f} · пришло {came:,.0f} · "
-        f"месяцы {prev:%m.%Y} и {cur:%m.%Y}".replace(",", " "))
-    df.attrs["m_prev"] = f"{prev:%m.%Y}"
-    df.attrs["m_cur"] = f"{cur:%m.%Y}"
+        f"Движение получателей за {last}: было {base:,.0f} пар "
+        f"(человек, организация) · ушло {base - stay:,.0f} · пришло {came:,.0f} · "
+        f"пар месяцев в динамике: {df['month'].nunique()}".replace(",", " "))
+    df.attrs["m_prev"] = df[df["month"] == last]["prev_month"].iloc[0]
+    df.attrs["m_cur"] = last
+    df.attrs["months"] = list(dict.fromkeys(df["month"]))
     return df
+
+
+def _flow_pair(engine, conn, q: dict, prev, cur, tries: list) -> "pd.DataFrame | None":
+    """Разбор одной пары месяцев по готовой выборке. None — не хватило ресурсов."""
+    for parts in tries:
+        try:
+            frames = []
+            for part in range(parts):
+                if parts > 1:
+                    progress.step(f"  {cur:%m.%Y}: часть {part + 1} из {parts}")
+                frames.append(read_sql(engine, Q.PAYROLL_FLOW,
+                                       {**q, "m_prev": prev, "m_cur": cur,
+                                        "parts": parts, "part": part}, conn=conn))
+            return pd.concat(frames, ignore_index=True)
+        except Exception as ex:                # noqa: BLE001 — пробуем мельче
+            _rollback(conn)
+            if parts == tries[-1]:
+                _flow_failed(f"разбор частями по {parts}", ex)
+                return None
+            progress.warn(f"Частей {parts} — не хватило ресурсов "
+                          f"({str(ex).split(chr(10))[0][:160]}). Пробуем мельче.")
+    return None
+
+
+def _plural_mon(n: int) -> str:
+    a, b = abs(n) % 100, abs(n) % 10
+    if 10 < a < 20 or b == 0 or b > 4:
+        return "месяцев"
+    return "месяц" if b == 1 else "месяца"
 
 
 def _flow_stage(engine, conn, q: dict) -> None:
@@ -460,7 +497,8 @@ def _flow_diag(engine, prev, cur) -> None:
     """
     try:
         g = read_sql(engine, Q.PAYROLL_FLOW_DIAG,
-                     {"m_prev": prev.date(), "m_cur": cur.date(),
+                     {"months": (prev.date(), cur.date()),
+                      "m_prev": prev.date(), "m_cur": cur.date(),
                       "salary_codes": tuple(Q.SALARY_CODES),
                       "amt_min": Q.SALARY_AMT_MIN}).iloc[0]
     except Exception as ex:                    # noqa: BLE001 — диагностика не должна ронять отчёт

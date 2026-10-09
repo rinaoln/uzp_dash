@@ -1074,7 +1074,7 @@ def _gd_help(*lines: str, title: str = "Как считаем этот блок"
 
 
 def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГОСБ",
-                 wow: str = "") -> str:
+                 wow: str = "", flow: dict | None = None, unit_id: int = 0) -> str:
     """Оверлей «почему прогноз такой» по одному ГОСБ.
 
     Порядок блоков: портфель → отток по группам → тренд портфеля →
@@ -1174,7 +1174,8 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
         + '</div>'
 
         + f'<div class="gd-block"><h4>Разбор по сегментам</h4>{_gosb_table(c)}</div>'
-        f'</div></dialog>'
+        + _gd_flow(flow, unit_id, unit_label)
+        + f'</div></dialog>'
     )
 
 
@@ -1270,10 +1271,74 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         cards.append(f'<div class="card gcard {st}"{attrs}>{inner}</div>')
         if det:
             dialogs.append(_gosb_dialog(c, det, d, uid, unit,
-                                        _wow_unit(a, gid, "gd-wow")))
+                                        _wow_unit(a, gid, "gd-wow"),
+                                        a.flow, gid))
     grid = f'<div class="gcards">{"".join(cards)}</div>{"".join(dialogs)}'
     return C.section(f"Детализация по {unit}", grid + _ai(ai),
                      eyebrow=f"Детализация по {unit} · клик открывает разбор до организаций")
+
+
+def _gd_flow(flow: dict | None, unit_id: int, unit_label: str) -> str:
+    """Переток ФЛ одного подразделения — в его карточке, в разрезе сегментов.
+
+    В разделе переток показан по всем подразделениям уровня, и это отвечает на
+    вопрос «у кого хуже». Но работают с подразделением по отдельности, и там
+    нужен свой разбор: из каких сегментов ушли люди, где это настоящая потеря,
+    а где переход в другую организацию. Детализация та же, что в разделе, —
+    иначе два места в отчёте пришлось бы сверять вручную.
+    """
+    f = flow or {}
+    units = {int(u["id"]): u for u in (f.get("units") or [])}
+    u = units.get(int(unit_id))
+    if not u or not u.get("base"):
+        return ""
+    # по сегментам: в каждом срезе ищем строку этого подразделения
+    srows = []
+    for sg in f.get("segs") or []:
+        row = next((x for x in (f.get("seg_units") or {}).get(sg) or []
+                    if int(x["id"]) == int(unit_id)), None)
+        if not row or not row.get("base"):
+            continue
+        net = row["net"]
+        srows.append([
+            C.esc(sg),
+            C.fmt_num(row["base"]),
+            f'<b style="color:var(--bad)">{C.fmt_num(row["left"])}</b>',
+            C.fmt_num(row["gone"]),
+            C.fmt_num(row["moved"]),
+            C.fmt_num(row["below"]),
+            C.fmt_num(row["other"]),
+            f'<b style="color:var(--good)">{C.fmt_num(row["came"])}</b>',
+            (f'<b style="color:{"var(--good)" if net > 0 else "var(--bad)"}">'
+             f'{"+" if net > 0 else "−"}{C.fmt_num(abs(net))}</b>' if net else "0")])
+    seg_tbl = (C.table(["Сегмент", "было, чел", "перестали", "из них совсем",
+                        "в другой организации", "ниже порога", "незарплатные",
+                        "начали", "чистое изменение"], srows,
+                       num_cols=[1, 2, 3, 4, 5, 6, 7, 8]) if srows else "")
+    net = u["net"]
+    col = "var(--good)" if net > 0 else ("var(--bad)" if net < 0 else "var(--text)")
+    sign = "+" if net > 0 else ("−" if net < 0 else "")
+    lead = (f'<p class="g-act" style="margin:0 0 10px">В '
+            f'{C.month_ru(f.get("m_prev", ""), "pre")} зарплату здесь получали '
+            f'<b>{C.fmt_num(u["base"])}</b> человек. За '
+            f'{C.month_ru(f.get("m_cur", ""))} перестали '
+            f'<b style="color:var(--bad)">{C.fmt_num(u["left"])}</b>, из них '
+            f'<b>{C.fmt_num(u["gone"])}</b> не получают зарплату нигде; начали '
+            f'<b style="color:var(--good)">{C.fmt_num(u["came"])}</b> — чистое '
+            f'изменение <b style="color:{col}">{sign}{C.fmt_num(abs(net))}</b>.</p>')
+    kinds = [("перестали получать совсем", u["gone"]),
+             ("получают зарплату в другой организации", u["moved"]),
+             ("получили меньше порога", u["below"]),
+             ("приходят только незарплатные выплаты", u["other"])]
+    krows = [[C.esc(t), C.fmt_num(v),
+              f'{v / u["left"] * 100:.0f}%' if u["left"] else "—"]
+             for t, v in kinds if v]
+    k_tbl = C.table(["Куда делись ушедшие", "чел", "доля ушедших"], krows,
+                    num_cols=[1, 2]) if krows else ""
+    return (f'<div class="gd-block"><h4>Переток ФЛ — {C.esc(unit_label)} в разрезе '
+            f'сегментов</h4>{lead}{k_tbl}'
+            + (f'<h4 style="margin:18px 0 6px">По сегментам</h4>{seg_tbl}'
+               if seg_tbl else "") + '</div>')
 
 
 def _rank_by_exec(units: list) -> dict:
@@ -1819,6 +1884,276 @@ document.querySelectorAll('dialog.gd').forEach(function(d){
    этот блок — печать через window.print() выбрана, потому что страница
    самодостаточна и без сети (закрытый контур), внешнюю библиотеку под PDF
    подключить нельзя. */
+/* ПОДГОНКА ПОД ЛИСТ.
+   Блок, который не влезает на страницу, браузер разрывает — и таблица уезжает
+   на два листа, а шапка остаётся на первом. Запретами на разрыв это не
+   лечится: запрет говорит «не рви», но не говорит «помести».
+
+   Поэтому перед печатью мы меряем каждый блок В РАЗМЕРАХ ЛИСТА и, если он не
+   помещается, уменьшаем ЕГО МАСШТАБ ровно настолько, чтобы влез. Меряем и
+   высоту, и ширину: широкая таблица на A4 иначе просто обрезается справа.
+
+   Предел уменьшения — 70%: мельче в отчёте правления читать тяжело, и длинную
+   таблицу честнее перенести по строкам, чем сделать нечитаемой. */
+/* СКЛЕЙКА НЕДЕЛИМОГО.
+   «Не разрывать после заголовка» Chrome понимает плохо: подпись графика
+   оставалась внизу страницы, а сам график уезжал на следующую — лист
+   заканчивался пустотой. Надёжнее собрать подпись, график, легенду и сноску в
+   ОДИН блок и запретить рвать уже его: такое правило Chrome выполняет всегда.
+
+   Короткие таблицы точно так же склеиваются со своим заголовком. Длинные — нет:
+   их всё равно придётся переносить по строкам, а неделимый заголовок только
+   прогнал бы таблицу на следующий лист, оставив полстраницы пустой. */
+function pdfKeep(root){
+  var KEEP_ROWS = 14;
+  Array.prototype.forEach.call(root.querySelectorAll('.chart'), function(ch){
+    var first = ch, prev = ch.previousElementSibling;
+    if(prev && prev.classList.contains('ch-cap')) first = prev;
+    var box = document.createElement('div');
+    box.className = 'print-keep';
+    first.parentNode.insertBefore(box, first);
+    var node = first, next, done = false;
+    while(node && !done){
+      next = node.nextElementSibling;
+      done = (node === ch);
+      box.appendChild(node);
+      node = next;
+    }
+    while(node && (node.classList.contains('ch-legend')
+                   || node.classList.contains('ch-note'))){
+      next = node.nextElementSibling;
+      box.appendChild(node);
+      node = next;
+    }
+  });
+  /* Заголовок таблицы переезжает ВНУТРЬ неё, в <caption>. Так он физически
+     не может оторваться от первых строк: заголовок на одном листе, а таблица
+     на следующем — самый частый и самый раздражающий разрыв. Склейкой это не
+     лечится, потому что между заголовком и таблицей обычно стоит пояснение. */
+  Array.prototype.forEach.call(root.querySelectorAll('table'), function(tb){
+    if(tb.querySelector('caption')) return;
+    var bits = [], node = tb.previousElementSibling, hasHead = false;
+    while(node && bits.length < 3){
+      var tag = node.tagName.toLowerCase();
+      var isHead = (tag === 'h3' || tag === 'h4');
+      var isLead = (tag === 'p' || node.classList.contains('g-act'));
+      if(!isHead && !isLead) break;
+      hasHead = hasHead || isHead;
+      bits.unshift(node);
+      if(isHead) break;                  /* выше заголовка не поднимаемся */
+      node = node.previousElementSibling;
+    }
+    if(hasHead){
+      var cap = document.createElement('caption');
+      bits.forEach(function(b){ cap.appendChild(b); });
+      tb.insertBefore(cap, tb.firstChild);
+    }
+    /* короткая таблица целиком на один лист */
+    if(tb.querySelectorAll('tbody tr').length <= KEEP_ROWS){
+      tb.classList.add('print-keep');
+    }
+  });
+}
+
+/* Единицы вёрстки: то, что нельзя разрывать между листами. Если сам блок выше
+   листа, разрыв неизбежен — тогда единицами становится его начинка. Иначе
+   принтер уводит на следующий лист неделимую таблицу внутри высокой карточки,
+   а лист перед ней остаётся заполненным на четверть. */
+var PDF_ATOM = '.card, .gd-block, .print-keep, table, details, .kpi';
+
+function pdfUnits(root, maxH, top0){
+  var all = Array.prototype.slice.call(root.querySelectorAll(PDF_ATOM));
+  all.forEach(function(el){
+    var r = el.getBoundingClientRect();
+    el.__pdf = {el: el, sec: false, top: r.top - top0, h: r.height,
+                w: Math.max(el.scrollWidth, r.width)};
+  });
+  var units = [], big = [];
+  all.forEach(function(el){
+    var p = el.parentElement, own = true;
+    while(p && p !== root){
+      if(p.__pdf){
+        if(p.__pdf.h <= maxH){ own = false; break; }  /* целым идёт блок выше */
+        big.push(p);                                  /* а этот придётся рвать */
+      }
+      p = p.parentElement;
+    }
+    if(own) units.push(el.__pdf);
+  });
+  all.forEach(function(el){ el.__pdf = null; });
+  return {units: units, big: big};
+}
+
+/* Длинная таблица рвётся по строкам, и два разрыва портят лист особенно
+   заметно: шапка с единственной строкой под ней и одинокая последняя строка.
+   Считаем строки так же, как принтер, и в этих двух случаях сдвигаем таблицу
+   или уводим предыдущую строку вместе с последней. Возвращаем, сколько пустоты
+   при этом осталось на листах, — ниже по документу всё сдвинется на столько. */
+function pdfRows(tb, pos, maxH){
+  var rows = Array.prototype.map.call(tb.querySelectorAll('tbody tr'), function(tr){
+    return tr.getBoundingClientRect().height;
+  });
+  if(rows.length < 2) return 0;
+  var cap = tb.querySelector('caption'), th = tb.querySelector('thead');
+  var capH = cap ? cap.getBoundingClientRect().height : 0;
+  var headH = th ? th.getBoundingClientRect().height : 0;   /* шапка повторяется */
+  var add = 0;
+  /* шапка и первые две строки — всегда на одном листе */
+  if(pos > 1 && pos + capH + headH + rows[0] + rows[1] > maxH){
+    add += maxH - pos;
+    pos = 0;
+  }
+  var y = pos + capH + headH, start = 0;
+  for(var i = 0; i < rows.length; i++){
+    if(y + rows[i] <= maxH){ y += rows[i]; continue; }
+    if(i === rows.length - 1 && i - start >= 2){
+      y -= rows[i - 1];                  /* последняя строка не останется одна */
+      add += maxH - y;
+      y = headH + rows[i - 1];
+    } else {
+      add += maxH - y;
+      y = headH;
+    }
+    start = i;
+    y += rows[i];
+  }
+  return add;
+}
+
+/* Блок из одного текста — его можно разорвать между листами без потери
+   смысла. Таблица, график, шкала или плашка с числом так не читаются. */
+function pdfProse(el){
+  return !el.querySelector('table, .chart, svg, img, canvas, .meter, .bars');
+}
+
+/* Блок не влез в остаток листа, а за ним начинается новый раздел — значит,
+   уедет на отдельный лист и останется там один. Вместо этого слегка поджимаем
+   то, что на листе уже стоит: лист получается плотным, а не наполовину пустым.
+   Поджимаем только если масштаб остаётся читаемым. */
+function pdfPack(onPage, pos, h, maxH, minZoom){
+  if(!onPage.length || h > maxH * 0.5) return 0;
+  var mass = 0;
+  onPage.forEach(function(b){ mass += b.h; });
+  var need = h - (maxH - pos);            /* сколько миллиметров не хватает */
+  if(need <= 0 || mass <= 0) return 0;
+  var k = 1 - need * 1.03 / mass;         /* сжимаем только сами блоки */
+  if(k < 0.8 || k > 0.995) return 0;
+  var ok = onPage.every(function(b){
+    return (parseFloat(b.el.style.zoom) || 1) * k >= minZoom;
+  });
+  if(!ok) return 0;
+  onPage.forEach(function(b){
+    var cur = parseFloat(b.el.style.zoom) || 1;
+    b.el.style.zoom = Math.round(cur * k * 1000) / 1000;
+  });
+  return mass * (1 - k);                  /* столько места освободилось */
+}
+
+/* Один проход подгонки: по текущим положениям блоков решает, что ужать, что
+   перенести, а чему разрешить разрыв. Возвращает true, если что-то изменил. */
+function pdfPass(root, maxH, maxW){
+  var MIN_FILL = 0.75;      /* сильнее чем на четверть за шаг не ужимаем */
+  var MIN_ZOOM = 0.72;      /* и мельче 72% от исходного — никогда */
+  var top0 = root.getBoundingClientRect().top;
+  var got = pdfUnits(root, maxH, top0);
+  var items = got.units, changed = false;
+  got.big.forEach(function(el){
+    if(el.style.breakInside !== 'auto'){
+      el.style.breakInside = 'auto';
+      el.style.pageBreakInside = 'auto';
+      changed = true;
+    }
+  });
+  Array.prototype.forEach.call(root.querySelectorAll('section'), function(el){
+    items.push({el: el, sec: true, top: el.getBoundingClientRect().top - top0});
+  });
+  items.sort(function(a, b){ return a.top - b.top; });
+
+  var shift = 0, page = -1, onPage = [];
+  items.forEach(function(it){
+    var pos = (it.top + shift) % maxH;
+    var pg = Math.floor((it.top + shift) / maxH);
+    if(pg !== page){ page = pg; onPage = []; }
+    if(it.sec){
+      if(pos > 1){ shift += maxH - pos; page++; onPage = []; }
+      return;
+    }
+    var h = it.h, cur = parseFloat(it.el.style.zoom) || 1;
+    if(it.w > maxW && it.w / h > 0.2){      /* режется по ширине */
+      var kw = maxW / it.w;
+      if(kw >= 0.6){
+        it.el.style.zoom = Math.round(cur * kw * 980) / 1000;
+        h *= kw * 0.98; cur *= kw * 0.98; changed = true;
+      }
+    }
+    var rest = maxH - pos;
+    if(h <= rest){ onPage.push({el: it.el, h: h}); return; }  /* влезает как есть */
+    if(h <= maxH){
+      var kf = rest / h;
+      /* Порог считается по ИТОГОВОМУ масштабу, а не по шагу: проходов
+         несколько, и два умеренных уменьшения подряд дают нечитаемый кегль. */
+      var k = kf * 0.97, total = cur * k;
+      if(kf >= MIN_FILL && total >= MIN_ZOOM){
+        it.el.style.zoom = Math.round(total * 1000) / 1000;
+        shift -= h * (1 - k);
+        changed = true;
+      } else if(pdfProse(it.el) && rest > maxH * 0.25){
+        /* Сплошной текст (вывод, рекомендация) переносить целиком незачем:
+           абзац спокойно продолжается на следующем листе, а предыдущий лист
+           остаётся заполненным. Рвать нельзя только то, что читается как
+           единая картинка: таблицу, график, плашку с цифрой. */
+        if(it.el.style.breakInside !== 'auto'){
+          it.el.style.breakInside = 'auto';
+          it.el.style.pageBreakInside = 'auto';
+          changed = true;
+        }
+      } else {
+        var saved = pdfPack(onPage, pos, h, maxH, MIN_ZOOM);
+        if(saved){ shift -= saved; changed = true; }
+        else shift += rest;                 /* целиком на следующий лист */
+      }
+      onPage.push({el: it.el, h: h});
+      return;
+    }
+    onPage.push({el: it.el, h: h});
+    if(it.el.tagName === 'TABLE'){           /* выше листа — рвём по строкам */
+      shift += pdfRows(it.el, pos, maxH);
+    }
+    if(it.el.style.breakInside !== 'auto'){
+      it.el.style.breakInside = 'auto';
+      it.el.style.pageBreakInside = 'auto';
+      changed = true;
+    }
+  });
+  return changed;
+}
+
+function pdfFit(root){
+  /* Раскладка по листам считается так же, как её посчитает принтер: по реальным
+     положениям блоков в размерах листа. Проходов несколько: уменьшение одного
+     блока сдвигает все, что идут ниже, и после первого прохода картина другая.
+     Два-три прохода сходятся; больше делать незачем — дальше меняются доли
+     миллиметра. */
+  var PAGE_MM_H = 273, PAGE_MM_W = 186;   /* A4 за вычетом полей 12 мм */
+  document.body.classList.add('pdf-measure');
+  var probe = document.createElement('div');
+  probe.style.cssText = 'height:100mm;width:100mm;position:absolute;visibility:hidden';
+  root.appendChild(probe);
+  var px = probe.getBoundingClientRect().height / 100;
+  probe.remove();
+  var maxH = PAGE_MM_H * px, maxW = PAGE_MM_W * px;
+  for(var pass = 0; pass < 3; pass++){
+    if(!pdfPass(root, maxH, maxW)) break;
+  }
+  Array.prototype.forEach.call(root.querySelectorAll('.print-keep'), function(el){
+    if(el.getBoundingClientRect().height > maxH){
+      el.style.breakInside = 'auto';
+      el.style.pageBreakInside = 'auto';
+    }
+  });
+  document.body.classList.remove('pdf-measure');
+}
+
 function exportCardPdf(uid){
   var main = document.getElementById('gd-' + uid);
   var root = document.getElementById('print-root');
@@ -1828,7 +2163,7 @@ function exportCardPdf(uid){
   root.innerHTML = '';
 
   var mainClone = mainSheet.cloneNode(true);
-  mainClone.querySelectorAll('.gd-close, .mgmt-trigger, .xls-bar').forEach(function(el){ el.remove(); });
+  mainClone.querySelectorAll('.gd-close, .gd-export, .mgmt-trigger, .xls-bar, .gd-backnav').forEach(function(el){ el.remove(); });
   var mainHead = mainClone.querySelector(':scope > .gd-head');
   if(mainHead) root.appendChild(mainHead);
 
@@ -1837,13 +2172,15 @@ function exportCardPdf(uid){
     var mgmtSheet = mgmt.querySelector('.gd-sheet');
     if(mgmtSheet){
       var mgmtClone = mgmtSheet.cloneNode(true);
-      mgmtClone.querySelectorAll('.gd-close').forEach(function(el){ el.remove(); });
+      mgmtClone.querySelectorAll('.gd-close, .gd-export, .xls-bar, .gd-backnav').forEach(function(el){ el.remove(); });
       while(mgmtClone.firstChild) root.appendChild(mgmtClone.firstChild);
     }
   }
   Array.prototype.slice.call(mainClone.children).forEach(function(el){ root.appendChild(el); });
 
   root.querySelectorAll('details').forEach(function(d){ d.open = true; });
+  pdfKeep(root);
+  pdfFit(root);
   document.body.classList.add('printing-card');
   window.print();
 }
@@ -1876,7 +2213,8 @@ function exportLevelPdf(idx){
   clone.querySelectorAll('dialog').forEach(function(el){ el.remove(); });
   /* интерактивная обвязка на бумаге бессмысленна */
   clone.querySelectorAll('.lvl-pdf, .lvl-up, .forecast-toggle, .mgmt-trigger, '
-    + '.gd-export, .gd-close, .gosb-finder, .ts-dropdown, .xls-bar').forEach(function(el){
+    + '.gd-export, .gd-close, .gd-backnav, .gosb-finder, .ts-dropdown, .xls-bar')
+    .forEach(function(el){
     el.remove();
   });
   clone.querySelectorAll('details').forEach(function(d){ d.open = true; });
@@ -1904,6 +2242,8 @@ function exportLevelPdf(idx){
     sec.insertBefore(h, sec.firstChild);
   });
   root.appendChild(clone);
+  pdfKeep(root);
+  pdfFit(root);
   document.body.classList.add('printing-card');
   window.print();
 }
@@ -2459,6 +2799,16 @@ def _flow_section(a: analyze.Analysis, idx: int = 0) -> str:
                     f'потеряли одну из двух работ '
                     f'{C.fmt_num(f.get("lost_second", 0))}'),
             "html": seg_tbl + _flow_second_jobs_body(f)})
+    hist = f.get("history") or []
+    if len(hist) > 1:
+        bal = hist[-1]["balance"]
+        groups.append({
+            "title": "Динамика по месяцам",
+            "sub": (f'{len(hist)} '
+                    + _plural(len(hist), "месяц", "месяца", "месяцев")
+                    + f' · переток за последний '
+                    + ("+" if bal > 0 else "−") + C.fmt_num(abs(bal)) + ' чел'),
+            "html": _flow_history_block(hist, f)})
     groups.append({
         "title": f"По каждому {unit}",
         "sub": f'{C.fmt_num(len(f["units"]))} '
@@ -2528,6 +2878,129 @@ _FLOW_JS = """
 })();
 </script>
 """
+
+
+def _flow_history_block(hist: list, f: dict) -> str:
+    """Динамика перетока по месяцам: таблица, столбики и разбор ряда."""
+    rows = []
+    for h in hist:
+        bal = h["balance"]
+        rows.append([
+            C.month_ru(h["month"]).capitalize(),
+            C.fmt_num(h["base"]),
+            f'<b style="color:var(--bad)">{C.fmt_num(h["left"])}</b>',
+            C.fmt_num(h["gone"]),
+            C.fmt_num(h["moved"]),
+            f'<b style="color:var(--good)">{C.fmt_num(h["came"])}</b>',
+            (f'<b style="color:{"var(--good)" if bal > 0 else "var(--bad)"}">'
+             f'{"+" if bal > 0 else "−"}{C.fmt_num(abs(bal))}</b>' if bal else "0"),
+            (f'<b style="color:{"var(--good)" if h["net"] > 0 else "var(--bad)"}">'
+             f'{"+" if h["net"] > 0 else "−"}{C.fmt_num(abs(h["net"]))}</b>'
+             if h["net"] else "0")])
+    tbl = C.table(["Месяц", "было, чел", "перестали", "из них совсем",
+                   "в другой организации", "начали", "переток к портфелю",
+                   "итого изменение"], rows, num_cols=[1, 2, 3, 4, 5, 6, 7])
+    return (_flow_history_read(hist) + _flow_bars(hist) + tbl
+            + '<p class="g-act" style="margin:10px 0 0">Переток к портфелю — '
+              'пришли из других организаций минус ушли в другие. Это та часть '
+              'изменения, где клиент остался в банке и сменил только '
+              'работодателя; «из них совсем» — та, где человек перестал '
+              'получать зарплату вообще.</p>')
+
+
+def _flow_bars(hist: list) -> str:
+    """Столбики: реальные потери и переток по месяцам, инлайновым SVG."""
+    if len(hist) < 2:
+        return ""
+    w, h, pad = 900, 150, 24
+    top = max(max(x["gone"] for x in hist), 1)
+    bw = (w - pad * 2) / len(hist)
+    bars, labels = [], []
+    for i, x in enumerate(hist):
+        bh = (x["gone"] / top) * (h - pad * 2)
+        bx = pad + i * bw + bw * 0.22
+        by = h - pad - bh
+        bars.append(f'<rect x="{bx:.1f}" y="{by:.1f}" width="{bw * 0.56:.1f}" '
+                    f'height="{max(bh, 1):.1f}" rx="3" fill="var(--bad)" '
+                    f'opacity="0.8"><title>{C.esc(x["month"])}: потеряли совсем '
+                    f'{C.fmt_num(x["gone"])} чел</title></rect>')
+        labels.append(f'<text x="{pad + i * bw + bw / 2:.1f}" y="{h - 7}" '
+                      f'font-size="10.5" text-anchor="middle" '
+                      f'fill="var(--text-2)">{C.esc(x["month"])}</text>')
+        labels.append(f'<text x="{pad + i * bw + bw / 2:.1f}" y="{by - 5:.1f}" '
+                      f'font-size="10.5" text-anchor="middle" '
+                      f'fill="var(--text)">{C.fmt_num(x["gone"])}</text>')
+    return (f'<div class="ch-cap">Потеряли совсем, человек в месяц</div>'
+            f'<div class="chart"><svg viewBox="0 0 {w} {h}" '
+            f'preserveAspectRatio="xMidYMid meet" role="img" '
+            f'aria-label="Потери по месяцам">{"".join(bars)}{"".join(labels)}'
+            f'</svg></div>')
+
+
+def _flow_history_read(hist: list) -> str:
+    """Что говорит ряд: разбор динамики числами, без общих слов.
+
+    Ряд короткий — три-четыре месяца, — поэтому тренд по нему не считается:
+    на таком отрезке любая линия тренда расскажет больше, чем знают данные.
+    Зато видно другое и более полезное: где всплеск, куда движется доля
+    реальных потерь и в какую сторону работает переток.
+    """
+    if len(hist) < 2:
+        return ""
+    last, prev = hist[-1], hist[-2]
+    gone = [x["gone"] for x in hist]
+    peak = max(hist, key=lambda x: x["gone"])
+    rest = [x["gone"] for x in hist if x is not peak]
+    avg = sum(rest) / len(rest) if rest else 0
+    lines = []
+    d = last["gone"] - prev["gone"]
+    if d:
+        word = "больше" if d > 0 else "меньше"
+        lines.append(
+            f'В {C.month_ru(last["month"], "pre")} потеряли совсем '
+            f'<b>{C.fmt_num(last["gone"])}</b> человек — на '
+            f'<b style="color:{"var(--bad)" if d > 0 else "var(--good)"}">'
+            f'{C.fmt_num(abs(d))}</b> {word}, чем в '
+            f'{C.month_ru(prev["month"], "pre")}.')
+    else:
+        lines.append(f'Потери совсем держатся на уровне '
+                     f'{C.fmt_num(last["gone"])} человек в месяц.')
+    if avg and peak["gone"] > avg * 1.5:
+        lines.append(
+            f'Из ряда выбивается {C.month_ru(peak["month"])}: '
+            f'<b>{C.fmt_num(peak["gone"])}</b> против '
+            f'{C.fmt_num(avg)} в остальные месяцы — это разовое событие, а не '
+            f'уровень. Считать по нему среднее нельзя.')
+    bal = [x["balance"] for x in hist]
+    neg = [x for x in bal if x < 0]
+    if len(neg) == len(bal):
+        lines.append(
+            f'Переток все {len(bal)} '
+            f'{_plural(len(bal), "месяц", "месяца", "месяцев")} работает против '
+            f'уровня: люди уходят в другие организации чаще, чем приходят '
+            f'оттуда. За последний месяц — <b style="color:var(--bad)">'
+            f'{C.fmt_num(abs(bal[-1]))}</b> человек.')
+    elif not neg:
+        lines.append(f'Переток всё это время работает на уровень: приходят из '
+                     f'других организаций чаще, чем уходят.')
+    else:
+        lines.append(
+            f'Переток меняет знак: в {len(neg)} из {len(bal)} '
+            f'{_plural(len(bal), "месяца", "месяцев", "месяцев")} он забирал '
+            f'людей, в остальные — приносил. Устойчивой утечки в другие '
+            f'организации нет.')
+    shares = [x["gone_share"] for x in hist if x["gone_share"] is not None]
+    if len(shares) > 1 and abs(shares[-1] - shares[0]) >= 0.05:
+        up = shares[-1] > shares[0]
+        lines.append(
+            f'Доля реальных потерь среди ушедших {"выросла" if up else "снизилась"} '
+            f'с {shares[0] * 100:.0f}% до {shares[-1] * 100:.0f}%: '
+            + ('уходы всё чаще означают потерю клиента, а не перемещение внутри '
+               'банка.' if up else 'всё большая часть ушедших остаётся клиентами '
+               'банка — это не потеря, а перемещение.'))
+    body = "".join(f'<p style="margin:0 0 8px">{x}</p>' for x in lines)
+    return ('<div class="card ai" style="margin:0 0 16px">'
+            '<div class="ai-head">Что говорит ряд</div>' + body + '</div>')
 
 
 def _flow_unit_rows(units: list, lvl_base: float) -> list:

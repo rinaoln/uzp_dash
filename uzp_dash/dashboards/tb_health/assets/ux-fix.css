@@ -400,7 +400,15 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
 
   /* 4. Неделимое — целиком на одной странице */
   .gcard, .kpi, .chart, .gd-block, .gd-grp, .card.ai, .card.reco,
-  details, .flow-seg { break-inside: avoid; }
+  details, .flow-seg, .print-keep { break-inside: avoid; }
+
+  /* Заголовок таблицы, перенесённый внутрь неё скриптом экспорта */
+  caption {
+    caption-side: top; text-align: left; break-after: avoid;
+    padding: 0 0 4px;
+  }
+  caption h3, caption h4 { margin: 0 0 6px; }
+  caption p { margin: 0 0 8px; }
 
   /* 5. Таблицы: строка не рвётся, шапка повторяется на каждой странице —
         иначе со второй страницы колонки становятся безымянными.
@@ -425,7 +433,6 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
   /* 7. Раздел — с новой страницы. Так на каждой странице цельный сюжет, а не
         хвост предыдущего разбора и начало следующего. */
   section { break-before: page; break-inside: auto; }
-  section:first-of-type { break-before: auto; }
 
   /* 8. Ничего не обрезается и не прокручивается: на бумаге прокрутки нет, и
         «overflow: auto» просто срезает правую часть широкой таблицы */
@@ -433,8 +440,9 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
   #print-root, #print-root *, .lvl, .lvl * { max-height: none !important; }
 
   /* 8a. Экранные подсказки на бумаге бессмысленны: нажимать нечего */
-  .section-hint, .hub-lead, .flow-seg,
-  .of-wrap > p.sub { display: none !important; }
+  .section-hint, .hub-lead, .flow-seg, .of-wrap > p.sub,
+  .gd-backnav, .gd-export, .gd-close, .lvl-pdf, .mgmt-trigger,
+  .tbdyn-trigger, .xls-bar { display: none !important; }
 
   /* 9. Подпись в начале каждого раздела: лист из середины отчёта должен сам
         говорить, чей он и за какой месяц. */
@@ -444,7 +452,10 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
     padding-bottom: 3px; margin-bottom: 10px; break-after: avoid;
   }
 
-  @page { margin: 12mm; }
+  /* Лист задаётся жёстко: подгонка под страницу считает по A4 за вычетом
+     полей, а без size браузер взял бы формат из настроек принтера — на
+     Letter лист короче на 18 мм, и подогнанные блоки снова порвались бы. */
+  @page { size: A4; margin: 12mm; }
 }
 
 /* ============================================================
@@ -699,3 +710,19 @@ dialog.hlp { height: min(860px, 90vh); }
    подвал уезжает за край окна */
 .hlp-body { flex: 1 1 auto; min-height: 0; }
 .hlp-head, .hlp-rail, .hlp-foot { flex: none; }
+
+/* --- Замер блоков перед печатью ---
+   Чтобы узнать, влезет ли блок на лист, его надо померить В ШИРИНУ ЛИСТА, а не
+   экрана: на 1440 px таблица укладывается, на 186 мм — нет. Контейнер уезжает
+   за край экрана и получает ровно ширину полосы набора; раскладка на время
+   замера делается печатной (сетки в столбик, вкладки раскрыты). */
+body.pdf-measure #print-root {
+  display: block !important;
+  position: absolute; left: -20000px; top: 0;
+  width: 186mm; max-width: 186mm;
+}
+body.pdf-measure #print-root .gcards,
+body.pdf-measure #print-root .grid,
+body.pdf-measure #print-root .hub { display: block !important; }
+body.pdf-measure #print-root .of-tabs { display: none !important; }
+body.pdf-measure #print-root .of-pane[hidden] { display: block !important; }

@@ -443,9 +443,13 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
     if df is None or df.empty:
         return {}
     key = "tb_id" if tb_id is None else "unit_id"
-    cur = df if tb_id is None else df[df["tb_id"] == tb_id]
-    if cur.empty:
+    lvl = df if tb_id is None else df[df["tb_id"] == tb_id]
+    if lvl.empty:
         return {}
+    # снимок — ПОСЛЕДНЯЯ пара месяцев; остальные месяцы идут в динамику. Без
+    # этого отбора все числа раздела сложились бы за весь период сразу
+    last = df.attrs.get("m_cur") or (lvl["month"].iloc[-1] if "month" in lvl else "")
+    cur = lvl[lvl["month"] == last] if "month" in lvl else lvl
     flow = cur[cur["side"] == "flow"].copy()
     seg_by_inn = b.seg_by_inn or {}
     flow["seg"] = [seg_by_inn.get(int(x)) if pd.notna(x) else None
@@ -473,6 +477,7 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
     seg_moves, same, cross = _flow_segments(cur, b)
     return {
         "unit_label": unit_label,
+        "history": _flow_history(lvl),
         "seg_moves": seg_moves, "move_same": same, "move_cross": cross,
         "m_prev": df.attrs.get("m_prev", ""), "m_cur": df.attrs.get("m_cur", ""),
         "base": base, "stay": k("stay"), "left": left, "came": came,
@@ -488,6 +493,46 @@ def _flow(b: Bank, tb_id: int | None, unit_label: str) -> dict:
                         {"from_other": from_other, "new": new}[code])
                        for code, title, note in FLOW_CAME],
         "units": units, "segs": segs, "seg_units": seg_units}
+
+
+def _flow_history(lvl: pd.DataFrame) -> list:
+    """Динамика перетока по месяцам: что происходило с портфелем уровня.
+
+    Один месяц отвечает «что сейчас», и этого мало: уход сотни человек может
+    быть и разовым событием, и третьим месяцем подряд. Ряд по месяцам отличает
+    одно от другого — и показывает, растёт ли сам переток между организациями
+    или меняется только его знак.
+    """
+    if "month" not in lvl or lvl.empty:
+        return []
+    f = lvl[lvl["side"] == "flow"]
+    if f.empty:
+        return []
+    g = f.pivot_table(index=["month", "prev_month"], columns="kind", values="fl",
+                      aggfunc="sum", fill_value=0.0)
+    out = []
+    for (month, prev), row in g.iterrows():
+        def v(kind):
+            return float(row.get(kind, 0.0))
+        moved = v("moved") + v("lost_second")
+        from_other = v("from_other") + v("add_second")
+        base = v("stay") + moved + v("below") + v("other") + v("gone")
+        left = base - v("stay")
+        came = from_other + v("new")
+        out.append({
+            "month": month, "prev": prev, "base": base,
+            "left": left, "came": came, "net": came - left,
+            "gone": v("gone"), "moved": moved, "below": v("below"),
+            "other": v("other"), "from_other": from_other, "new": v("new"),
+            "switched": v("moved"), "lost_second": v("lost_second"),
+            "add_second": v("add_second"),
+            # вклад перетока в портфель уровня: пришли из других организаций
+            # минус ушли в другие. Это и есть то, что уровень на перетоке
+            # потерял или выиграл за месяц
+            "balance": from_other - moved,
+            "gone_share": (v("gone") / left) if left else None,
+            "left_share": (left / base) if base else None})
+    return out
 
 
 def _flow_units(flow: pd.DataFrame, key: str, name_of: dict) -> list:
