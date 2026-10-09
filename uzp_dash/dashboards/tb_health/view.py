@@ -737,8 +737,8 @@ def _portfolio_block(a: analyze.Analysis, ai: str | None = None) -> str:
             'витрины готовым, а это независимые факты управления портфелем: '
             'текущая база и безвозвратные потери.</p>')
     return C.section("Управление портфелем",
-                     C.card('<h3>Портфель и потери</h3>' + note + body + total)
-                     + _ai(ai),
+                     _ai(ai)
+                     + C.card('<h3>Портфель и потери</h3>' + note + body + total),
                      eyebrow="Справочно")
 
 
@@ -761,6 +761,67 @@ def _trend_block(rows: list, title: str) -> str:
     )
 
 
+def _trend_verdict(a: analyze.Analysis) -> str:
+    """Вывод «Динамики»: что происходит с портфелем и куда смотреть дальше.
+
+    Раздел читают, чтобы отличить разовое отклонение от тенденции, а по графику
+    это видно не сразу: двенадцать точек, и глаз цепляется за последнюю. Вывод
+    отвечает на тот же вопрос числами — сколько месяцев подряд план не
+    выполняется и куда идти за причиной.
+
+    Считается арифметикой по тем же строкам, что и график: модель здесь ничего
+    не добавит, а расхождение вывода с графиком было бы дороже любых слов.
+    """
+    rows = a.trend or []
+    if len(rows) < 2:
+        return ""
+    first, last = rows[0], rows[-1]
+    grew = last["fact"] - first["fact"]
+    n_miss = sum(1 for r in rows if r["fact"] < r["plan"])
+    streak = 0
+    for r in reversed(rows):
+        if r["fact"] < r["plan"]:
+            streak += 1
+        else:
+            break
+    gap = max(0.0, last["plan"] - last["fact"])
+    lines = [
+        f'Портфель за {C.esc(first["label"])} — {C.esc(last["label"])}: '
+        f'<b style="color:{"var(--good)" if grew >= 0 else "var(--bad)"}">'
+        f'{"+" if grew >= 0 else "−"}{C.fmt_num(abs(grew))}</b> чел.'
+    ]
+    if streak:
+        lines.append(f'План не выполняется <b>{streak}</b> '
+                     + _plural(streak, "месяц", "месяца", "месяцев")
+                     + f' подряд, в {C.esc(last["label"])} не хватает '
+                     f'<b>{C.fmt_num(gap)}</b> чел.')
+    elif n_miss:
+        lines.append(f'План не выполнялся в {n_miss} из {len(rows)} '
+                     + _plural(len(rows), "месяца", "месяцев", "месяцев")
+                     + f', в {C.esc(last["label"])} выполнен.')
+    else:
+        lines.append(f'План выполнен во всех {len(rows)} '
+                     + _plural(len(rows), "месяце", "месяцах", "месяцах") + '.')
+    if len(rows) >= 4:
+        near = last["fact"] - rows[-4]["fact"]
+        lines.append(f'За последние три месяца портфель '
+                     f'{"вырос" if near >= 0 else "снизился"} на '
+                     f'<b>{C.fmt_num(abs(near))}</b> чел.')
+    if streak >= 2:
+        lines.append(f'Что делать: отклонение устойчивое, разовой отработкой оно '
+                     f'не закрывается — где именно теряем, видно в матрице '
+                     f'выполнения {C.esc(a.unit_label)}/сегмент и в разделе «Отток».')
+    elif n_miss:
+        lines.append('Что делать: сверить месяцы с невыполнением с матрицей '
+                     'выполнения — отклонение обычно держится в одних и тех же '
+                     'сегментах.')
+    else:
+        lines.append('Отработка по динамике не требуется: план выполняется весь '
+                     'период.')
+    body = "".join(f'<p style="margin:0 0 8px">{t}</p>' for t in lines)
+    return C.card('<div class="ai-head">Вывод</div>' + body, cls="ai")
+
+
 def _trend_section(a: analyze.Analysis) -> str:
     """Раздел «Динамика за 12 месяцев» — по области уровня целиком.
 
@@ -770,17 +831,12 @@ def _trend_section(a: analyze.Analysis) -> str:
     """
     if not a.trend:
         return ""
-    first, last = a.trend[0], a.trend[-1]
-    grew = last["fact"] - first["fact"]
-    n_miss = sum(1 for r in a.trend if r["fact"] < r["plan"])
-    lead = (f'<p class="sub" style="font-size:15px;margin:-2px 0 14px">'
-            f'Период {C.esc(first["label"])} — {C.esc(last["label"])}, закрытые '
-            f'месяцы. {"Прирост" if grew >= 0 else "Снижение"} портфеля за период — '
-            f'<b>{C.fmt_num(abs(grew))}</b> чел. План не выполнен в '
-            f'<b>{n_miss}</b> из {len(a.trend)} месяцев.</p>')
+    # Отдельной вводной строки здесь нет: те же три числа — период, изменение
+    # портфеля и месяцы без выполнения плана — стоят в выводе выше, и читать их
+    # дважды подряд незачем.
     return C.section(
         "Динамика за 12 месяцев",
-        lead + C.card(_trend_block(a.trend, "")),
+        _trend_verdict(a) + C.card(_trend_block(a.trend, "")),
         eyebrow="Ретроспектива портфеля",
         desc="Как портфель получателей менялся месяц к месяцу и в каких месяцах "
              "план не выполнялся — чтобы отличить разовое отклонение от "
@@ -828,8 +884,8 @@ def _matrix(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
                      + C.table(["ГОСБ × сегмент", "Выполн.", "Отклонение, чел", "Доля отклонения"],
                                top, num_cols=[2, 3]))
     return C.section(f"Матрица выполнения {a.unit_label}/сегмент",
-                     f'<div class="grid cols-2">{heat}{top_tbl}</div>'
-                     + _cell_data(a, idx, cells) + _ai(ai),
+                     _ai(ai) + f'<div class="grid cols-2">{heat}{top_tbl}</div>'
+                     + _cell_data(a, idx, cells),
                      eyebrow="Диагностика по прогнозу")
 
 
@@ -1372,7 +1428,7 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
                                         _wow_unit(a, gid, "gd-wow"),
                                         a.flow, gid))
     grid = f'<div class="gcards">{"".join(cards)}</div>{"".join(dialogs)}'
-    return C.section(f"Детализация по {unit}", grid + _ai(ai),
+    return C.section(f"Детализация по {unit}", _ai(ai) + grid,
                      eyebrow=f"Детализация по {unit} · клик открывает разбор до организаций")
 
 
@@ -2770,7 +2826,7 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
             f'<p class="sub" style="font-size:14px;margin:-4px 0 10px">'
             f'Организации, за счёт которых закрывается отклонение от плана. '
             f'{cand}.</p>{help_html}')
-    return C.section("Потенциал организаций", C.card(head + explorer) + _ai(ai),
+    return C.section("Потенциал организаций", _ai(ai) + C.card(head + explorer),
                      eyebrow="Потенциал организаций")
 
 
@@ -2902,7 +2958,7 @@ def _flow_section(a: analyze.Analysis, idx: int = 0) -> str:
         {"title": "Итог месяца",
          "sub": f'портфель {_pct_signed(net / base * 100) if base else "—"} · '
                 f'{"+" if net > 0 else "−"}{C.fmt_num(abs(net))} чел',
-         "html": _flow_impact(f) + _flow_verdict_body(f)},
+         "html": _flow_impact(f)},
         {"title": "Кто перестал и кто начал",
          "sub": f'перестали {C.fmt_num(left)} · из них совсем '
                 f'{C.fmt_num(gone)} · начали {C.fmt_num(came)}',
@@ -2934,7 +2990,10 @@ def _flow_section(a: analyze.Analysis, idx: int = 0) -> str:
         "html": unit_tbl})
     return C.section(
         "Переток ФЛ",
-        C.card(head + _outflow_tabs(groups)),
+        # Вывод стоит до плашек: он отвечает на вопрос «что это значит для
+        # портфеля», а плашки — на «из чего это сложилось». Пока вывод лежал
+        # внутри первой плашки, его читали только те, кто её открыл.
+        _flow_verdict_body(f) + C.card(head + _outflow_tabs(groups)),
         eyebrow="Движение получателей",
         desc="Портфель уменьшился — но ушли ли люди. Здесь видно, сколько "
              "человек перестали получать зарплату совсем, сколько получают её "
@@ -3319,16 +3378,21 @@ def _flow_verdict_body(f: dict) -> str:
     came_other = next((v for c, _t, _n, v in f.get("came_kinds") or []
                        if c == "from_other"), 0.0)
     gone, left, came = f.get("gone", 0), f.get("left", 0), f.get("came", 0)
-    if not moved and not came_other:
-        return ""
     bal = came_other - moved
-    lines = [
-        'Переток не уменьшает портфель банка: человек остаётся клиентом, '
-        'меняется только организация, которая платит ему зарплату. Но для '
-        'подразделения и сегмента это настоящий минус — и именно его легко '
-        'принять за потерю клиентов.'
-    ]
-    if bal > 0:
+    lines = []
+    if moved or came_other:
+        lines.append(
+            'Переток не уменьшает портфель банка: человек остаётся клиентом, '
+            'меняется только организация, которая платит ему зарплату. Но для '
+            'подразделения и сегмента это настоящий минус — и именно его легко '
+            'принять за потерю клиентов.')
+    if not moved and not came_other:
+        lines.append(
+            f'За месяц организацию никто не сменил: перестали получать зарплату '
+            f'<b>{C.fmt_num(left)}</b> '
+            f'{_plural(left, "человек", "человека", "человек")}, начали — '
+            f'<b>{C.fmt_num(came)}</b>.')
+    elif bal > 0:
         lines.append(
             f'За месяц организацию сменили <b>{C.fmt_num(moved)}</b> '
             f'{_plural(moved, "человек", "человека", "человек")}, а пришли из '
@@ -3373,8 +3437,22 @@ def _flow_verdict_body(f: dict) -> str:
             f'({gone / left * 100:.0f}%). Остальные {C.fmt_num(rest)} остались '
             f'клиентами банка или не дотянули до порога: это другой разговор и '
             f'другая работа.')
+    unit = f.get("unit_label", "ГОСБ")
+    if gone and left and gone / left >= 0.5:
+        lines.append(f'Что делать: больше половины ушедших не получают зарплату '
+                     f'нигде — это потери портфеля, разбор по клиентам в разделе '
+                     f'«Отток».')
+    elif donor:
+        lines.append(f'Что делать: снижение в сегменте {C.esc(donor[0])} объясняется '
+                     f'переходами, а не потерей клиентов — проверить по вкладке '
+                     f'«По каждому {C.esc(unit)}», прежде чем ставить задачи на '
+                     f'возврат.')
+    else:
+        lines.append(f'Что делать: подразделения с наибольшим снижением — во '
+                     f'вкладке «По каждому {C.esc(unit)}»; реальные потери '
+                     f'разбираются в разделе «Отток».')
     body = "".join(f'<p style="margin:0 0 8px">{x}</p>' for x in lines)
-    return ('<div class="card ai" style="margin-top:18px">'
+    return ('<div class="card ai">'
             '<div class="ai-head">Вывод</div>' + body + '</div>')
 
 
@@ -3482,7 +3560,7 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
                        "html": _outflow_group(rows_src, unit, title, lead, kind,
                                               (a.dates or {}).get("label", ""))})
     return C.section(
-        "Отток", C.card(head + _outflow_tabs(groups)) + _ai(ai),
+        "Отток", _ai(ai) + C.card(head + _outflow_tabs(groups)),
         eyebrow="Безвозвратные потери портфеля",
         desc="Кого потеряли за три закрытых месяца, кого вернули и чем "
              "закончилась работа: отдельно возвраты поимённо, отдельно "
