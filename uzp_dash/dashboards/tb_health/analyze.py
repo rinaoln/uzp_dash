@@ -793,7 +793,11 @@ def _trend_rows(trend: pd.DataFrame, level: str, unit_id: int | None = None) -> 
     return [{"dt": r.end_dt,
              "label": f"{pd.Timestamp(r.end_dt).month:02d}.{pd.Timestamp(r.end_dt).year}",
              "short": f"{pd.Timestamp(r.end_dt).month:02d}.{pd.Timestamp(r.end_dt).year % 100:02d}",
-             "plan": float(r.plan_amt or 0), "fact": float(r.fact_amt or 0)}
+             "plan": float(r.plan_amt or 0), "fact": float(r.fact_amt or 0),
+             # выполнение витрины — то же число, что в плашке уровня; у ГОСБ его
+             # нет, там выполнение считается от плана
+             "exec": (float(r.execution_percent)
+                      if pd.notna(getattr(r, "execution_percent", None)) else None)}
             for r in sub.itertuples()]
 
 

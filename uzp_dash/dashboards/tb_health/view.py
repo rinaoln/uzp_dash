@@ -1607,7 +1607,12 @@ def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str
             # история в витрине короче, и месяц, который встретился только у
             # последнего из них, иначе встал бы в конец таблицы
             month_dt[lbl] = r["dt"]
-            ex = (r["fact"] / r["plan"]) if r["plan"] else None
+            # Выполнение берём у витрины — тем же числом живут плашки уровней.
+            # Если витрина отдала его в процентах (на проме встречается) или не
+            # отдала вовсе, считаем от плана: лучше свой расчёт, чем 9990%.
+            ex = r.get("exec")
+            if ex is None or not 0 < ex <= 3:
+                ex = (r["fact"] / r["plan"]) if r["plan"] else None
             cells[(a.tb_id, lbl)] = (ex, r["plan"] - r["fact"])
     months = sorted(month_dt, key=lambda x: month_dt[x])
     dyn = ""

@@ -193,32 +193,41 @@ UNIT_TOTALS = _UNITS.replace("{seg_col}", "") \
 MONTHLY_TREND = """
 WITH gmap AS (""" + _GMAP + """),
 tb AS (SELECT DISTINCT tb_id FROM {schema}.uzp_dim_gosb
-       WHERE tb_short_name IS NOT NULL AND """ + _NO_CA + """)
-SELECT 'sb' AS level_name, m.level_id AS unit_id, m.end_dt,
-       sum(m.plan_amt) AS plan_amt, sum(m.fact_amt) AS fact_amt
-FROM {schema}.uzp_dwh_metrics m
-WHERE m.level_name='sb' AND m.period_type='m' AND m.metric_id=:m_rcp
-  AND COALESCE(m.extended_dim_1,1)=1
-  AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
-GROUP BY m.level_id, m.end_dt
+       WHERE tb_short_name IS NOT NULL AND """ + _NO_CA + """),
+-- ОДНА строка на (уровень, единица, месяц). На проме у одной единицы бывает
+-- несколько строк витрины за месяц — разные level_value (0/1/99). Пока их
+-- суммировали, план и факт складывались из РАЗНЫХ срезов: план брался из одного,
+-- факт из другого, и выполнение по месяцу сползало к 100% у всех банков сразу.
+-- Берём ту же строку, что и плашка уровня (_verdict): с наибольшим фактом.
+mm AS (
+  SELECT m.level_name, m.level_id, m.end_dt, m.plan_amt, m.fact_amt,
+         m.execution_percent,
+         row_number() OVER (PARTITION BY m.level_name, m.level_id, m.end_dt
+                            ORDER BY m.fact_amt DESC, m.plan_amt DESC) AS rn,
+         count(*)    OVER (PARTITION BY m.level_name, m.level_id, m.end_dt) AS n_rows
+  FROM {schema}.uzp_dwh_metrics m
+  WHERE m.period_type='m' AND m.metric_id=:m_rcp
+    AND COALESCE(m.extended_dim_1,1)=1
+    AND m.level_name IN ('sb','tb','gosb')
+    AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
+)
+SELECT 'sb' AS level_name, mm.level_id AS unit_id, mm.end_dt,
+       mm.plan_amt, mm.fact_amt, mm.execution_percent, mm.n_rows
+FROM mm WHERE mm.rn=1 AND mm.level_name='sb'
 UNION ALL
-SELECT 'tb' AS level_name, m.level_id AS unit_id, m.end_dt,
-       sum(m.plan_amt) AS plan_amt, sum(m.fact_amt) AS fact_amt
-FROM {schema}.uzp_dwh_metrics m
-JOIN tb ON tb.tb_id = m.level_id
-WHERE m.level_name='tb' AND m.period_type='m' AND m.metric_id=:m_rcp
-  AND COALESCE(m.extended_dim_1,1)=1
-  AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
-GROUP BY m.level_id, m.end_dt
+SELECT 'tb' AS level_name, mm.level_id AS unit_id, mm.end_dt,
+       mm.plan_amt, mm.fact_amt, mm.execution_percent, mm.n_rows
+FROM mm JOIN tb ON tb.tb_id = mm.level_id
+WHERE mm.rn=1 AND mm.level_name='tb'
 UNION ALL
-SELECT 'gosb' AS level_name, g.new_gosb_id AS unit_id, m.end_dt,
-       sum(m.plan_amt) AS plan_amt, sum(m.fact_amt) AS fact_amt
-FROM {schema}.uzp_dwh_metrics m
-JOIN gmap g ON g.old_gosb_id = m.level_id
-WHERE m.level_name='gosb' AND m.period_type='m' AND m.metric_id=:m_rcp
-  AND COALESCE(m.extended_dim_1,1)=1
-  AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
-GROUP BY g.new_gosb_id, m.end_dt
+-- ГОСБ: здесь сумма законна — несколько старых ГОСБ склеиваются в один новый.
+-- Выполнение по такой сумме витрина не считает, поэтому оно считается от плана.
+SELECT 'gosb' AS level_name, g.new_gosb_id AS unit_id, mm.end_dt,
+       sum(mm.plan_amt) AS plan_amt, sum(mm.fact_amt) AS fact_amt,
+       NULL AS execution_percent, max(mm.n_rows) AS n_rows
+FROM mm JOIN gmap g ON g.old_gosb_id = mm.level_id
+WHERE mm.rn=1 AND mm.level_name='gosb'
+GROUP BY g.new_gosb_id, mm.end_dt
 """
 
 # Организации ПО ВСЕМУ БАНКУ на грейне (ГОСБ, ИНН): витринные метрики, сегмент,

@@ -22,6 +22,19 @@ UNKNOWN = {
 }
 
 
+def _kind_re(kind: str) -> str:
+    """Шаблон вида токена с поправкой на склонение.
+
+    Модель склоняет не только предложение, но и сам токен: «начинать с
+    Организации-01» вместо «Организация-01». Точное совпадение такой токен не
+    ловит — имя не возвращалось, и псевдоним уезжал в отчёт правления.
+    Аббревиатуры («ГОСБ», «ТБ») не склоняются, поэтому их шаблон не меняется.
+    """
+    if kind[-1:].lower() in "аяеёиоуыэюй":
+        return re.escape(kind[:-1]) + r"[а-яё]{0,3}"
+    return re.escape(kind)
+
+
 class Aliases:
     """Двусторонний словарь «настоящее имя ↔ токен» на один вызов LLM."""
 
@@ -52,7 +65,8 @@ class Aliases:
         """
         for kind, last in self._counters.items():
             pattern = re.compile(
-                rf"({re.escape(kind)}{_SEP}0*(\d+))((?:\s*(?:,|и)\s*0*\d{{1,2}}(?!\d))+)")
+                rf"({_kind_re(kind)}{_SEP}0*(\d+))((?:\s*(?:,|и)\s*0*\d{{1,2}}(?!\d))+)",
+                re.IGNORECASE)
 
             def repl(m, kind=kind, last=last):
                 head, tail = m.group(1), m.group(3)
@@ -85,7 +99,8 @@ class Aliases:
             # от длинных номеров к коротким: иначе «ГОСБ-1» съест начало «ГОСБ-12»
             for token in sorted(self._by_token, key=len, reverse=True):
                 kind, _, num = token.rpartition("-")
-                pattern = re.compile(rf"{re.escape(kind)}{_SEP}0*{int(num)}(?!\d)")
+                pattern = re.compile(rf"{_kind_re(kind)}{_SEP}0*{int(num)}(?!\d)",
+                                     re.IGNORECASE)
                 name = self._by_token[token]
                 text = pattern.sub(lambda _m, n=name: n, text)  # без спецсимволов замены
         return self._drop_unknown(text)
@@ -94,7 +109,8 @@ class Aliases:
         """Убрать токены, которых нет в словаре, — модель их выдумала."""
         for kind in self._kinds():
             repl = UNKNOWN.get(kind, f"другие {kind}")
-            pattern = re.compile(rf"{re.escape(kind)}{_SEP}0*\d+(?!\d)")
+            pattern = re.compile(rf"{_kind_re(kind)}{_SEP}0*\d+(?!\d)",
+                                 re.IGNORECASE)
             text, n = pattern.subn(repl, text)
             self.leaked += n
             if n > 1:
