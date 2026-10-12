@@ -725,7 +725,7 @@ def _portfolio_block(a: analyze.Analysis, ai: str | None = None) -> str:
     body = _wf_lines(pf, d, fc.get("conv_tb", 1.0), fc.get("conv"), conv_is_tb=False)
     st = C.status_of(pf.get("exec"))
     total = (
-        f'<div class="g-do">Прогноз витрины на {C.esc(d.get("label", ""))}: '
+        f'<div class="g-do">Прогноз на {C.esc(d.get("label", ""))}: '
         f'<b>{C.fmt_num(pf["forecast"])}</b> при плане {C.fmt_num(pf["plan"])} → '
         + C.badge(f"{_pct(pf.get('exec'))} плана", st) + '</div>'
     )
@@ -733,8 +733,8 @@ def _portfolio_block(a: analyze.Analysis, ai: str | None = None) -> str:
     # начинают сверять их сумму с ним. Но объяснять методику двумя фразами с тире
     # и тройкой однородных — значит писать не читателю, а в протокол.
     note = ('<p class="sub" style="font-size:14px;margin:-4px 0 12px">'
-            'Показатели ниже в прогноз не суммируются. Прогноз поступает из '
-            'витрины готовым, а это независимые факты управления портфелем: '
+            'Показатели ниже в прогноз не суммируются. Прогноз приходит '
+            'готовым, а это независимые факты управления портфелем: '
             'текущая база и безвозвратные потери.</p>')
     return C.section("Управление портфелем",
                      _ai(ai)
@@ -750,7 +750,7 @@ def _trend_block(rows: list, title: str) -> str:
     нуля. Один график вместо двух отвечал бы только на половину вопроса.
     """
     if not rows:
-        return ('<div class="gd-note">истории по этой единице в витрине метрик нет — '
+        return ('<div class="gd-note">истории по этой единице нет — '
                 'графики не построены</div>')
     return (
         f'<h4>{C.esc(title)}</h4>'
@@ -1195,7 +1195,7 @@ def _gd_verdict(c: dict, det: dict, d: dict, flow: dict | None,
         lines.append('План выполняется во всех сегментах.')
 
     if c.get("n_need"):
-        filler = (f'; дополнительно компенсация за счёт других сегментов — '
+        filler = (f'; из них в других сегментах подразделения — '
                   f'{c["filler_n"]} орг (+{C.fmt_num(c["filler_fl"])} чел)'
                   if c.get("filler_n") else "")
         lines.append(f'Под план отобрано <b>{c["n_need"]}</b> '
@@ -1228,9 +1228,9 @@ def _gd_verdict(c: dict, det: dict, d: dict, flow: dict | None,
         act = ('Что делать: взять в работу отобранные организации, приоритет — '
                'сегменты с невыполнением плана.')
     elif gap >= 1:
-        act = (f'Что делать: собственных организаций {C.esc(unit_label)} на '
-               f'отклонение не хватает — закрывать компенсацией за счёт других '
-               f'сегментов.')
+        act = ('Что делать: отобранные организации закрывают отклонение не '
+               'полностью — отрабатывать список целиком и пополнять воронку '
+               'новыми кандидатами.')
     elif bad:
         act = ('Что делать: план в целом выполняется, держать под контролем '
                'сегменты с невыполнением.')
@@ -1378,7 +1378,8 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         for s in c["segs_bad"]:
             cov = s["coverage"]
             if not s["n_avail"]:
-                notes.append(f'в {s["seg"]} собственных организаций нет, нужна компенсация за счёт других сегментов')
+                notes.append(f'в {s["seg"]} отобранных организаций нет — '
+                             f'нужны новые кандидаты в воронку')
             elif cov is not None and cov < 0.999:
                 notes.append(f'в {s["seg"]} хватает на {cov*100:.0f}% ({s["n_avail"]} орг)')
         note_html = (f'<div class="g-act">{C.esc(" · ".join(notes[:3]))}</div>'
@@ -1391,11 +1392,12 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
                                  f'{", ".join(s["seg"] for s in c["segs_bad"][:3])}', "warn")
         else:
             head_badge = C.badge("−" + C.fmt_num(c["gap"]) + " чел до плана", st)
-        filler = (f' · компенсация за счёт других сегментов: <b>{c["filler_n"]}</b> орг '
-                  f'(+{C.fmt_num(c["filler_fl"])})' if c["filler_n"] else "")
+        filler = (f' · из них в других сегментах подразделения: '
+                  f'<b>{c["filler_n"]}</b> орг (+{C.fmt_num(c["filler_fl"])})'
+                  if c["filler_n"] else "")
         cover = (c["fl_need"] / c["gap_seg"]) if c["gap_seg"] > 0 else None
         short = (f' · покрывает <b>{cover*100:.0f}%</b> отклонения, '
-                 f'собственный потенциал {unit} исчерпан'
+                 f'остальное — за счёт новых кандидатов'
                  if cover is not None and cover < 0.999 else "")
         do = (
             f'<div class="g-do">Итого под план: <b>{c["n_need"]}</b> организаций '
@@ -1656,16 +1658,16 @@ def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str
         '<button type="button" class="gd-close" onclick="tbDynClose()" '
         'aria-label="Закрыть">×</button></div></div>'
         f'<div class="gd-block"><h4>Прогноз на {C.month_ru(d.get("label", ""))}</h4>'
-        '<p class="g-act" style="margin:0 0 10px">Прогноз берётся из витрины '
-        'готовым — это то же число, что стоит в плашке каждого банка. Ранг — '
-        'место по прогнозному выполнению плана: витрина ранжирует банки только '
-        'по закрытому месяцу, поэтому здесь банки упорядочены по колонке '
-        '«выполнение» этой же таблицы.</p>'
+        '<p class="g-act" style="margin:0 0 10px">Прогноз приходит готовым — '
+        'это то же число, что стоит в плашке каждого банка. Ранг — место по '
+        'прогнозному выполнению плана: готового ранга по прогнозу нет, он '
+        'считается только по закрытому месяцу, поэтому здесь банки упорядочены '
+        'по колонке «выполнение» этой же таблицы.</p>'
         f'{fc_tbl}</div>'
         f'<div class="gd-block"><h4>Факт '
         f'{C.month_ru(d.get("closed_label", ""), "gen")}</h4>'
-        '<p class="g-act" style="margin:0 0 10px">Ранг — витринный: то же место, '
-        'что стоит в плашке прогноза строкой «ранг ТБ».</p>'
+        '<p class="g-act" style="margin:0 0 10px">Ранг — то же место, что стоит '
+        'в плашке прогноза строкой «ранг ТБ».</p>'
         f'{cl_tbl}</div>'
         f'{dyn}'
         '</div></dialog>'
@@ -1948,7 +1950,7 @@ def _cell_dialog() -> str:
             '<b>Кто в список не попадает.</b> Организации, где за год стало '
             'больше или столько же: ячейку раскрывают, чтобы понять, где потеряли '
             'людей, и выросшие клиенты на этот вопрос не отвечают. Отсекается '
-            'также снижение меньше одного человека — это округление витрины.',
+            'также снижение меньше одного человека — это округление.',
             '<b>Сколько показано.</b> Десять крупнейших снижений. Сколько '
             'организаций в ячейке просело всего и на сколько человек — в строке '
             'под заголовком, чтобы часть не принимали за целое.',
@@ -2781,7 +2783,7 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
         ins = a.insights.get((int(r.new_gosb_id), int(r.inn)), {})
         reason = ins.get("reason") or r.reason
         if bool(getattr(r, "filler", False)):
-            reason = "компенсация за счёт другого сегмента · " + reason
+            reason = "организация другого сегмента подразделения · " + reason
         rows.append({
             "inn": int(r.inn), "company": (getattr(r, "company_name", "") or "")[:48],
             "lever": r.lever,
