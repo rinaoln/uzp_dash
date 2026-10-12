@@ -822,6 +822,23 @@ def _trend_verdict(a: analyze.Analysis) -> str:
     return C.card('<div class="ai-head">Вывод</div>' + body, cls="ai")
 
 
+def _method_note() -> str:
+    """Почему ранние месяцы выполнены ровно на 100%.
+
+    Методика сменилась в середине года, и без этой строки читатель видит у всех
+    банков одинаковые 100% и считает это ошибкой расчёта. Строка короткая и
+    стоит там же, где числа: сноска внизу раздела до читателя не доходит.
+    """
+    y, m, _ = queries.METRIC_SWITCH_DT.split("-")      # 2026-07-01 → «июля 2026»
+    cut = C.month_ru(f"{m}.{y}", "gen")
+    return (f'<p class="gd-note" style="margin:0 0 10px">С {cut} выполнение '
+            f'считается по балансу и закреплению. За более ранние месяцы — '
+            f'по прежней методике, только по балансу: план там приравнивался '
+            f'к факту, поэтому выполнение равно 100% по построению, а не по '
+            f'результату работы. На накопительное выполнение за год влияют '
+            f'обе части.</p>')
+
+
 def _trend_section(a: analyze.Analysis) -> str:
     """Раздел «Динамика за 12 месяцев» — по области уровня целиком.
 
@@ -836,7 +853,7 @@ def _trend_section(a: analyze.Analysis) -> str:
     # дважды подряд незачем.
     return C.section(
         "Динамика за 12 месяцев",
-        _trend_verdict(a) + C.card(_trend_block(a.trend, "")),
+        _trend_verdict(a) + _method_note() + C.card(_trend_block(a.trend, "")),
         eyebrow="Ретроспектива портфеля",
         desc="Как портфель получателей менялся месяц к месяцу и в каких месяцах "
              "план не выполнялся — чтобы отличить разовое отклонение от "
@@ -1623,6 +1640,7 @@ def _tb_portfolio_dialog(sb: analyze.Analysis, preps: list, b: bank.Bank) -> str
                'столбец — месяц. Цвет тот же, что везде в отчёте. Ранг — место '
                'в сети по выполнению плана за закрытый месяц '
                f'{C.esc(d.get("closed_label", ""))}.</p>'
+               + _method_note()
                + C.heat_matrix(rows_id_label, months, cells, unit_head="ТБ",
                                ranks=sb.ranks or None)
                + '</div>')

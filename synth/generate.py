@@ -21,7 +21,8 @@ from uzp_dash import config
 # Метрики берутся ИЗ ДЭША, а не дублируются числами: если id разъедутся, синтетика
 # молча наполнит витрину не теми метриками, отчёт покажет пустоту, и выглядеть это
 # будет как поломка кода, а не как рассинхрон двух констант.
-from uzp_dash.dashboards.tb_health.queries import METRIC_FOT, METRIC_RECIPIENTS
+from uzp_dash.dashboards.tb_health.queries import (METRIC_FOT, METRIC_RECIPIENTS,
+                                                   METRIC_RECIPIENTS_H1)
 from uzp_dash.db import read_sql
 
 RNG = np.random.default_rng(42)
@@ -441,7 +442,13 @@ def _agg(tidy: pd.DataFrame, level_field: str, level_name: str, by_segment: bool
                 "pred_r")
     fot = _rows(a, METRIC_FOT, level_name, level_field, "fot_plan", "fot_fact",
                 "pred_fot")
-    return pd.concat([rec, fot], ignore_index=True)
+    # Прежняя метрика получателей — ею считаются месяцы до смены методики.
+    # План там приравнивался к факту, поэтому выполнение равно 100%: на проме
+    # эти месяцы выглядят именно так, и отчёт должен уметь их показывать.
+    a_h1 = a.assign(plan_h1=a["fact_r"])
+    rec_h1 = _rows(a_h1, METRIC_RECIPIENTS_H1, level_name, level_field,
+                   "plan_h1", "fact_r")
+    return pd.concat([rec, rec_h1, fot], ignore_index=True)
 
 
 def _rows(a: pd.DataFrame, metric_id: int, level_name: str,

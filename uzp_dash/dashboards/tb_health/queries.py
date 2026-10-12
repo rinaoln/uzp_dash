@@ -31,6 +31,16 @@ METRIC_FOT = 1020389          # Обьем ФОТ(по балансу), в ру�
 METRIC_RECIPIENTS = 1020377   # Портфель зарплатных ФЛ до ИНН(по балансу), чел
 # Метрика витрины премирования: «Новые получатели b2b» — факт привлечения по сделкам
 METRIC_NEW_RECIPIENTS_B2B = 1000636
+# ПОМЕСЯЧНАЯ ДИНАМИКА ЧИТАЕТ ДВЕ МЕТРИКИ. С июля 2026 методика выполнения плана
+# изменилась: до этого получателей считали только по балансу, с этого месяца —
+# по балансу И закреплению. Сравнивать месяцы одной метрикой нельзя: в первом
+# полугодии план по прежней методике приравнивался к факту, и выполнение там
+# близко к 100% по построению, а не по результату работы.
+#
+# Поэтому месяцы до границы берутся прежней метрикой, с границы — текущей.
+# Накопительное выполнение за год из этих же чисел и собирается.
+METRIC_RECIPIENTS_H1 = 12400196   # Количество уникальных получателей до ИНН
+METRIC_SWITCH_DT = "2026-07-01"   # первый месяц новой методики
 # В факт идут только зачтённые строки: остальное — фрод и «для информации, не
 # участвует в расчёте kpi», реального привлечения они не означают
 MOTIV_COUNTED = "учтено"
@@ -201,22 +211,24 @@ tb AS (SELECT DISTINCT tb_id FROM {schema}.uzp_dim_gosb
 -- Берём ту же строку, что и плашка уровня (_verdict): с наибольшим фактом.
 mm AS (
   SELECT m.level_name, m.level_id, m.end_dt, m.plan_amt, m.fact_amt,
-         m.execution_percent,
+         m.execution_percent, m.metric_id,
          row_number() OVER (PARTITION BY m.level_name, m.level_id, m.end_dt
                             ORDER BY m.fact_amt DESC, m.plan_amt DESC) AS rn,
          count(*)    OVER (PARTITION BY m.level_name, m.level_id, m.end_dt) AS n_rows
   FROM {schema}.uzp_dwh_metrics m
-  WHERE m.period_type='m' AND m.metric_id=:m_rcp
+  WHERE m.period_type='m'
+    AND ((m.end_dt >= CAST(:metric_switch AS date) AND m.metric_id = :m_rcp)
+      OR (m.end_dt <  CAST(:metric_switch AS date) AND m.metric_id = :m_rcp_h1))
     AND COALESCE(m.extended_dim_1,1)=1
     AND m.level_name IN ('sb','tb','gosb')
     AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
 )
 SELECT 'sb' AS level_name, mm.level_id AS unit_id, mm.end_dt,
-       mm.plan_amt, mm.fact_amt, mm.execution_percent, mm.n_rows
+       mm.plan_amt, mm.fact_amt, mm.execution_percent, mm.n_rows, mm.metric_id
 FROM mm WHERE mm.rn=1 AND mm.level_name='sb'
 UNION ALL
 SELECT 'tb' AS level_name, mm.level_id AS unit_id, mm.end_dt,
-       mm.plan_amt, mm.fact_amt, mm.execution_percent, mm.n_rows
+       mm.plan_amt, mm.fact_amt, mm.execution_percent, mm.n_rows, mm.metric_id
 FROM mm JOIN tb ON tb.tb_id = mm.level_id
 WHERE mm.rn=1 AND mm.level_name='tb'
 UNION ALL
@@ -224,7 +236,8 @@ UNION ALL
 -- Выполнение по такой сумме витрина не считает, поэтому оно считается от плана.
 SELECT 'gosb' AS level_name, g.new_gosb_id AS unit_id, mm.end_dt,
        sum(mm.plan_amt) AS plan_amt, sum(mm.fact_amt) AS fact_amt,
-       NULL AS execution_percent, max(mm.n_rows) AS n_rows
+       NULL AS execution_percent, max(mm.n_rows) AS n_rows,
+       max(mm.metric_id) AS metric_id
 FROM mm JOIN gmap g ON g.old_gosb_id = mm.level_id
 WHERE mm.rn=1 AND mm.level_name='gosb'
 GROUP BY g.new_gosb_id, mm.end_dt

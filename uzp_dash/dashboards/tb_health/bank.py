@@ -111,6 +111,8 @@ def load(ctx) -> Bank:
     progress.step(f"История плана и факта за {TREND_MONTHS} закрытых месяцев "
                   f"(банк, ТБ, ГОСБ)")
     trend = read_sql(e, Q.MONTHLY_TREND, {"m_rcp": Q.METRIC_RECIPIENTS,
+                                          "m_rcp_h1": Q.METRIC_RECIPIENTS_H1,
+                                          "metric_switch": Q.METRIC_SWITCH_DT,
                                           "trend_from": d["trend_from"],
                                           "ref_closed": d["ref_closed"]})
     trend["end_dt"] = pd.to_datetime(trend["end_dt"]).dt.date
@@ -686,6 +688,21 @@ def _log_trend(trend: pd.DataFrame, d: dict) -> None:
                 f"несколько строк на месяц (до {int(dup['n_rows'].max())} на одну). "
                 f"Взята строка с наибольшим фактом — та же, что в плашке уровня; "
                 f"суммировать их нельзя: план и факт лежат в разных строках")
+    # Чем посчитан каждый месяц. Методика сменилась в середине окна, и если
+    # прежней метрики за ранние месяцы в витрине нет, история просто окажется
+    # короче — это должно быть видно в логе, а не только на графике.
+    if "metric_id" in trend.columns:
+        for mid, sub in trend.groupby("metric_id"):
+            how = ("баланс и закрепление" if int(mid) == Q.METRIC_RECIPIENTS
+                   else "только баланс" if int(mid) == Q.METRIC_RECIPIENTS_H1
+                   else "методика неизвестна")
+            progress.done(f"Динамика: метрика {int(mid)} ({how}) — "
+                          f"{sub['end_dt'].nunique()} мес · "
+                          f"{sub['end_dt'].min()} … {sub['end_dt'].max()}")
+        if Q.METRIC_RECIPIENTS_H1 not in set(trend["metric_id"].astype(int)):
+            progress.warn(f"Динамика: метрики {Q.METRIC_RECIPIENTS_H1} "
+                          f"(выполнение до {Q.METRIC_SWITCH_DT}) в витрине за это "
+                          f"окно нет — ранние месяцы в графики не попадут")
     for lvl in ("sb", "tb", "gosb"):
         sub = trend[trend["level_name"] == lvl]
         if sub.empty:
