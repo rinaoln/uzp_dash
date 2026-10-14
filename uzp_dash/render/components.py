@@ -117,7 +117,7 @@ def heat_bg(exec_pct: float | None) -> str:
 
 def heat_matrix(rows_id_label: list[tuple], seg_names: list[str], cells: dict,
                 unit_head: str = "ГОСБ", ranks: dict | None = None,
-                cell_click: str = "") -> str:
+                cell_click: str = "", head_hints: dict | None = None) -> str:
     """Тепловая карта единица×сегмент.
 
     rows_id_label — [(row_key, label), ...]; cells[(row_key, seg)] = (exec, nedobor).
@@ -130,8 +130,14 @@ def heat_matrix(rows_id_label: list[tuple], seg_names: list[str], cells: dict,
     """
     rank_head = '<th class="num" title="место ТБ в сети по выполнению плана за ' \
                 'закрытый месяц">ранг</th>' if ranks else ""
+    # Подсказка в шапке: КСБ, РГС, СКМ, КФИ, БМО, ММБ — сокращения, и читатель
+    # отчёта правления не обязан держать их в голове.
+    hints = head_hints or {}
     head = (f'<th>{esc(unit_head)}</th>{rank_head}'
-            + "".join(f'<th class="num">{esc(s)}</th>' for s in seg_names))
+            + "".join(
+                f'<th class="num"'
+                + (f' title="{esc(hints[s])}"' if hints.get(s) else "")
+                + f'>{esc(s)}</th>' for s in seg_names))
     rows = []
     for key, label in rows_id_label:
         tds = [f'<td>{esc(label)}</td>']
@@ -269,6 +275,28 @@ def _grid(ticks: list[float], y_of, fmt=lambda v: fmt_num(v)) -> str:
     return "".join(out)
 
 
+def no_plan_all(rows: list[dict]) -> bool:
+    """Все месяцы графика — прежней методики, где план приравнен к факту.
+
+    Такой месяц с планом сравнивать нельзя: отклонение в нём ровно нулевое по
+    построению, и ряд «+0» под каждым месяцем читался как выполненный план.
+    """
+    return bool(rows) and all(r.get("no_plan") for r in rows)
+
+
+def _axis_delta(rows: list[dict], i: int):
+    """Что подписать под месяцем: отклонение от плана или изменение к прошлому.
+
+    Где план есть — отклонение от него, это главный вопрос к месяцу. Где плана
+    по текущей методике не было — изменение портфеля к прошлому месяцу: это
+    единственное сравнение, которое в таком месяце осмысленно.
+    """
+    r = rows[i]
+    if not r.get("no_plan"):
+        return r["fact"] - r["plan"]
+    return None if i == 0 else r["fact"] - rows[i - 1]["fact"]
+
+
 def _months_axis(rows: list[dict], row_label: str = "") -> str:
     """Два ряда подписей под графиком: месяц и его отклонение от плана.
 
@@ -281,6 +309,8 @@ def _months_axis(rows: list[dict], row_label: str = "") -> str:
     n = len(rows)
     every = 1 if n <= 12 else 2
     out = []
+    if row_label and no_plan_all(rows):
+        row_label = "± к прошлому месяцу, чел"
     if row_label:
         out.append(f'<text x="{_PL - 8}" y="{_CH - 14}" text-anchor="end" '
                    f'font-size="10" fill="var(--text-2)">{esc(row_label)}</text>')
@@ -290,7 +320,9 @@ def _months_axis(rows: list[dict], row_label: str = "") -> str:
         x = _x_of(i, n)
         out.append(f'<text x="{x:.1f}" y="{_CH - 32}" text-anchor="middle" '
                    f'font-size="11" fill="var(--text-2)">{esc(r["short"])}</text>')
-        dv = r["fact"] - r["plan"]
+        dv = _axis_delta(rows, i)
+        if dv is None:
+            continue
         col = "var(--good)" if dv >= 0 else "var(--bad)"
         sign = "+" if dv >= 0 else "−"
         out.append(f'<text x="{x:.1f}" y="{_CH - 14}" text-anchor="middle" '
@@ -311,7 +343,10 @@ def trend_plan_fact(rows: list[dict]) -> str:
     """
     if not rows:
         return ""
-    vals = [v for r in rows for v in (r["plan"], r["fact"]) if v]
+    # Месяцы прежней методики в масштаб по плану не входят: план там равен факту,
+    # и отдельной линией он только дублировал бы факт
+    vals = [v for r in rows for v in
+            ((r["fact"],) if r.get("no_plan") else (r["plan"], r["fact"])) if v]
     if not vals:
         return ""
     lo, hi = min(vals), max(vals)
@@ -327,16 +362,23 @@ def trend_plan_fact(rows: list[dict]) -> str:
                         for i, r in enumerate(rows))
 
     fact_pts = path("fact")
-    plan_pts = path("plan")
+    # пунктир плана идёт только по месяцам, где план есть: у прежней методики он
+    # совпал бы с фактом точка в точку и читался как «план выполнен ровно»
+    plan_pts = " ".join(f'{_x_of(i, n):.1f},{y_of(r["plan"]):.1f}'
+                        for i, r in enumerate(rows) if not r.get("no_plan"))
+    has_plan = len([r for r in rows if not r.get("no_plan")]) >= 2
     dots, vals = [], []
     for i, r in enumerate(rows):
         x, y = _x_of(i, n), y_of(r["fact"])
         ex = (r["fact"] / r["plan"] * 100) if r["plan"] else 0
+        tip = (f'факт {fmt_num(r["fact"])} · план по текущей методике '
+               f'не устанавливался' if r.get("no_plan") else
+               f'факт {fmt_num(r["fact"])} · план {fmt_num(r["plan"])} · '
+               f'выполнение {ex:.0f}%')
         dots.append(
             f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="var(--accent)" '
             f'stroke="var(--surface-solid)" stroke-width="2">'
-            f'<title>{esc(r["label"])}: факт {fmt_num(r["fact"])} · план '
-            f'{fmt_num(r["plan"])} · выполнение {ex:.0f}%</title></circle>')
+            f'<title>{esc(r["label"])}: {esc(tip)}</title></circle>')
         # значение факта над точкой: управляющему нужна величина, а не только форма
         # кривой. Ниже плана — подпись уходит вверх, выше — тоже вверх, но от точки,
         # поэтому линия плана её не перечёркивает
@@ -349,12 +391,15 @@ def trend_plan_fact(rows: list[dict]) -> str:
         ly_p = ly_f + 14
     ends = (f'<text x="{_CW - _PR + 6}" y="{ly_f + 4:.1f}" font-size="12" '
             f'font-weight="700" fill="var(--accent)">факт</text>'
-            f'<text x="{_CW - _PR + 6}" y="{ly_p + 4:.1f}" font-size="12" '
-            f'font-weight="600" fill="var(--text-2)">план</text>')
+            + (f'<text x="{_CW - _PR + 6}" y="{ly_p + 4:.1f}" font-size="12" '
+               f'font-weight="600" fill="var(--text-2)">план</text>'
+               if has_plan else ""))
+    under = ("изменение портфеля к прошлому месяцу" if no_plan_all(rows)
+             else "отклонение факта от плана")
     cut = ("" if lo <= 0 else
            '<div class="ch-note">Шкала не начинается с нуля: масштаб подобран под '
            'размах изменений. Высота линии над осью величину портфеля не отражает. '
-           'Под месяцем — отклонение факта от плана.</div>')
+           f'Под месяцем — {under}.</div>')
     # единицы у шкалы и у нижнего ряда: без подписи числа на графике читаются как
     # «какие-то значения», а получатели (чел) и отклонение (тоже чел, но со знаком)
     # стоят в разных местах и в одну единицу не сливаются
@@ -367,8 +412,9 @@ def trend_plan_fact(rows: list[dict]) -> str:
         f'отклонение от плана">'
         + unit
         + _grid(_ticks(lo, hi), y_of)
-        + f'<polyline points="{plan_pts}" fill="none" stroke="var(--text-2)" '
-          f'stroke-width="2" stroke-dasharray="6 4" stroke-linejoin="round"/>'
+        + (f'<polyline points="{plan_pts}" fill="none" stroke="var(--text-2)" '
+           f'stroke-width="2" stroke-dasharray="6 4" stroke-linejoin="round"/>'
+           if has_plan else "")
         + f'<polyline points="{fact_pts}" fill="none" stroke="var(--accent)" '
           f'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
         + "".join(dots) + "".join(vals) + ends
@@ -429,8 +475,14 @@ def trend_table(rows: list[dict]) -> str:
     """
     if not rows:
         return ""
-    body = []
+    body, no_plan_n = [], 0
     for r in rows:
+        if r.get("no_plan"):
+            no_plan_n += 1
+            body.append([esc(r["label"]), fmt_num(r["fact"]),
+                         '<span style="color:var(--text-2)">план не '
+                         'устанавливался</span>', "—", "—"])
+            continue
         dv = r["fact"] - r["plan"]
         ex = (r["fact"] / r["plan"]) if r["plan"] else None
         col = "var(--good)" if dv >= 0 else "var(--bad)"
@@ -438,10 +490,15 @@ def trend_table(rows: list[dict]) -> str:
                      f'<b style="color:{col}">{"+" if dv >= 0 else "−"}'
                      f'{fmt_num(abs(dv))}</b>',
                      f'{ex * 100:.0f}%' if ex is not None else "—"])
+    note = ('<p class="ch-note" style="margin:6px 0 0">План по текущей методике '
+            f'(баланс и закрепление) есть не во всех месяцах: в {no_plan_n} '
+            'из них выполнение считалось только по балансу и план приравнивался '
+            'к факту, поэтому сравнивать его с фактом нечем.</p>'
+            if no_plan_n else "")
     return ('<details class="ch-tbl"><summary>Показать в табличном виде</summary>'
             + table(["месяц", "факт, чел", "план, чел", "отклонение, чел",
                      "выполнение"], body, num_cols=[1, 2, 3, 4])
-            + '</details>')
+            + note + '</details>')
 
 
 def narrative_html(text: str) -> str:

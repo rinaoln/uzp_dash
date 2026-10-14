@@ -372,9 +372,15 @@ def _assemble(b: Bank, tb_short: str, tb_id: int, tb_full: str, ref_date: str,
         f"{pf['out_kept']:.0f} · пайплайн {pf['pipe']:.0f} фл")
 
     matrix["is_failing"] = [_failing_seg(r.nedobor) for r in matrix.itertuples()]
+    # Доля строки — от СУММЫ ОТКЛОНЕНИЙ ВСЕХ ячеек уровня, а не от отклонения
+    # области. Отклонение области может быть нулевым (план в целом выполняется, а
+    # отдельные пары «подразделение × сегмент» его не выполняют), и деление на
+    # него давало проценты в тысячи: 20 687 чел превращались в «2 068 675%».
+    # Знаменатель от ячеек есть всегда, и доли по колонке складываются в 100%.
+    gap_cells = float(matrix.loc[matrix.nedobor > 0, "nedobor"].sum())
     top_cells = (matrix[matrix.nedobor > 0]
                  .sort_values("nedobor", ascending=False)
-                 .assign(share=lambda x: x.nedobor / max(gap_rcp, 1))
+                 .assign(share=lambda x: x.nedobor / gap_cells if gap_cells else 0.0)
                  .head(8))
     seg_gaps = {(int(r.unit_id), r.seg_name): float(r.nedobor)
                 for r in matrix.itertuples() if r.is_failing}
@@ -797,7 +803,16 @@ def _trend_rows(trend: pd.DataFrame, level: str, unit_id: int | None = None) -> 
              # выполнение витрины — то же число, что в плашке уровня; у ГОСБ его
              # нет, там выполнение считается от плана
              "exec": (float(r.execution_percent)
-                      if pd.notna(getattr(r, "execution_percent", None)) else None)}
+                      if pd.notna(getattr(r, "execution_percent", None)) else None),
+             # ДО СМЕНЫ МЕТОДИКИ ПЛАНА ПО СУТИ НЕ БЫЛО.
+             #
+             # В тех месяцах выполнение считалось только по балансу, и план там
+             # приравнен к факту: выполнение выходит ровно 100% по построению.
+             # Показывать такой месяц как выполненный план нельзя — отчёт говорил
+             # бы «план выполнен во всех 12 месяцах» о месяцах, в которых план не
+             # с чем сравнивать. Флаг несёт это дальше: график, таблица и вывод
+             # сравнивают с планом только месяцы новой методики.
+             "no_plan": str(pd.Timestamp(r.end_dt).date()) < Q.METRIC_SWITCH_DT}
             for r in sub.itertuples()]
 
 
@@ -883,10 +898,14 @@ def _tb_plan_row(a: Analysis) -> dict:
     for s in segs.values():
         s["coverage"] = (s["fl_need"] / s["gap"]) if s["gap"] > 0 else None
     keys = ("gap_seg", "n_need", "fl_need", "fot_need", "n_attract", "fl_attract",
-            "n_return", "fl_return", "filler_n", "filler_fl", "n_total", "fl_total")
+            "n_return", "fl_return", "filler_n", "filler_fl", "n_total", "fl_total",
+            # организации без активностей тоже складываются: иначе карточка ТБ
+            # показывала ноль, а внутри него у ГОСБ стояли десятки
+            "not_worked")
     out = {k: sum(float(p.get(k, 0) or 0) for p in (a.gosb_plan or {}).values())
            for k in keys}
-    for k in ("n_need", "n_attract", "n_return", "filler_n", "n_total"):
+    for k in ("n_need", "n_attract", "n_return", "filler_n", "n_total",
+              "not_worked"):
         out[k] = int(out[k])
     out["segs"] = sorted(segs.values(), key=lambda s: -s["gap"])
     return out
@@ -2388,7 +2407,10 @@ def _unit_cards(gosb_gap: pd.DataFrame, matrix: pd.DataFrame, to_work: pd.DataFr
             "n_return": int(p.get("n_return", 0)), "fl_return": float(p.get("fl_return", 0.0)),
             "filler_n": int(p.get("filler_n", 0)), "filler_fl": float(p.get("filler_fl", 0.0)),
             "n_total": int(p.get("n_total", 0)), "fl_total": float(p.get("fl_total", 0.0)),
-            "not_worked": int((~sel.worked).sum()) if not sel.empty else 0,
+            # на уровне банка своего отбора организаций нет (он решается уровнем
+            # ТБ), поэтому число берётся из уже посчитанной потребности единицы
+            "not_worked": (int((~sel.worked).sum()) if not sel.empty
+                           else int(p.get("not_worked", 0))),
             "act": fg.get(nid, {"act_n": 0, "success": 0.0, "worked_orgs": 0}),
         })
     return cards

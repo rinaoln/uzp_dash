@@ -375,6 +375,11 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
   /* экран выбора раздела — способ навигации, а не содержание: на бумаге
      разделы идут подряд, плашки и строка возврата не печатаются */
   .hub-wrap, .hub-back { display: none !important; }
+  /* сводка руководителя на бумаге не рвётся: это четыре строки, из-за которых
+     отчёт и открывают, и половина их на другом листе бессмысленна */
+  #print-root .es { break-inside: avoid; }
+  #print-root .of-kpis { display: block !important; }
+  #print-root .of-kpi { break-inside: avoid; margin-bottom: 6px; }
   .lvl[data-hub-view] > section { display: block !important; }
 
   /* --- РАЗБИВКА НА СТРАНИЦЫ ---
@@ -723,6 +728,7 @@ body.pdf-measure #print-root {
 }
 body.pdf-measure #print-root .gcards,
 body.pdf-measure #print-root .grid,
+body.pdf-measure #print-root .of-kpis,
 body.pdf-measure #print-root .hub { display: block !important; }
 body.pdf-measure #print-root .of-tabs { display: none !important; }
 body.pdf-measure #print-root .of-pane[hidden] { display: block !important; }
@@ -736,3 +742,221 @@ body.pdf-measure #print-root .of-pane[hidden] { display: block !important; }
    отступы, чтобы блок не слипался с шапкой и кнопкой. */
 .gd .gd-sum { margin: 14px 0 0; }
 .gd .gd-sum + .mgmt-trigger { margin-top: 12px; }
+
+/* ============================================================
+   Сводка для руководителя на первом экране
+   ============================================================
+   Первый экран отвечал только на «сколько процентов плана». Концентрация
+   отклонения, год к году и состояние исполнения лежали внутри разделов, и
+   руководитель уходил с экрана без суждения. Сводка стоит внутри плашки
+   прогноза, под её числами: читается сверху вниз, строка — один вопрос. */
+.es {
+  margin: 14px 0 2px; padding: 12px 0 0;
+  border-top: 1px solid var(--separator);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.es-row { display: grid; grid-template-columns: 148px 1fr; gap: 12px; }
+.es-row > i {
+  font-style: normal; font-size: 11.5px; font-weight: 700; line-height: 1.5;
+  letter-spacing: 0.02em; color: var(--text-2); text-transform: uppercase;
+}
+.es-row > span { font-size: 14.5px; line-height: 1.45; color: var(--text); }
+/* просьбы к руководству — нумерованным списком: это пункты решения, а не текст */
+.es-ask ol { margin: 0; padding-left: 18px; }
+.es-ask li { font-size: 14px; line-height: 1.45; margin-bottom: 4px; }
+.es-ask li:last-child { margin-bottom: 0; }
+@media (max-width: 760px) {
+  .es-row { grid-template-columns: 1fr; gap: 2px; }
+}
+/* в плашке прогноза свои размеры шрифта — сводку они не должны уменьшать до
+   служебной подписи: это главный текст экрана после вердикта */
+.forecast-panel .hero .es-row > span,
+.forecast-panel .hero .es-ask li { font-size: 14px; }
+.forecast-panel .hero .es-row > span b { padding: 0; background: none; }
+
+/* Серый фон у чисел плашки прогноза убран: число в светлой плашке выглядело
+   полем ввода. Цветные дельты фон сохраняют — там он несёт статус. */
+.forecast-panel .row2 b:not([style]),
+.forecast-panel .kpi .foot b:not([style]) {
+  background: none; padding: 0; margin-left: 0;
+}
+
+/* ============================================================
+   Шапка отчёта: заголовок не занимает треть экрана
+   ============================================================ */
+.wrap > header h1 { font-size: clamp(23px, 2.6vw, 30px); margin: 0 0 4px; }
+.wrap > header .eyebrow { text-transform: none; font-size: 12.5px; }
+.wrap > header .sub { font-size: 15px; margin: 0; }
+.wrap > header .rep-meta { font-size: 13px; }
+/* подзаголовок и строка свежести — одной строкой: вместе они и есть «что это
+   за отчёт и на какую дату» */
+@media (min-width: 760px) {
+  .wrap > header .sub, .wrap > header .rep-meta { display: inline; }
+  .wrap > header .rep-meta::before { content: " · "; }
+}
+
+/* ============================================================
+   Строка памятки под вкладками
+   ============================================================
+   Памятка больше не открывается сама (см. _BOOT_JS): вместо модального окна на
+   девять шагов — две ссылки, которые ведут в начало инструкции и в «Что
+   нового». */
+.help-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 14px;
+  margin: 0 0 16px; font-size: 13px; color: var(--text-2);
+}
+.hb-l {
+  font: inherit; font-weight: 600; color: var(--accent);
+  background: none; border: 0; padding: 0; cursor: pointer;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.hb-l:hover { text-decoration-thickness: 2px; }
+@media print { .help-bar { display: none !important; } }
+
+/* ============================================================
+   Плашки разделов: номер, тревога, отметка о просмотре, прогресс
+   ============================================================ */
+.hub-n b.warn { color: var(--warn); }
+/* номер — это порядок чтения отчёта, а не украшение: разделы идут
+   последовательностью «где → кто → что потеряли → почему → чем закрыть» */
+.hub-i {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; margin-right: 8px; border-radius: 7px;
+  font-size: 12.5px; font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.hub-h { align-items: center; }
+/* плашка с красным числом внутри получает красный кант: ряд одинаковых плашек
+   не говорит, с какой начинать */
+.hub-tile.alert::before { background: var(--bad); }
+.hub-tile.alert { border-color: color-mix(in srgb, var(--bad) 30%, var(--separator)); }
+/* просмотренная плашка приглушена и помечена галочкой */
+.hub-tile.seen { background: var(--surface-solid); }
+.hub-tile.seen .hub-h::after {
+  content: "✓"; flex: none; margin-left: 6px;
+  font-size: 13px; font-weight: 700; color: var(--good);
+}
+.hub-prog {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 12px; font-size: 12.5px; color: var(--text-2);
+}
+.hp-bar {
+  flex: 1 1 160px; max-width: 260px; height: 5px; border-radius: 999px;
+  background: var(--separator); overflow: hidden;
+}
+.hp-bar > i { display: block; height: 100%; background: var(--accent); }
+.hub-prog.done .hp-bar > i { background: var(--good); }
+@media print { .hub-prog { display: none !important; } }
+
+/* ============================================================
+   Переход к следующему разделу
+   ============================================================
+   В режиме одного раздела возврат на экран выбора был единственным способом
+   попасть в следующий раздел, и до последних доходили единицы. */
+.sec-next {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 10px;
+  margin: 22px 0 4px; padding-top: 14px;
+  border-top: 1px solid var(--separator);
+}
+.sn-pos { font-size: 12.5px; color: var(--text-2); }
+.sn-b {
+  font: inherit; font-size: 14px; font-weight: 650; cursor: pointer;
+  color: #fff; background: var(--accent);
+  border: 0; border-radius: 10px; padding: 9px 16px;
+}
+.sn-b:hover { filter: brightness(1.06); }
+@media print { .sec-next { display: none !important; } }
+
+/* ============================================================
+   Порядок карточек подразделений
+   ============================================================ */
+.gc-sort {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin: 0 0 12px; font-size: 12.5px; color: var(--text-2);
+}
+.gc-sort-b {
+  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  color: var(--text-2); background: var(--surface-solid);
+  border: 1px solid var(--separator); border-radius: 999px; padding: 4px 12px;
+}
+.gc-sort-b.on { color: var(--accent); border-color: var(--accent); }
+@media print { .gc-sort { display: none !important; } }
+
+/* ============================================================
+   Воронка раздела «Отток»
+   ============================================================
+   Итоги групп лежали в подписях плашек переключателя — их видно только после
+   выбора плашки. Здесь три числа стоят рядом, над списками. */
+.of-kpis {
+  display: grid; gap: 10px; margin: 2px 0 14px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+}
+.of-kpi {
+  padding: 11px 13px; border-radius: var(--radius);
+  background: var(--surface-solid); border: 1px solid var(--separator);
+  border-left: 3px solid var(--separator);
+}
+.of-kpi.bad { border-left-color: var(--bad); }
+.of-kpi.warn { border-left-color: var(--warn); }
+.of-kpi > b {
+  display: block; font-size: 21px; font-weight: 750; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.of-kpi > span { display: block; font-size: 13px; color: var(--text-2); }
+.of-kpi > i {
+  display: block; margin-top: 3px; font-style: normal;
+  font-size: 12.5px; line-height: 1.35; color: var(--text);
+}
+
+/* ============================================================
+   Открытый раздел: название один раз
+   ============================================================
+   Заголовок раздела стоял трижды — в липкой строке, в h2 и в шевроне
+   сворачивания. В режиме одного раздела сворачивать нечего: шеврон и подсказка
+   убраны, сам заголовок остаётся. */
+.lvl[data-hub-view="sec"] section.hub-on .section-details > summary {
+  pointer-events: none;
+}
+.lvl[data-hub-view="sec"] section.hub-on .st-chevron,
+.lvl[data-hub-view="sec"] section.hub-on .section-hint { display: none; }
+
+/* Кнопка «?» висит поверх правого края содержимого: на 1440 px она перекрывала
+   правую колонку таблиц и текст выводов. Отступ снизу у области набора
+   освобождает ей место. */
+.wrap { padding-bottom: 72px; }
+
+/* Подвал памятки: вместо отметки «больше не показывать» — где её найти снова
+   (автозапуска у памятки больше нет). */
+.hlp-never-note { font-size: 12.5px; color: var(--text-2); }
+
+/* ============================================================
+   Одна главная кнопка на экран
+   ============================================================
+   На первом экране спорили за внимание пять элементов: самой заметной была
+   синяя «Управление портфелем», которая ведёт в справочное окно, а главное
+   действие экрана — выбрать раздел. Обе кнопки под плашкой прогноза стали
+   контурными: они равны друг другу по смыслу (справка о портфеле и справка о
+   сети) и обе тише плашек разделов. */
+.forecast-panel > .mgmt-trigger {
+  background: var(--surface-solid);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--separator));
+  box-shadow: none;
+}
+.forecast-panel > .mgmt-trigger:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-solid));
+}
+
+/* Кнопка «Показать показатели» — служебная: год к году и факт закрытого месяца
+   теперь стоят в сводке, а сами карточки показателей остаются уточнением.
+   Синей заливкой она спорила с плашками разделов за главное действие экрана. */
+.forecast-panel .forecast-toggle {
+  background: none; color: var(--text-2); box-shadow: none;
+  border: 1px solid var(--separator); font-weight: 600;
+}
+.forecast-panel .forecast-toggle:hover {
+  color: var(--accent); border-color: var(--accent); background: none;
+}
