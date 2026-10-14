@@ -664,11 +664,12 @@ def _asks(a: analyze.Analysis, conc: dict | None) -> list:
                        f'причина не указана у {no_reason / tot_kept * 100:.0f}% '
                        f'безвозвратных потерь ({C.fmt_num(no_reason)} чел).')
     nw = sum(int(c.get("not_worked") or 0) for c in (a.gosb_cards or []))
-    need = sum(int(c.get("n_need") or 0) for c in (a.gosb_cards or []))
+    fl_nw = sum(float(c.get("fl_not_worked") or 0) for c in (a.gosb_cards or []))
     if nw:
-        out.append(f'Поставить задачи по {C.fmt_num(nw)} '
+        out.append(f'Обеспечить привлечение потенциала по {C.fmt_num(nw)} '
                    + _plural(nw, "организации", "организациям", "организациям")
-                   + ' из отобранных под план — активностей по ним нет.')
+                   + f' — это +{C.fmt_num(fl_nw)} чел к портфелю, и без них '
+                     f'отклонение от плана не закрывается.')
     return out[:3]
 
 
@@ -708,20 +709,29 @@ def _exec_summary(a: analyze.Analysis) -> str:
                       f'{abs(y["pct"]) * 100:.1f}%)</b> к тому же месяцу '
                       f'прошлого года.'))
     nw = sum(int(c.get("not_worked") or 0) for c in (a.gosb_cards or []))
+    fl_nw = sum(float(c.get("fl_not_worked") or 0) for c in (a.gosb_cards or []))
     need = sum(int(c.get("n_need") or 0) for c in (a.gosb_cards or []))
+    fl_need = sum(float(c.get("fl_need") or 0) for c in (a.gosb_cards or []))
     if need:
-        lines.append(("Исполнение",
-                      f'по <b>{C.fmt_num(nw)}</b> из {C.fmt_num(need)} '
-                      f'организаций, отобранных под план, активностей за три '
-                      f'месяца не было.' if nw else
-                      f'все {C.fmt_num(need)} организации, отобранные под план, '
-                      f'в работе: активности за три месяца есть по каждой.'))
+        # Разговор идёт о ПОТЕНЦИАЛЕ, который предстоит привлечь, а не о том,
+        # что по организации чего-то не делали: отчёт читает территориальный
+        # банк, и строка должна называть резерв, а не упрёк.
+        lines.append(("Зона внимания",
+                      f'потенциал <b>+{C.fmt_num(fl_nw)} чел</b> по '
+                      f'{C.fmt_num(nw)} из {C.fmt_num(need)} организаций, '
+                      f'отобранных под план, пока не привлечён — это '
+                      f'первоочередной резерв портфеля.' if nw else
+                      f'весь отобранный под план потенциал — '
+                      f'<b>+{C.fmt_num(fl_need)} чел</b> по {C.fmt_num(need)} '
+                      + _plural(need, "организации", "организациям",
+                                "организациям")
+                      + ' — уже в работе.'))
     asks = _asks(a, conc)
     rows = "".join(f'<div class="es-row"><i>{C.esc(k)}</i><span>{v}</span></div>'
                    for k, v in lines)
     if asks:
         items = "".join(f'<li>{x}</li>' for x in asks)
-        rows += (f'<div class="es-row es-ask"><i>Нужно от руководства</i>'
+        rows += (f'<div class="es-row es-ask"><i>Необходимые действия</i>'
                  f'<ol>{items}</ol></div>')
     return f'<div class="es">{rows}</div>'
 
@@ -1558,8 +1568,9 @@ def _gd_verdict(c: dict, det: dict, d: dict, flow: dict | None,
         # а напоминание. Поручение — это сколько организаций, что они дают и
         # сколько из них пока не в работе.
         nw = int(c.get("not_worked") or 0)
-        tail = (f'; по {nw} из них активностей за три месяца не было — '
-                f'начинать с них' if nw else '')
+        fl_nw = float(c.get("fl_not_worked") or 0)
+        tail = (f'; первоочередной резерв — непривлечённый потенциал '
+                f'+{C.fmt_num(fl_nw)} чел по {nw} из них' if nw else '')
         act = (f'Что делать: взять в работу {c["n_need"]} '
                + _plural(c["n_need"], "отобранную организацию",
                          "отобранные организации", "отобранных организаций")
@@ -1790,8 +1801,14 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         # Ключи сортировки — в самой карточке: порядок по отклонению ставится
         # разметкой, переключатель «по алфавиту» возвращает алфавитный, и ни то
         # ни другое не требует пересборки отчёта.
-        cards.append((float(c["plan"] - c["forecast"]), analyze._ru_key(c["gosb_name"]),
-                      f'<div class="card gcard {st}" '
+        # Ключ порядка — ВЫПОЛНЕНИЕ В ПРОЦЕНТАХ, а не отклонение в людях:
+        # крупное подразделение с отклонением в тысячу человек может идти на
+        # 99%, а небольшое с отклонением в сотню — на 90%, и хуже дела именно
+        # у второго. Число людей осталось вторым ключом — для равных процентов.
+        ex = float(c["exec"] or 0)
+        cards.append((ex, -float(c["plan"] - c["forecast"]),
+                      analyze._ru_key(c["gosb_name"]),
+                      f'<div class="card gcard {st}" data-exec="{ex:.6f}" '
                       f'data-gap="{c["plan"] - c["forecast"]:.0f}"{attrs}>'
                       f'{inner}</div>'))
         if det:
@@ -1802,13 +1819,14 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
     # отклонением в конец списка (ЮЗБ — последний в сети), и управляющий видел
     # его, только долистав до низа. Алфавитный порядок остался переключателем:
     # когда ищут конкретное подразделение, в голове алфавит, а не рейтинг.
-    by_gap = sorted(cards, key=lambda x: (-x[0], x[1]))
-    html = "".join(x[2] for x in by_gap)
+    by_gap = sorted(cards, key=lambda x: (x[0], x[1], x[2]))
+    html = "".join(x[3] for x in by_gap)
     sort_ui = (
         f'<div class="gc-sort" data-grid="gcards-{idx}">'
         f'<span>Порядок карточек:</span>'
-        f'<button type="button" class="gc-sort-b on" data-mode="gap">'
-        f'по отклонению от плана</button>'
+        f'<button type="button" class="gc-sort-b on" data-mode="gap" '
+        f'title="худшее выполнение плана сверху">'
+        f'по выполнению плана</button>'
         f'<button type="button" class="gc-sort-b" data-mode="abc">'
         f'по алфавиту</button></div>')
     grid = (f'{sort_ui}<div class="gcards" id="gcards-{idx}">{html}</div>'
@@ -2430,6 +2448,8 @@ _UXFIX_JS = """
         return (nx ? nx.textContent : '').localeCompare(
                (ny ? ny.textContent : ''), 'ru');
       }
+      var dx = parseFloat(x.dataset.exec || 0) - parseFloat(y.dataset.exec || 0);
+      if(dx) return dx;
       return parseFloat(y.dataset.gap || 0) - parseFloat(x.dataset.gap || 0);
     });
     cards.forEach(function(c){ grid.appendChild(c); });
@@ -3343,7 +3363,9 @@ def _potential_sb(a: analyze.Analysis, ai: str | None = None) -> str:
     cards = [c for c in (a.gosb_cards or []) if c.get("n_need")]
     if not cards:
         return ""
-    cards = sorted(cards, key=lambda c: -(c["plan"] - c["forecast"]))
+    # тот же порядок, что у карточек: худшее выполнение плана сверху
+    cards = sorted(cards, key=lambda c: (float(c["exec"] or 0),
+                                         -(c["plan"] - c["forecast"])))
     rows, tot = [], {"gap": 0.0, "gap_seg": 0.0, "n": 0, "fl": 0.0,
                      "fot": 0.0, "nw": 0}
     for c in cards:
@@ -4158,8 +4180,8 @@ def _flow_verdict_body(f: dict) -> str:
     elif donor:
         lines.append(f'Что делать: снижение в сегменте {C.esc(donor[0])} объясняется '
                      f'переходами, а не потерей клиентов — проверить по вкладке '
-                     f'«По каждому {C.esc(unit)}», прежде чем ставить задачи на '
-                     f'возврат.')
+                     f'«По каждому {C.esc(unit)}», прежде чем планировать '
+                     f'отработку на возврат.')
     else:
         lines.append(f'Что делать: подразделения с наибольшим снижением — во '
                      f'вкладке «По каждому {C.esc(unit)}»; реальные потери '

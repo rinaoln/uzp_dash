@@ -901,7 +901,7 @@ def _tb_plan_row(a: Analysis) -> dict:
             "n_return", "fl_return", "filler_n", "filler_fl", "n_total", "fl_total",
             # организации без активностей тоже складываются: иначе карточка ТБ
             # показывала ноль, а внутри него у ГОСБ стояли десятки
-            "not_worked")
+            "not_worked", "fl_not_worked")
     out = {k: sum(float(p.get(k, 0) or 0) for p in (a.gosb_plan or {}).values())
            for k in keys}
     for k in ("n_need", "n_attract", "n_return", "filler_n", "n_total",
@@ -1570,6 +1570,10 @@ def _select(to_work: pd.DataFrame, seg_gaps: dict) -> tuple[pd.DataFrame, dict]:
             "filler_n": int(len(fill)), "filler_fl": float(fill["impact_fl"].sum()),
             "n_total": int(len(g)), "fl_total": float(g["impact_fl"].sum()),
             "not_worked": int((~sel["worked"]).sum()) if "worked" in sel else 0,
+            # тот же отбор в людях: отчёт говорит о потенциале, который нужно
+            # привлечь, а не о количестве строк в списке
+            "fl_not_worked": (float(sel.loc[~sel["worked"], "impact_fl"].sum())
+                              if "worked" in sel else 0.0),
         }
     return out, plan
 
@@ -2411,6 +2415,9 @@ def _unit_cards(gosb_gap: pd.DataFrame, matrix: pd.DataFrame, to_work: pd.DataFr
             # ТБ), поэтому число берётся из уже посчитанной потребности единицы
             "not_worked": (int((~sel.worked).sum()) if not sel.empty
                            else int(p.get("not_worked", 0))),
+            "fl_not_worked": (float(sel.loc[~sel.worked, "impact_fl"].sum())
+                              if not sel.empty
+                              else float(p.get("fl_not_worked", 0.0))),
             "act": fg.get(nid, {"act_n": 0, "success": 0.0, "worked_orgs": 0}),
         })
     return cards
