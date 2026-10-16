@@ -1,30 +1,31 @@
-"""Два слайда по сегменту РГС: снижение портфеля по ведомствам и до ИНН.
+"""Два слайда по сегменту РГС: снижение портфеля в разрезах и до ИНН.
 
-Отдельный файл, а не раздел дэша: это разовая выкладка на совещание, и жить
-она должна своей жизнью — своя вёрстка под лист (16:9 на экране, A4 альбомный
-на печати), никакой навигации и никакого LLM.
+Отдельный дэш, а не раздел отчёта: это выкладка на совещание, и вёрстка у неё
+своя — лист 16:9 на экране, A4 альбомный на печати, никакой навигации и никакого
+LLM. Запускается как любой другой дэш: generate_dashboard("rgs_slides", …).
 
 ЧТО СЧИТАЕТСЯ. Портфель получателей по организации на конец месяца —
-`uzp_dwh_company_holding_metric.current_fl_qty`, строки `org_type='inn'`.
-Уровень витрины берём `sb`: на нём организация лежит ОДНОЙ строкой, а на уровне
-ГОСБ она разложена по подразделениям и в сумме по сети дала бы то же число, но
-лишней арифметикой. Сверено на синтетике: sb, tb и gosb дают одинаковый итог.
+`uzp_dwh_company_holding_metric.current_fl_qty`. Витрина лежит на грейне ГОСБ
+(единственный уровень на проме, см. queries.py), поэтому строки сворачиваются до
+пары «территориальный банк × организация»: так итог по сети равен сумме банков,
+а организация, обслуживаемая в двух банках, попадает в каждый своей частью.
 
 ТРИ МЕСЯЦА, А НЕ ДВА. Чтобы показать снижение ЗА сентябрь и ЗА август, нужен и
-июль: снижение за август — это август минус июль. Поэтому берутся три последних
-закрытых месяца витрины, и подписаны они на слайде прямым текстом — отчёт не
-должен молча считать не те месяцы, если витрина отстаёт.
+июль: снижение за август — это август минус июль. Берутся три последних месяца
+витрины, подписаны они на слайде прямым текстом, а если между ними есть пропуск,
+слайд говорит об этом отдельной строкой — отчёт не должен молча считать разницу
+через дырку в данных.
 
-ВЕДОМСТВО. Поля «ведомство» нет ни в одной витрине (см. uzp_dash/agency.py), оно
-выводится правилами по наименованию организации. Поле `holding_name` из
-`uzp_dim_company` показывается рядом там, где оно заполнено, — но группировка
-идёт по ведомству, потому что в госсекторе холдинг заполнен далеко не у всех.
+РАЗРЕЗЫ. «Ведомство» выводится правилами по наименованию организации: поля для
+него нет ни в одной витрине (см. uzp_dash/agency.py). «Холдинг» берётся из
+`uzp_dim_company.holding_name` — на проме он заполнен примерно у трёх четвертей
+организаций, остальные собираются в строку «Холдинг не указан». Оба разреза
+считаются всегда, переключатель на слайде только показывает нужный.
 
 ФИЛЬТР ПО ТБ. Варианты обоих слайдов считаются и верстаются ЗАРАНЕЕ, по одному
 на банк, а кнопка лишь показывает нужный. Так все правила счёта (склонения,
 проценты, доли, хвост списка) остаются в одном месте — в Python, — и печать с
-выгрузкой показывают ровно то же, что экран. Пересчёт в браузере означал бы
-вторую копию тех же правил на JavaScript.
+выгрузкой показывают ровно то же, что экран.
 """
 from __future__ import annotations
 
@@ -34,19 +35,26 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import agency, config, progress
-from .db import get_engine, read_sql
-from .render import components as C
-from .render.xlsx import XLSX_JS
-from .dashboards.tb_health import segments
+from ... import agency, config, progress
+from ...db import get_engine, read_sql
+from ...registry import Context, dashboard
+from ...render import components as C
+from ..tb_health import segments
+from . import queries as Q
 
 # Сколько организаций печатаем на слайде раскрытия. Остальные — в выгрузке:
-# на лист больше не влезает, а список из четырёхсот строк на совещании не читают.
+# на лист больше не влезает, а список из сотен строк на совещании не читают.
 TOP_N = 24
+# Сколько строк показываем в разрезе. Ведомств всего одиннадцать, а холдингов на
+# проме сотни: без потолка таблица уехала бы на три листа.
+CUT_N = 14
+# Потолок выгрузки на один банк. Книга лежит внутри html, и полный список
+# организаций сегмента раздул бы файл до десятков мегабайт.
+EXPORT_N = 1500
 
-# Ключ варианта «вся сеть». Звёздочка, а не пустая строка: пустые значения
-# data-атрибутов в разметке читаются хуже и теряются при копировании.
-ALL = "*"
+ALL = "*"                      # ключ варианта «вся сеть»
+CUTS = (("ag", "Ведомства"), ("hd", "Холдинги"))
+NO_HOLDING = "Холдинг не указан"
 
 # Большие имена сегмента из справочника организаций, которые дают короткое «РГС».
 # Берутся из общего маппинга сегментов, а не списком здесь: если на проме к
@@ -54,141 +62,130 @@ ALL = "*"
 RGS_BIG = tuple(name for name, code in segments.BIG_TO_CODE.items()
                 if segments.SHORT.get(code) == "РГС")
 
-# Последние месяцы витрины. Уровень 'sb' — тот же, по которому считается портфель.
-Q_MONTHS = """
-SELECT DISTINCT report_dt
-FROM {schema}.uzp_dwh_company_holding_metric
-WHERE level_name = 'sb' AND org_type = 'inn'
-ORDER BY report_dt DESC
-LIMIT 12
-"""
+_ASSETS = Path(__file__).resolve().parent / "assets"
 
-# Портфель организаций сегмента по трём месяцам.
-#
-# Даты перечислены поимённо, а не списком-параметром: IN :tuple требует
-# expanding-параметра и ведёт себя по-разному в разных драйверах, а трёх
-# именованных параметров достаточно и читается он однозначно.
-Q_ORGS = """
-SELECT m.org_id                        AS inn,
-       m.report_dt                     AS report_dt,
-       sum(COALESCE(m.current_fl_qty, 0)) AS fl
-FROM {schema}.uzp_dwh_company_holding_metric m
-JOIN {schema}.uzp_dim_company dc ON dc.inn = m.org_id
-WHERE m.level_name = 'sb'
-  AND m.org_type = 'inn'
-  AND dc.segment_name IN :segs
-  AND m.report_dt IN (CAST(:m0 AS date), CAST(:m1 AS date), CAST(:m2 AS date))
-GROUP BY m.org_id, m.report_dt
-"""
 
-# Справка по организации: имя, холдинг. Отдельным запросом, чтобы не тащить
-# текстовые поля через группировку по месяцам.
-Q_COMPANY = """
-SELECT dc.inn                  AS inn,
-       min(dc.company_name)    AS company_name,
-       min(dc.holding_name)    AS holding_name
-FROM {schema}.uzp_dim_company dc
-WHERE dc.segment_name IN :segs
-GROUP BY dc.inn
-"""
-
-# Территориальный банк организации на последний месяц. Организация может
-# обслуживаться в нескольких ТБ — берём тот, где её портфель больше.
-Q_TB = """
-SELECT m.org_id   AS inn,
-       m.level_id AS tb_id,
-       sum(COALESCE(m.current_fl_qty, 0)) AS fl
-FROM {schema}.uzp_dwh_company_holding_metric m
-JOIN {schema}.uzp_dim_company dc ON dc.inn = m.org_id
-WHERE m.level_name = 'tb'
-  AND m.org_type = 'inn'
-  AND dc.segment_name IN :segs
-  AND m.report_dt = CAST(:m0 AS date)
-GROUP BY m.org_id, m.level_id
-"""
-
-Q_TB_NAMES = """
-SELECT tb_id, min(tb_short_name) AS tb_short
-FROM {schema}.uzp_dim_gosb
-GROUP BY tb_id
-"""
+def _asset(name: str) -> str:
+    return (_ASSETS / name).read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
 def _months(engine, months: tuple | None) -> tuple[str, str, str]:
     """Три месяца разбора: последний, предыдущий и опорный для предыдущего.
 
-    Передали явно — берём как есть (на проме выкладка может понадобиться за
-    прошлый квартал). Не передали — три последних закрытых месяца витрины.
+    Передали явно — берём как есть (выкладка может понадобиться за прошлый
+    квартал). Не передали — три последних месяца витрины.
+
+    Пусто в витрине — не «данных нет», а конкретная причина: какие уровни и типы
+    организаций там лежат на самом деле. Именно на этом слайды и спотыкались:
+    запрос шёл по level_name='sb', которого на проме не существует.
     """
     if months:
         if len(months) != 3:
-            raise ValueError("months — ровно три даты: (сентябрь, август, июль)")
-        return tuple(str(m) for m in months)      # type: ignore[return-value]
-    df = read_sql(engine, Q_MONTHS)
-    if len(df) < 3:
-        raise RuntimeError("в витрине меньше трёх месяцев — сравнивать нечего")
-    got = [str(pd.Timestamp(d).date()) for d in df["report_dt"].head(3)]
+            raise ValueError("months — ровно три даты конца месяца: "
+                             "(сентябрь, август, июль)")
+        got = [str(m) for m in months]
+    else:
+        df = read_sql(engine, Q.MONTHS, {"lvl": Q.LEVEL, "org": Q.ORG_TYPE})
+        if len(df) < 3:
+            have = read_sql(engine, Q.LEVELS)
+            what = " · ".join(
+                f"{r.level_name}/{r.org_type}: {int(r.n)} строк, последний "
+                f"{pd.Timestamp(r.last_dt).date()}" for r in have.itertuples()
+            ) or "таблица пуста"
+            raise RuntimeError(
+                f"в витрине uzp_dwh_company_holding_metric нет трёх месяцев на "
+                f"уровне {Q.LEVEL}/{Q.ORG_TYPE}. Что в ней есть: {what}")
+        got = [str(pd.Timestamp(d).date()) for d in df["report_dt"].head(3)]
+    progress.done(f"Месяцы разбора: {got[2]} → {got[1]} → {got[0]}")
     return got[0], got[1], got[2]
 
 
-def _label(dt: str, case: str = "nom") -> str:
-    """Дата конца месяца → «сентябрь 2026»."""
-    ts = pd.Timestamp(dt)
-    return C.month_ru(f"{ts.month:02d}.{ts.year}", case)
+def _gap_note(m0: str, m1: str, m2: str) -> str:
+    """Предупреждение, если взятые месяцы идут не подряд.
+
+    Витрина грузится не каждый месяц (в профиле видны пропуски), и «снижение за
+    август» между июнем и сентябрём было бы неправдой. Молчать нельзя: числа
+    посчитаются, и ошибку никто не заметит.
+    """
+    # Сравниваем ПОРЯДКОВЫЕ номера месяцев: разность двух Period в pandas —
+    # это смещение (<MonthEnd>), а не число, и проверка «== 1» на нём всегда
+    # ложна — оговорка про пропуск вылезала бы на подряд идущих месяцах.
+    got = [pd.Timestamp(x).to_period("M").ordinal for x in (m2, m1, m0)]
+    if got[1] - got[0] == 1 and got[2] - got[1] == 1:
+        return ""
+    progress.done("ВНИМАНИЕ: месяцы витрины идут не подряд — на слайде стоит "
+                  "оговорка, что это разница между доступными месяцами")
+    return ('<p class="warn">В витрине есть не все месяцы подряд: показана '
+            'разница между теми, что загружены, а не строго между соседними '
+            'месяцами.</p>')
+
+
+def _segments_present(engine) -> str:
+    """Какие сегменты есть в справочнике — для сообщения об ошибке."""
+    try:
+        df = read_sql(engine, Q.SEGMENTS)
+    except Exception:                       # noqa: BLE001 — это путь ошибки
+        return "прочитать справочник не удалось"
+    return " · ".join(f"{r.segment_name} ({int(r.n)})"
+                      for r in df.head(12).itertuples())
 
 
 def _load(engine, m0: str, m1: str, m2: str) -> pd.DataFrame:
-    """Организации сегмента с портфелем по трём месяцам и признаками разбора."""
+    """Портфель сегмента по трём месяцам на грейне (ТБ, организация)."""
     segs = tuple(RGS_BIG)
-    p = {"segs": segs, "m0": m0, "m1": m1, "m2": m2}
-    raw = read_sql(engine, Q_ORGS, p)
+    p = {"segs": segs, "m0": m0, "m1": m1, "m2": m2,
+         "lvl": Q.LEVEL, "org": Q.ORG_TYPE}
+    raw = read_sql(engine, Q.ORGS, p)
     if raw.empty:
-        raise RuntimeError(f"по сегменту РГС за {m0}, {m1}, {m2} в витрине пусто")
+        raise RuntimeError(
+            f"по сегменту {', '.join(RGS_BIG)} за {m2}, {m1}, {m0} в витрине "
+            f"пусто (уровень {Q.LEVEL}/{Q.ORG_TYPE}). Сегменты в справочнике "
+            f"организаций: {_segments_present(engine)}")
     raw["report_dt"] = [str(pd.Timestamp(x).date()) for x in raw["report_dt"]]
-    wide = (raw.pivot_table(index="inn", columns="report_dt", values="fl",
-                            aggfunc="sum")
+    wide = (raw.pivot_table(index=["tb_short", "inn"], columns="report_dt",
+                            values="fl", aggfunc="sum")
                .reindex(columns=[m2, m1, m0]).fillna(0.0).reset_index())
-    wide.columns = ["inn", "fl2", "fl1", "fl0"]
+    wide.columns = ["tb_short", "inn", "fl2", "fl1", "fl0"]
 
-    comp = read_sql(engine, Q_COMPANY, {"segs": segs})
+    comp = read_sql(engine, Q.COMPANY, {"segs": segs})
     wide = wide.merge(comp, on="inn", how="left")
-
-    tb = read_sql(engine, Q_TB, p)
-    if not tb.empty:
-        names = read_sql(engine, Q_TB_NAMES)
-        tb = (tb.sort_values("fl", ascending=False)
-                .drop_duplicates("inn")
-                .merge(names, on="tb_id", how="left"))
-        wide = wide.merge(tb[["inn", "tb_short"]], on="inn", how="left")
-    else:
-        wide["tb_short"] = None
-    wide["tb_short"] = wide["tb_short"].fillna("—")
-    wide["holding_name"] = wide["holding_name"].fillna("")
+    wide["holding_name"] = (wide["holding_name"].fillna("").astype(str)
+                            .str.strip())
     wide["company_name"] = wide["company_name"].fillna("—")
 
     # Ведомство — правилами по наименованию: поля в витрине нет.
     wide["agency"] = agency.classify_frame(wide, name_col="company_name")
     known, total, share = agency.coverage(wide["agency"])
-    progress.done(f"Ведомство определено у {known} из {total} организаций РГС "
+    progress.done(f"Ведомство определено у {known} из {total} строк "
                   f"({share*100:.0f}%); остальные — «{agency.UNKNOWN}»")
+    n_hold = int((wide["holding_name"] != "").sum())
+    progress.done(f"Холдинг заполнен у {n_hold} из {total} строк "
+                  f"({n_hold / total * 100:.0f}%)")
+    no_tb = int((wide["tb_short"] == "—").sum())
+    if no_tb:
+        progress.done(f"ВНИМАНИЕ: у {no_tb} строк ГОСБ не нашёлся в справочнике "
+                      f"подразделений — они собраны в банк «—», но из итога по "
+                      f"сегменту не выпали")
 
+    wide["holding"] = [h or NO_HOLDING for h in wide["holding_name"]]
     wide["d_last"] = wide["fl0"] - wide["fl1"]     # за последний месяц
     wide["d_prev"] = wide["fl1"] - wide["fl2"]     # за предыдущий
     wide["d_two"] = wide["fl0"] - wide["fl2"]      # за оба месяца
     return wide
 
 
-def _by_agency(df: pd.DataFrame) -> pd.DataFrame:
-    """Свод по ведомствам, худшее снижение за два месяца — сверху."""
-    g = (df.groupby("agency", as_index=False)
+def _cut(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Свод по разрезу (ведомство или холдинг), худшее снижение — сверху."""
+    g = (df.groupby(col, as_index=False)
            .agg(n=("inn", "nunique"), fl2=("fl2", "sum"), fl1=("fl1", "sum"),
                 fl0=("fl0", "sum")))
+    g = g.rename(columns={col: "name"})
     g["d_last"] = g["fl0"] - g["fl1"]
     g["d_prev"] = g["fl1"] - g["fl2"]
     g["d_two"] = g["fl0"] - g["fl2"]
     # Доля в снижении считается от СУММЫ СНИЖЕНИЙ, а не от итога сегмента: итог
-    # может быть почти нулевым (одни ведомства падают, другие растут), и деление
+    # может быть почти нулевым (одни строки падают, другие растут), и деление
     # на него дало бы доли в сотни процентов.
     drop = -g.loc[g["d_two"] < 0, "d_two"].sum()
     g["share"] = [(-d / drop if d < 0 and drop else 0.0) for d in g["d_two"]]
@@ -245,11 +242,14 @@ def _scope(tb: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-def _body_agencies(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str) -> str:
-    """Тело слайда 1 для одного варианта: плашки, вывод и таблица ведомств."""
+def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
+              cut: str) -> str:
+    """Тело слайда 1 для одного варианта: плашки, вывод и таблица разреза."""
     fl0, fl1, fl2 = df["fl0"].sum(), df["fl1"].sum(), df["fl2"].sum()
     d_last, d_prev, d_two = fl0 - fl1, fl1 - fl2, fl0 - fl2
     n_down = int((g["d_two"] < 0).sum())
+    what = "ведомстве" if cut == "ag" else "холдинге"
+    whats = "ведомствах" if cut == "ag" else "холдингах"
     kpis = (
         _kpi(f'Портфель РГС на конец {lbl["m0_gen"]}', C.fmt_num(fl0),
              f'было {C.fmt_num(fl2)} на конец {lbl["m2_gen"]}')
@@ -259,35 +259,37 @@ def _body_agencies(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str) -> str
                f'{_pct(d_prev, fl2)} к {lbl["m2_dat"]}', _cls(d_prev))
         + _kpi('Итого за два месяца', _num(d_two),
                f'{_pct(d_two, fl2)} · снижение в {n_down} '
-               + C.plural(n_down, "ведомстве", "ведомствах", "ведомствах"),
-               _cls(d_two))
+               + C.plural(n_down, what, whats, whats), _cls(d_two))
     )
     # Вывод одной строкой: где сосредоточено снижение. Считается по тем же
     # числам, что в таблице, — на слайде не должно быть мысли, которую нельзя
     # проверить глазами по строке ниже.
     worst = g.iloc[0] if len(g) and g.iloc[0]["d_two"] < 0 else None
     if worst is not None:
-        top_n = int((df[df["d_two"] < -0.5]["agency"] == worst["agency"]).sum())
-        lead = (f'<div class="s-lead">Снижение сосредоточено в ведомстве '
-                f'<b>{C.esc(worst["agency"])}</b>: '
+        col = "agency" if cut == "ag" else "holding"
+        top_n = int((df[df["d_two"] < -0.5][col] == worst["name"]).sum())
+        lead = (f'<div class="s-lead">Снижение сосредоточено в {what} '
+                f'<b>{C.esc(worst["name"])}</b>: '
                 f'<b class="down">{_num(worst["d_two"])}</b> человек за два '
                 f'месяца — это {worst["share"] * 100:.0f}% всего снижения '
                 f'сегмента; падение идёт по {C.fmt_num(top_n)} '
                 + C.plural(top_n, "организации", "организациям", "организациям")
-                + ' этого ведомства.</div>')
+                + '.</div>')
     else:
         lead = ('<div class="s-lead">Снижения портфеля за эти два месяца '
                 'в сегменте нет.</div>')
+
+    shown, rest = g.head(CUT_N), g.iloc[CUT_N:]
     rows = []
-    for r in g.itertuples():
+    for r in shown.itertuples():
         bar = (f'<span class="bar"><i style="width:{min(r.share, 1) * 100:.0f}%">'
                f'</i></span><span class="bar-v">{r.share * 100:.0f}%</span>'
                if r.share > 0 else '<span class="bar-v flat">—</span>')
         rows.append(
-            f'<tr><td class="name">{C.esc(r.agency)}'
+            f'<tr><td class="name">{C.esc(str(r.name)[:46])}'
             f'<i>{C.fmt_num(r.n)} '
             + C.plural(int(r.n), "организация", "организации", "организаций")
-            + f'</i></td>'
+            + '</i></td>'
             f'<td class="num dim">{C.fmt_num(r.fl2)}</td>'
             f'<td class="num dim">{C.fmt_num(r.fl1)}</td>'
             f'<td class="num">{C.fmt_num(r.fl0)}</td>'
@@ -295,22 +297,39 @@ def _body_agencies(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str) -> str
             + _delta_cell(r.d_last, r.fl1)
             + _delta_cell(r.d_two, r.fl2)
             + f'<td class="share">{bar}</td></tr>')
+    if len(rest):
+        rows.append(
+            f'<tr class="tail"><td class="name">ещё {C.fmt_num(len(rest))} '
+            + C.plural(len(rest), what.replace("е", "", 1) or what,
+                       whats, whats)
+            + f'<i>{C.fmt_num(rest["n"].sum())} организаций</i></td>'
+            f'<td class="num dim">{C.fmt_num(rest["fl2"].sum())}</td>'
+            f'<td class="num dim">{C.fmt_num(rest["fl1"].sum())}</td>'
+            f'<td class="num">{C.fmt_num(rest["fl0"].sum())}</td>'
+            + _delta_cell(rest["d_prev"].sum(), rest["fl2"].sum())
+            + _delta_cell(rest["d_last"].sum(), rest["fl1"].sum())
+            + _delta_cell(rest["d_two"].sum(), rest["fl2"].sum())
+            + f'<td class="share"><span class="bar-v">'
+              f'{rest["share"].sum() * 100:.0f}%</span></td></tr>')
     total = (
-        f'<tr class="tot"><td class="name">Итого РГС<i>{C.fmt_num(len(df))} '
-        + C.plural(len(df), "организация", "организации", "организаций")
-        + f'</i></td>'
+        f'<tr class="tot"><td class="name">Итого РГС'
+        f'<i>{C.fmt_num(df["inn"].nunique())} '
+        + C.plural(int(df["inn"].nunique()), "организация", "организации",
+                   "организаций")
+        + '</i></td>'
         f'<td class="num dim">{C.fmt_num(fl2)}</td>'
         f'<td class="num dim">{C.fmt_num(fl1)}</td>'
         f'<td class="num">{C.fmt_num(fl0)}</td>'
         + _delta_cell(d_prev, fl2) + _delta_cell(d_last, fl1)
         + _delta_cell(d_two, fl2) + '<td class="share"></td></tr>')
+    head = "Ведомство" if cut == "ag" else "Холдинг"
     return f"""{_scope(tb)}
   <div class="kpis">{kpis}</div>
   {lead}
   <table class="t">
     <thead>
       <tr>
-        <th>Ведомство</th>
+        <th>{head}</th>
         <th class="num">конец {C.esc(lbl["m2_gen"])}</th>
         <th class="num">конец {C.esc(lbl["m1_gen"])}</th>
         <th class="num">конец {C.esc(lbl["m0_gen"])}</th>
@@ -334,7 +353,7 @@ def _body_orgs(df: pd.DataFrame, lbl: dict, tb: str, has_holding: bool) -> str:
         sub = f'ИНН {C.esc(r.inn)} · {C.esc(r.agency)}'
         if tb == ALL:
             sub += f' · {C.esc(r.tb_short)}'
-        if has_holding and str(r.holding_name).strip():
+        if has_holding and r.holding_name:
             sub += f' · {C.esc(str(r.holding_name)[:28])}'
         rows.append(
             f'<tr><td class="rk">{i}</td>'
@@ -389,10 +408,11 @@ def _body_orgs(df: pd.DataFrame, lbl: dict, tb: str, has_holding: bool) -> str:
   </table>"""
 
 
-def _var(tb: str, body: str, first: bool) -> str:
-    """Вариант слайда под один банк. Невидимые — атрибутом hidden: печать и
-    выгрузка в PDF берут ровно то, что открыто на экране."""
-    return (f'<div class="var" data-tb="{C.esc(tb)}"'
+def _var(body: str, tb: str, first: bool, cut: str = "") -> str:
+    """Вариант слайда. Невидимые — атрибутом hidden: печать и выгрузка в PDF
+    берут ровно то, что открыто на экране."""
+    attr = f' data-tb="{C.esc(tb)}"' + (f' data-cut="{cut}"' if cut else "")
+    return (f'<div class="var"{attr}'
             + ('' if first else ' hidden') + f'>{body}</div>')
 
 
@@ -412,16 +432,22 @@ def _slide(eyebrow: str, title: str, meta: str, bodies: str, note: str) -> str:
 
 
 def _toolbar(tbs: list) -> str:
-    """Фильтр по ТБ и выгрузка. Одна панель на обе страницы: фильтр общий,
-    иначе слайды показывали бы разные банки и не сходились между собой."""
+    """Фильтр по ТБ, переключатель разреза и выгрузка. Одна панель на оба
+    слайда: фильтр общий, иначе слайды показывали бы разные банки."""
     chips = [f'<button type="button" class="tb-b on" data-tb="{ALL}">Вся сеть'
              f'</button>']
     chips += [f'<button type="button" class="tb-b" data-tb="{C.esc(t)}">'
               f'{C.esc(t)}</button>' for t in tbs]
+    cuts = "".join(
+        f'<button type="button" class="cut-b{" on" if i == 0 else ""}" '
+        f'data-cut="{k}">{C.esc(name)}</button>'
+        for i, (k, name) in enumerate(CUTS))
     return (
         '<div class="bar">'
         '<span class="bar-l">Территориальный банк:</span>'
         f'<span class="tb-row">{"".join(chips)}</span>'
+        '<span class="bar-l">Разрез:</span>'
+        f'<span class="tb-row">{cuts}</span>'
         '<button type="button" class="dl" onclick="rgsXlsx()">Выгрузить '
         'в Excel: оба слайда</button>'
         '</div>')
@@ -449,18 +475,19 @@ body{
   position:sticky; top:8px; z-index:5;
   display:flex; align-items:center; flex-wrap:wrap; gap:8px 10px;
   background:var(--surface); border:1px solid var(--separator);
-  border-radius:999px; padding:9px 14px;
+  border-radius:16px; padding:9px 14px;
   box-shadow:0 1px 2px rgba(0,0,0,.04),0 8px 22px rgba(0,0,0,.06);
 }
 .bar-l{font-size:12.5px;color:var(--text-2)}
 .tb-row{display:flex;flex-wrap:wrap;gap:6px}
-.tb-b{
+.tb-b,.cut-b{
   font:inherit; font-size:12.5px; font-weight:600; cursor:pointer;
   color:var(--text-2); background:none; border:1px solid var(--separator);
   border-radius:999px; padding:4px 12px;
 }
-.tb-b:hover{color:var(--text);border-color:var(--text-2)}
+.tb-b:hover,.cut-b:hover{color:var(--text);border-color:var(--text-2)}
 .tb-b.on{color:#fff;background:var(--accent);border-color:var(--accent)}
+.cut-b.on{color:var(--accent);border-color:var(--accent)}
 .dl{
   margin-left:auto; font:inherit; font-size:12.5px; font-weight:600;
   cursor:pointer; color:var(--accent); background:none;
@@ -485,6 +512,11 @@ h1{margin:4px 0 0;font-size:27px;line-height:1.15;letter-spacing:-.02em;
   color:var(--text-2);
 }
 .s-lead{margin:12px 0 4px;font-size:14.5px;color:var(--text)}
+.warn{
+  margin:12px 0 0; padding:8px 12px; font-size:12.5px;
+  border-left:3px solid var(--bad); background:color-mix(in srgb,var(--bad) 6%,transparent);
+  border-radius:0 8px 8px 0;
+}
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:10px 0 6px}
 .kpi{border:1px solid var(--separator);border-left:3px solid var(--separator);
   border-radius:12px;padding:10px 14px}
@@ -517,10 +549,9 @@ th.rk{text-align:right}
 tr.tot td{border-top:2px solid var(--text);border-bottom:0;font-weight:750;
   padding-top:8px}
 tr.tot td.name i{font-weight:400}
-tr.tail td{color:var(--text-2)}
+tr.tail td,tr.tail td.name{color:var(--text-2);font-weight:400}
 th.share{text-align:left;width:140px}
 td.share{white-space:nowrap}
-.bar-wrap{display:inline-block}
 .t .bar{
   position:static; display:inline-block; width:86px; height:7px; padding:0;
   border:0; border-radius:999px; box-shadow:none;
@@ -536,7 +567,6 @@ td.share{white-space:nowrap}
   .kpis{grid-template-columns:repeat(2,1fr)}
   h1{font-size:22px}
   table.t{font-size:12.5px}
-  .bar{border-radius:14px}
   .dl{margin-left:0}
 }
 @page{size:A4 landscape;margin:10mm}
@@ -552,38 +582,45 @@ td.share{white-space:nowrap}
 
 _JS = """
 <script>
-/* Фильтр по ТБ: варианты слайдов уже свёрстаны, кнопка только показывает
-   нужный. Выбор запоминается в переменной — его читает выгрузка, чтобы
-   в Excel уехал тот же банк, что на экране. */
+/* Фильтр по ТБ и разрезу: варианты слайдов уже свёрстаны, кнопки только
+   показывают нужный. Выбор запоминается — его читает выгрузка, чтобы в Excel
+   уехал тот же банк, что на экране. */
 (function(){
-  var cur = '*';
-  function apply(tb){
-    cur = tb;
+  var tb = '*', cut = 'ag';
+  function apply(){
     document.querySelectorAll('.var').forEach(function(v){
-      v.hidden = (v.dataset.tb !== tb);
+      var okTb = (v.dataset.tb === tb);
+      var okCut = (!v.dataset.cut || v.dataset.cut === cut);
+      v.hidden = !(okTb && okCut);
     });
     document.querySelectorAll('.tb-b').forEach(function(b){
       b.classList.toggle('on', b.dataset.tb === tb);
     });
-    window.scrollTo({top: 0, behavior: 'instant'});
+    document.querySelectorAll('.cut-b').forEach(function(b){
+      b.classList.toggle('on', b.dataset.cut === cut);
+    });
   }
   document.addEventListener('click', function(e){
-    var b = e.target.closest ? e.target.closest('.tb-b') : null;
-    if(b) apply(b.dataset.tb);
+    if(!e.target.closest) return;
+    var b = e.target.closest('.tb-b');
+    if(b){ tb = b.dataset.tb; apply(); window.scrollTo({top:0, behavior:'instant'}); return; }
+    var c = e.target.closest('.cut-b');
+    if(c){ cut = c.dataset.cut; apply(); }
   });
-  window.rgsTb = function(){ return cur; };
+  window.rgsTb = function(){ return tb; };
 })();
 
-/* Выгрузка обоих слайдов одной книгой: лист «Ведомства» и лист «Организации».
-   В лист организаций уходят ВСЕ строки выбранного банка, а не показанные на
-   слайде двадцать четыре. */
+/* Выгрузка обоих слайдов одной книгой: оба разреза и организации выбранного
+   банка. В лист организаций уходят все строки со снижением, а не показанные
+   на слайде двадцать четыре. */
 function rgsXlsx(){
   var d = window.__RGS || {}, tb = (window.rgsTb ? window.rgsTb() : '*');
   var v = (d.vars || {})[tb];
   if(!v || typeof window.xlsxBook !== 'function') return;
   var who = (tb === '*') ? 'вся сеть' : tb;
   window.xlsxBook('РГС ' + (d.period || '') + ' — ' + who, [
-    {name: 'Ведомства', rows: [d.head_a].concat(v.a)},
+    {name: 'Ведомства', rows: [d.head_c].concat(v.ag)},
+    {name: 'Холдинги', rows: [d.head_h].concat(v.hd)},
     {name: 'Организации', rows: [d.head_o].concat(v.o)}
   ]);
 }
@@ -594,14 +631,18 @@ function rgsXlsx(){
 # --------------------------------------------------------------------------- #
 def _export(variants: list, lbl: dict) -> str:
     """Данные выгрузки — по варианту на банк, теми же числами, что на слайде."""
-    head_a = ["Ведомство", "Организаций",
-              f'Портфель на конец {lbl["m2_gen"]}',
-              f'Портфель на конец {lbl["m1_gen"]}',
-              f'Портфель на конец {lbl["m0_gen"]}',
-              f'Изменение за {lbl["m1_acc"]}', f'Изменение за {lbl["m1_acc"]}, %',
-              f'Изменение за {lbl["m0_acc"]}', f'Изменение за {lbl["m0_acc"]}, %',
-              "Изменение за два месяца", "Изменение за два месяца, %",
-              "Доля в снижении, %"]
+    def cut_head(first: str) -> list:
+        return [first, "Организаций",
+                f'Портфель на конец {lbl["m2_gen"]}',
+                f'Портфель на конец {lbl["m1_gen"]}',
+                f'Портфель на конец {lbl["m0_gen"]}',
+                f'Изменение за {lbl["m1_acc"]}',
+                f'Изменение за {lbl["m1_acc"]}, %',
+                f'Изменение за {lbl["m0_acc"]}',
+                f'Изменение за {lbl["m0_acc"]}, %',
+                "Изменение за два месяца", "Изменение за два месяца, %",
+                "Доля в снижении, %"]
+
     head_o = ["Организация", "ИНН", "Ведомство", "Холдинг", "ТБ",
               f'Портфель на конец {lbl["m2_gen"]}',
               f'Портфель на конец {lbl["m1_gen"]}',
@@ -612,95 +653,107 @@ def _export(variants: list, lbl: dict) -> str:
     def pct(d, b):
         return "" if not b else f"{d / b * 100:.1f}".replace(".", ",")
 
-    out = {}
-    for tb, sub, g in variants:
-        rows_a = [[r.agency, int(r.n), int(r.fl2), int(r.fl1), int(r.fl0),
-                   int(r.d_prev), pct(r.d_prev, r.fl2),
-                   int(r.d_last), pct(r.d_last, r.fl1),
-                   int(r.d_two), pct(r.d_two, r.fl2),
-                   f"{r.share * 100:.0f}" if r.share > 0 else ""]
-                  for r in g.itertuples()]
+    def cut_rows(sub: pd.DataFrame, g: pd.DataFrame, title: str) -> list:
+        rows = [[r.name, int(r.n), int(r.fl2), int(r.fl1), int(r.fl0),
+                 int(r.d_prev), pct(r.d_prev, r.fl2),
+                 int(r.d_last), pct(r.d_last, r.fl1),
+                 int(r.d_two), pct(r.d_two, r.fl2),
+                 f"{r.share * 100:.0f}" if r.share > 0 else ""]
+                for r in g.itertuples()]
         fl2, fl1, fl0 = sub["fl2"].sum(), sub["fl1"].sum(), sub["fl0"].sum()
-        rows_a.append(["Итого РГС", int(sub["inn"].nunique()),
-                       int(fl2), int(fl1), int(fl0),
-                       int(fl1 - fl2), pct(fl1 - fl2, fl2),
-                       int(fl0 - fl1), pct(fl0 - fl1, fl1),
-                       int(fl0 - fl2), pct(fl0 - fl2, fl2), ""])
-        srt = sub.sort_values("d_two", kind="stable")
-        rows_o = [[r.company_name, str(r.inn), r.agency, r.holding_name, r.tb_short,
-                   int(r.fl2), int(r.fl1), int(r.fl0),
+        rows.append(["Итого РГС", int(sub["inn"].nunique()),
+                     int(fl2), int(fl1), int(fl0),
+                     int(fl1 - fl2), pct(fl1 - fl2, fl2),
+                     int(fl0 - fl1), pct(fl0 - fl1, fl1),
+                     int(fl0 - fl2), pct(fl0 - fl2, fl2), ""])
+        return rows
+
+    out = {}
+    for tb, sub, cuts in variants:
+        down = (sub[sub["d_two"] < -0.5]
+                .sort_values("d_two", kind="stable").head(EXPORT_N))
+        out[tb] = {
+            "ag": cut_rows(sub, cuts["ag"], "Ведомство"),
+            "hd": cut_rows(sub, cuts["hd"], "Холдинг"),
+            # ИНН строкой: в витрине это число, а в файле он должен остаться
+            # кодом — у регионов 01–09 ведущий ноль иначе теряется
+            "o": [[r.company_name, str(r.inn), r.agency, r.holding_name,
+                   r.tb_short, int(r.fl2), int(r.fl1), int(r.fl0),
                    int(r.d_prev), int(r.d_last), int(r.d_two),
-                   pct(r.d_two, r.fl2)]
-                  for r in srt.itertuples()]
-        out[tb] = {"a": rows_a, "o": rows_o}
-    data = {"head_a": head_a, "head_o": head_o, "vars": out,
+                   pct(r.d_two, r.fl2)] for r in down.itertuples()],
+        }
+    data = {"head_c": cut_head("Ведомство"), "head_h": cut_head("Холдинг"),
+            "head_o": head_o, "vars": out,
             "period": f'{lbl["m1_nom"]} — {lbl["m0_nom"]}'}
     js = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     return f'<script>window.__RGS={js};</script>'
 
 
-def build(conn: str | None = None, months: tuple | None = None,
-          out_dir: Path | None = None, verbose: bool = True) -> str:
-    """Собрать слайды и положить рядом с отчётами. Возвращает путь к файлу."""
-    progress.enable(verbose=verbose)
-    engine = get_engine(config.db_url(conn))
-    m0, m1, m2 = _months(engine, months)
-    progress.step(f"РГС: месяцы разбора — {m2} → {m1} → {m0}")
-    df = _load(engine, m0, m1, m2)
-    lbl = {
-        "m0_nom": _label(m0), "m1_nom": _label(m1), "m2_nom": _label(m2),
-        "m0_gen": _label(m0, "gen"), "m1_gen": _label(m1, "gen"),
-        "m2_gen": _label(m2, "gen"),
-        "m1_dat": _label(m1, "dat"), "m2_dat": _label(m2, "dat"),
-        # «за сентябрь» — винительный, у месяцев он совпадает с именительным
-        "m0_acc": _label(m0).split()[0], "m1_acc": _label(m1).split()[0],
-    }
-
-    # Варианты: вся сеть и каждый банк, у которого в сегменте есть организации.
-    tbs = sorted({t for t in df["tb_short"] if t and t != "—"})
-    variants = [(ALL, df, _by_agency(df))]
+def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
+    """Собрать документ: панель, два слайда со всеми вариантами и выгрузка."""
+    tbs = sorted({t for t in df["tb_short"] if t})
+    variants = [(ALL, df, {"ag": _cut(df, "agency"), "hd": _cut(df, "holding")})]
     for t in tbs:
         sub = df[df["tb_short"] == t]
-        variants.append((t, sub, _by_agency(sub)))
-    has_holding = bool((df["holding_name"].astype(str).str.strip() != "").any())
+        variants.append((t, sub, {"ag": _cut(sub, "agency"),
+                                  "hd": _cut(sub, "holding")}))
+    has_holding = bool((df["holding_name"] != "").any())
 
-    g_all = variants[0][2]
+    g_all = variants[0][2]["ag"]
     progress.done(
-        f"РГС: портфель {df['fl0'].sum():.0f} на конец {m0} · за {lbl['m0_acc']} "
-        f"{df['d_last'].sum():+.0f}, за {lbl['m1_acc']} {df['d_prev'].sum():+.0f}, "
-        f"за два месяца {df['d_two'].sum():+.0f} · ведомств со снижением "
-        f"{int((g_all['d_two'] < 0).sum())} из {len(g_all)}")
-    progress.done(f"Фильтр по ТБ: {len(tbs)} банков — "
-                  + ", ".join(tbs))
+        f"РГС: портфель {df['fl0'].sum():.0f} на конец периода · за "
+        f"{lbl['m0_acc']} {df['d_last'].sum():+.0f}, за {lbl['m1_acc']} "
+        f"{df['d_prev'].sum():+.0f}, за два месяца {df['d_two'].sum():+.0f} · "
+        f"ведомств со снижением {int((g_all['d_two'] < 0).sum())} из {len(g_all)}")
+    progress.done(f"Фильтр по ТБ: {len(tbs)} — " + ", ".join(tbs))
+
+    bodies1 = "".join(
+        _var(_body_cut(sub, cuts[k], lbl, tb, k), tb, i == 0 and k == "ag", k)
+        for i, (tb, sub, cuts) in enumerate(variants) for k, _n in CUTS)
+    bodies2 = "".join(
+        _var(_body_orgs(sub, lbl, tb, has_holding), tb, i == 0)
+        for i, (tb, sub, _c) in enumerate(variants))
 
     s1 = _slide(
         "Сегмент РГС · региональный госсектор",
-        "Снижение портфеля по ведомствам",
+        "Снижение портфеля по ведомствам и холдингам",
         f'{C.esc(lbl["m1_nom"])} и {C.esc(lbl["m0_nom"])}<br>'
         '<span>портфель получателей на конец месяца</span>',
-        "".join(_var(tb, _body_agencies(sub, g, lbl, tb), i == 0)
-                for i, (tb, sub, g) in enumerate(variants)),
+        note_gap + bodies1,
         "Снижение за месяц — портфель на конец этого месяца минус портфель на "
         "конец предыдущего. Проценты считаются к началу своего периода. Доля в "
-        "снижении — часть суммарного снижения снижающихся ведомств, она "
+        "снижении — часть суммарного снижения снижающихся строк, она "
         "складывается в 100%. Поля «ведомство» в витринах нет: оно определяется "
         "по наименованию организации, неразобранные имена стоят отдельной "
-        "строкой и ни к какому ведомству не приписываются.")
+        "строкой и ни к какому ведомству не приписываются. Холдинг берётся из "
+        "справочника организаций; где он не заполнен, строка так и называется.")
     s2 = _slide(
         "Сегмент РГС · раскрытие до организации",
         "Где именно снизился портфель",
         f'{C.esc(lbl["m1_nom"])} и {C.esc(lbl["m0_nom"])}<br>'
         '<span>порядок — от наибольшего снижения</span>',
-        "".join(_var(tb, _body_orgs(sub, lbl, tb, has_holding), i == 0)
-                for i, (tb, sub, _g) in enumerate(variants)),
+        bodies2,
         "Портфель организации — получатели заработной платы на конец месяца. "
-        "Организация, обслуживаемая в нескольких территориальных банках, "
-        "отнесена к тому, где её портфель больше. Кнопка «Выгрузить в Excel» "
-        "отдаёт книгу из двух листов — ведомства и организации — по выбранному "
-        "банку, причём список организаций в ней полный, а не обрезанный по "
-        "размеру листа.")
+        "Строка считается на грейне «банк × организация»: организация, "
+        "обслуживаемая в двух банках, попадает в каждый своей частью, поэтому "
+        "сумма банков равна итогу по сети. Кнопка «Выгрузить в Excel» отдаёт "
+        "книгу из трёх листов — ведомства, холдинги и организации — по "
+        f"выбранному банку; список организаций в ней полный до {EXPORT_N} "
+        "строк, а не обрезанный по размеру листа.")
 
-    html = f"""<!doctype html>
+    foot = (
+        'Источник: витрина uzp_dwh_company_holding_metric (портфель получателей '
+        f'на конец месяца, уровень {Q.LEVEL}/{Q.ORG_TYPE}) и справочник '
+        f'организаций uzp_dim_company. Отобран сегмент '
+        f'«{C.esc(", ".join(RGS_BIG))}» — '
+        f'{C.fmt_num(df["inn"].nunique())} '
+        + C.plural(int(df["inn"].nunique()), "организация", "организации",
+                   "организаций")
+        + f' в {C.fmt_num(len(tbs))} '
+        + C.plural(len(tbs), "банке", "банках", "банках")
+        + f'. Собрано {datetime.now():%d.%m.%Y, %H:%M}.')
+
+    return f"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -714,27 +767,60 @@ def build(conn: str | None = None, months: tuple | None = None,
 {s1}
 {s2}
 </div>
-<div class="foot">Источник: витрина uzp_dwh_company_holding_metric (портфель
-получателей на конец месяца, строки по ИНН) и справочник организаций
-uzp_dim_company. Отобран сегмент «{C.esc(", ".join(RGS_BIG))}» —
-{C.fmt_num(len(df))} {C.plural(len(df), "организация", "организации", "организаций")}
-в {C.fmt_num(len(tbs))} {C.plural(len(tbs), "банке", "банках", "банках")}.
-Собрано {datetime.now():%d.%m.%Y, %H:%M}.</div>
+<div class="foot">{foot}</div>
 {_export(variants, lbl)}
-{XLSX_JS}
+<script>
+{_asset("xlsx.js.txt")}
+</script>
 {_JS}
 </body>
 </html>"""
 
+
+def _labels(m0: str, m1: str, m2: str) -> dict:
+    def lab(dt, case="nom"):
+        ts = pd.Timestamp(dt)
+        return C.month_ru(f"{ts.month:02d}.{ts.year}", case)
+    return {
+        "m0_nom": lab(m0), "m1_nom": lab(m1), "m2_nom": lab(m2),
+        "m0_gen": lab(m0, "gen"), "m1_gen": lab(m1, "gen"),
+        "m2_gen": lab(m2, "gen"),
+        "m1_dat": lab(m1, "dat"), "m2_dat": lab(m2, "dat"),
+        # «за сентябрь» — винительный, у месяцев он совпадает с именительным
+        "m0_acc": lab(m0).split()[0], "m1_acc": lab(m1).split()[0],
+    }
+
+
+@dashboard("rgs_slides")
+def build_dash(ctx: Context) -> str:
+    """Точка входа реестра: generate_dashboard("rgs_slides", params={...}).
+
+    params: {"months": ("2026-09-30", "2026-08-31", "2026-07-31")} — если нужно
+    зафиксировать месяцы; без него берутся три последних из витрины.
+    """
+    months = (ctx.params or {}).get("months")
+    m0, m1, m2 = _months(ctx.engine, tuple(months) if months else None)
+    df = _load(ctx.engine, m0, m1, m2)
+    return _html(df, _labels(m0, m1, m2), _gap_note(m0, m1, m2))
+
+
+def build(conn: str | None = None, months: tuple | None = None,
+          out_dir: Path | None = None, verbose: bool = True) -> str:
+    """Собрать слайды без реестра — одной строкой из тетрадки или консоли."""
+    progress.enable(verbose=verbose)
+    engine = get_engine(config.db_url(conn))
+    m0, m1, m2 = _months(engine, months)
+    df = _load(engine, m0, m1, m2)
+    html = _html(df, _labels(m0, m1, m2), _gap_note(m0, m1, m2))
     d = Path(out_dir or config.OUTPUT_DIR)
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"rgs_slides_{datetime.now():%Y%m%d_%H%M%S}.html"
     path.write_text(html, encoding="utf-8")
-    progress.done(f"Готово: {path}")
+    progress.done(f"Готово: {path} · {len(html.encode()) / 1e6:.1f} МБ")
     return str(path)
 
 
-if __name__ == "__main__":                       # python -m uzp_dash.slides_rgs
+if __name__ == "__main__":        # python -m uzp_dash.dashboards.rgs_slides.view
     import sys
-    args = sys.argv[1:]
-    build(months=tuple(args[:3]) if len(args) >= 3 else None)
+    a = sys.argv[1:]
+    build(months=tuple(a[:3]) if len(a) >= 3 else None)
