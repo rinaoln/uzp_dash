@@ -89,3 +89,41 @@ FROM {schema}.uzp_dim_company
 GROUP BY segment_name
 ORDER BY count(*) DESC
 """
+
+
+# ОТРАСЛЬ ОРГАНИЗАЦИИ — из витрины атрибутов ЕПК.
+#
+# Поля «ведомство» в витринах нет, а отрасль есть: 21 категория, среди них
+# «Органы гос. и мун. управления» и «Здравоохранение, образование». Это грубее
+# ведомства (разрез по вывеске различает школу, больницу и суд, отрасль — нет),
+# но это ЗАПИСАННЫЙ признак, а не вывод по наименованию, и показать его стоит.
+#
+# ЗАПОЛНЕНО ОНО ДАЛЕКО НЕ ВЕЗДЕ: по профилю прома — у 9,7% организаций. Поэтому
+# отрасль нигде не заменяет ведомство: она идёт отдельным разрезом со строкой
+# «Отрасль не указана», а в разборе ведомства работает только подсказкой там,
+# где наименование ничего не говорит (см. agency.INDUSTRY_HINTS).
+#
+# Два запроса, а не один с OR в условии соединения: соединение по двум ключам
+# через OR планировщик разворачивает в перебор, и на витрине ЕПК это очень
+# дорого. По epk_id связь точная (это ключ витрины), по ИНН — запасная, ею
+# добираются организации, чей epk_id в витрине не нашёлся.
+INDUSTRY_BY_EPK = """
+SELECT dc.inn                  AS inn,
+       min(e.industry_name)    AS industry_name
+FROM {schema}.uzp_dim_company dc
+JOIN {schema}.uzp_data_epk_consolidation e ON e.epk_id = dc.epk_id
+WHERE dc.segment_name IN :segs
+  AND e.industry_name IS NOT NULL
+GROUP BY dc.inn
+"""
+
+INDUSTRY_BY_INN = """
+SELECT e.inn                   AS inn,
+       min(e.industry_name)    AS industry_name
+FROM {schema}.uzp_data_epk_consolidation e
+JOIN {schema}.uzp_dim_company dc ON dc.inn = e.inn
+WHERE dc.segment_name IN :segs
+  AND e.industry_name IS NOT NULL
+  AND e.inn IS NOT NULL
+GROUP BY e.inn
+"""

@@ -53,8 +53,9 @@ CUT_N = 14
 EXPORT_N = 1500
 
 ALL = "*"                      # ключ варианта «вся сеть»
-CUTS = (("ag", "Ведомства"), ("hd", "Холдинги"))
+CUTS = (("ag", "Ведомства"), ("hd", "Холдинги"), ("in", "Отрасли"))
 NO_HOLDING = "Холдинг не указан"
+NO_INDUSTRY = "Отрасль не указана"
 
 # Большие имена сегмента из справочника организаций, которые дают короткое «РГС».
 # Берутся из общего маппинга сегментов, а не списком здесь: если на проме к
@@ -150,18 +151,29 @@ def _load(engine, m0: str, m1: str, m2: str) -> pd.DataFrame:
 
     comp = read_sql(engine, Q.COMPANY, {"segs": segs})
     wide = wide.merge(comp, on="inn", how="left")
+    wide = wide.merge(_industry(engine, segs), on="inn", how="left")
     wide["holding_name"] = (wide["holding_name"].fillna("").astype(str)
                             .str.strip())
+    if "industry_name" not in wide:
+        wide["industry_name"] = ""
+    wide["industry_name"] = (wide["industry_name"].fillna("").astype(str)
+                             .str.strip())
     wide["company_name"] = wide["company_name"].fillna("—")
 
-    # Ведомство — правилами по наименованию: поля в витрине нет.
-    wide["agency"] = agency.classify_frame(wide, name_col="company_name")
+    # Ведомство — правилами по наименованию: поля в витрине нет. Отрасль из
+    # витрины ЕПК идёт подсказкой: она срабатывает только там, где наименование
+    # не разобралось, и не перебивает разбор по вывеске (см. agency.classify).
+    wide["agency"] = agency.classify_frame(wide, name_col="company_name",
+                                           industry_col="industry_name")
     known, total, share = agency.coverage(wide["agency"])
     progress.done(f"Ведомство определено у {known} из {total} строк "
                   f"({share*100:.0f}%); остальные — «{agency.UNKNOWN}»")
     n_hold = int((wide["holding_name"] != "").sum())
     progress.done(f"Холдинг заполнен у {n_hold} из {total} строк "
                   f"({n_hold / total * 100:.0f}%)")
+    n_ind = int((wide["industry_name"] != "").sum())
+    progress.done(f"Отрасль заполнена у {n_ind} из {total} строк "
+                  f"({n_ind / total * 100:.0f}%)")
     no_tb = int((wide["tb_short"] == "—").sum())
     if no_tb:
         progress.done(f"ВНИМАНИЕ: у {no_tb} строк ГОСБ не нашёлся в справочнике "
@@ -169,10 +181,49 @@ def _load(engine, m0: str, m1: str, m2: str) -> pd.DataFrame:
                       f"сегменту не выпали")
 
     wide["holding"] = [h or NO_HOLDING for h in wide["holding_name"]]
+    wide["industry"] = [i or NO_INDUSTRY for i in wide["industry_name"]]
     wide["d_last"] = wide["fl0"] - wide["fl1"]     # за последний месяц
     wide["d_prev"] = wide["fl1"] - wide["fl2"]     # за предыдущий
     wide["d_two"] = wide["fl0"] - wide["fl2"]      # за оба месяца
     return wide
+
+
+def _industry(engine, segs: tuple) -> pd.DataFrame:
+    """Отрасль организации из витрины атрибутов ЕПК: {inn, industry_name}.
+
+    Сначала точная связь по epk_id (ключ витрины), затем запасная по ИНН — ею
+    добираются организации, чей epk_id в витрине не нашёлся. Заполняемость
+    печатается в лог обоими числами: на проме поле заполнено примерно у
+    десятой части организаций, и по какому именно сегменту как — видно только
+    в прогоне.
+
+    Сбой запроса не роняет сборку: отрасль — дополнительный разрез, и слайды
+    без неё остаются осмысленными. Но молчать о сбое нельзя, иначе пустой
+    разрез выглядел бы как «у всех отрасль не указана».
+    """
+    empty = pd.DataFrame({"inn": [], "industry_name": []})
+    try:
+        by_epk = read_sql(engine, Q.INDUSTRY_BY_EPK, {"segs": segs})
+        by_inn = read_sql(engine, Q.INDUSTRY_BY_INN, {"segs": segs})
+    except Exception as ex:                   # noqa: BLE001 — разрез необязателен
+        progress.done(f"ВНИМАНИЕ: отрасль из uzp_data_epk_consolidation прочитать "
+                      f"не удалось ({type(ex).__name__}: {ex}) — разрез «Отрасли» "
+                      f"будет пустым, остальные слайды не пострадали")
+        return empty
+    out = by_epk.rename(columns={"industry_name": "ind_epk"})
+    out = out.merge(by_inn.rename(columns={"industry_name": "ind_inn"}),
+                    on="inn", how="outer")
+    if out.empty:
+        progress.done("Отрасль из uzp_data_epk_consolidation: не нашлось ни одной "
+                      "записи по сегменту — разрез «Отрасли» будет пустым")
+        return empty
+    out["industry_name"] = out["ind_epk"].fillna(out["ind_inn"])
+    n_epk = int(out["ind_epk"].notna().sum())
+    n_add = int((out["ind_epk"].isna() & out["ind_inn"].notna()).sum())
+    progress.done(f"Отрасль из uzp_data_epk_consolidation: {n_epk} организаций по "
+                  f"epk_id, ещё {n_add} по ИНН · разных отраслей "
+                  f"{out['industry_name'].nunique()}")
+    return out[["inn", "industry_name"]]
 
 
 def _cut(df: pd.DataFrame, col: str) -> pd.DataFrame:
@@ -248,8 +299,8 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
     fl0, fl1, fl2 = df["fl0"].sum(), df["fl1"].sum(), df["fl2"].sum()
     d_last, d_prev, d_two = fl0 - fl1, fl1 - fl2, fl0 - fl2
     n_down = int((g["d_two"] < 0).sum())
-    what = "ведомстве" if cut == "ag" else "холдинге"
-    whats = "ведомствах" if cut == "ag" else "холдингах"
+    what = {"ag": "ведомстве", "hd": "холдинге", "in": "отрасли"}[cut]
+    whats = {"ag": "ведомствах", "hd": "холдингах", "in": "отраслях"}[cut]
     kpis = (
         _kpi(f'Портфель РГС на конец {lbl["m0_gen"]}', C.fmt_num(fl0),
              f'было {C.fmt_num(fl2)} на конец {lbl["m2_gen"]}')
@@ -266,7 +317,7 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
     # проверить глазами по строке ниже.
     worst = g.iloc[0] if len(g) and g.iloc[0]["d_two"] < 0 else None
     if worst is not None:
-        col = "agency" if cut == "ag" else "holding"
+        col = {"ag": "agency", "hd": "holding", "in": "industry"}[cut]
         top_n = int((df[df["d_two"] < -0.5][col] == worst["name"]).sum())
         lead = (f'<div class="s-lead">Снижение сосредоточено в {what} '
                 f'<b>{C.esc(worst["name"])}</b>: '
@@ -298,10 +349,11 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
             + _delta_cell(r.d_two, r.fl2)
             + f'<td class="share">{bar}</td></tr>')
     if len(rest):
+        many = {"ag": ("ведомства", "ведомств"), "hd": ("холдинга", "холдингов"),
+                "in": ("отрасли", "отраслей")}[cut]
         rows.append(
             f'<tr class="tail"><td class="name">ещё {C.fmt_num(len(rest))} '
-            + C.plural(len(rest), what.replace("е", "", 1) or what,
-                       whats, whats)
+            + C.plural(len(rest), many[0], many[0], many[1])
             + f'<i>{C.fmt_num(rest["n"].sum())} организаций</i></td>'
             f'<td class="num dim">{C.fmt_num(rest["fl2"].sum())}</td>'
             f'<td class="num dim">{C.fmt_num(rest["fl1"].sum())}</td>'
@@ -322,7 +374,7 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
         f'<td class="num">{C.fmt_num(fl0)}</td>'
         + _delta_cell(d_prev, fl2) + _delta_cell(d_last, fl1)
         + _delta_cell(d_two, fl2) + '<td class="share"></td></tr>')
-    head = "Ведомство" if cut == "ag" else "Холдинг"
+    head = {"ag": "Ведомство", "hd": "Холдинг", "in": "Отрасль"}[cut]
     return f"""{_scope(tb)}
   <div class="kpis">{kpis}</div>
   {lead}
@@ -621,6 +673,7 @@ function rgsXlsx(){
   window.xlsxBook('РГС ' + (d.period || '') + ' — ' + who, [
     {name: 'Ведомства', rows: [d.head_c].concat(v.ag)},
     {name: 'Холдинги', rows: [d.head_h].concat(v.hd)},
+    {name: 'Отрасли', rows: [d.head_i].concat(v['in'])},
     {name: 'Организации', rows: [d.head_o].concat(v.o)}
   ]);
 }
@@ -643,7 +696,7 @@ def _export(variants: list, lbl: dict) -> str:
                 "Изменение за два месяца", "Изменение за два месяца, %",
                 "Доля в снижении, %"]
 
-    head_o = ["Организация", "ИНН", "Ведомство", "Холдинг", "ТБ",
+    head_o = ["Организация", "ИНН", "Ведомство", "Отрасль", "Холдинг", "ТБ",
               f'Портфель на конец {lbl["m2_gen"]}',
               f'Портфель на конец {lbl["m1_gen"]}',
               f'Портфель на конец {lbl["m0_gen"]}',
@@ -675,15 +728,17 @@ def _export(variants: list, lbl: dict) -> str:
         out[tb] = {
             "ag": cut_rows(sub, cuts["ag"], "Ведомство"),
             "hd": cut_rows(sub, cuts["hd"], "Холдинг"),
+            "in": cut_rows(sub, cuts["in"], "Отрасль"),
             # ИНН строкой: в витрине это число, а в файле он должен остаться
             # кодом — у регионов 01–09 ведущий ноль иначе теряется
-            "o": [[r.company_name, str(r.inn), r.agency, r.holding_name,
-                   r.tb_short, int(r.fl2), int(r.fl1), int(r.fl0),
+            "o": [[r.company_name, str(r.inn), r.agency, r.industry_name,
+                   r.holding_name, r.tb_short,
+                   int(r.fl2), int(r.fl1), int(r.fl0),
                    int(r.d_prev), int(r.d_last), int(r.d_two),
                    pct(r.d_two, r.fl2)] for r in down.itertuples()],
         }
     data = {"head_c": cut_head("Ведомство"), "head_h": cut_head("Холдинг"),
-            "head_o": head_o, "vars": out,
+            "head_i": cut_head("Отрасль"), "head_o": head_o, "vars": out,
             "period": f'{lbl["m1_nom"]} — {lbl["m0_nom"]}'}
     js = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     return f'<script>window.__RGS={js};</script>'
@@ -692,11 +747,14 @@ def _export(variants: list, lbl: dict) -> str:
 def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
     """Собрать документ: панель, два слайда со всеми вариантами и выгрузка."""
     tbs = sorted({t for t in df["tb_short"] if t})
-    variants = [(ALL, df, {"ag": _cut(df, "agency"), "hd": _cut(df, "holding")})]
+    def cuts_of(x: pd.DataFrame) -> dict:
+        return {"ag": _cut(x, "agency"), "hd": _cut(x, "holding"),
+                "in": _cut(x, "industry")}
+
+    variants = [(ALL, df, cuts_of(df))]
     for t in tbs:
         sub = df[df["tb_short"] == t]
-        variants.append((t, sub, {"ag": _cut(sub, "agency"),
-                                  "hd": _cut(sub, "holding")}))
+        variants.append((t, sub, cuts_of(sub)))
     has_holding = bool((df["holding_name"] != "").any())
 
     g_all = variants[0][2]["ag"]
@@ -716,7 +774,7 @@ def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
 
     s1 = _slide(
         "Сегмент РГС · региональный госсектор",
-        "Снижение портфеля по ведомствам и холдингам",
+        "Снижение портфеля: ведомства, холдинги, отрасли",
         f'{C.esc(lbl["m1_nom"])} и {C.esc(lbl["m0_nom"])}<br>'
         '<span>портфель получателей на конец месяца</span>',
         note_gap + bodies1,
@@ -726,7 +784,10 @@ def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
         "складывается в 100%. Поля «ведомство» в витринах нет: оно определяется "
         "по наименованию организации, неразобранные имена стоят отдельной "
         "строкой и ни к какому ведомству не приписываются. Холдинг берётся из "
-        "справочника организаций; где он не заполнен, строка так и называется.")
+        "справочника организаций, отрасль — из витрины атрибутов ЕПК "
+        "(uzp_data_epk_consolidation); где они не заполнены, строка так и "
+        "называется. Отрасль грубее ведомства — школа, больница и суд в ней "
+        "неразличимы, — но это записанный признак, а не вывод по вывеске.")
     s2 = _slide(
         "Сегмент РГС · раскрытие до организации",
         "Где именно снизился портфель",
