@@ -27,13 +27,15 @@ _GMAP = """
   GROUP BY old_gosb_id
 """
 
-# Какие месяцы вообще есть в витрине. Три последних и берём под разбор.
+# Какие месяцы вообще есть в витрине. Из них выбираются и месяцы разбора, и
+# месяц для сравнения год к году, поэтому список берётся за два года: год назад
+# в двенадцать последних не попадает.
 MONTHS = """
 SELECT DISTINCT report_dt
 FROM {schema}.uzp_dwh_company_holding_metric
 WHERE level_name = :lvl AND org_type = :org
 ORDER BY report_dt DESC
-LIMIT 12
+LIMIT 30
 """
 
 # Диагностика: что в витрине ЕСТЬ, если запрос вернул пусто. Полный проход по
@@ -66,7 +68,8 @@ LEFT JOIN gmap g ON g.old_gosb_id = m.level_id
 WHERE m.level_name = :lvl
   AND m.org_type = :org
   AND dc.segment_name IN :segs
-  AND m.report_dt IN (CAST(:m0 AS date), CAST(:m1 AS date), CAST(:m2 AS date))
+  AND m.report_dt IN (CAST(:m0 AS date), CAST(:m1 AS date), CAST(:m2 AS date),
+                      CAST(:my AS date))
 GROUP BY COALESCE(g.tb_short, '—'), m.org_id, m.report_dt
 """
 
@@ -126,4 +129,16 @@ WHERE dc.segment_name IN :segs
   AND e.industry_name IS NOT NULL
   AND e.inn IS NOT NULL
 GROUP BY e.inn
+"""
+
+
+# Есть ли в витрине конкретный месяц. Нужен сравнению год к году: месяц годичной
+# давности в список последних двенадцати не попадает, и спросить про него надо
+# отдельно — отказываться от сравнения только потому, что не посмотрели дальше
+# года, неправильно.
+MONTH_EXISTS = """
+SELECT count(*) AS n
+FROM {schema}.uzp_dwh_company_holding_metric
+WHERE level_name = :lvl AND org_type = :org
+  AND report_dt = CAST(:m AS date)
 """

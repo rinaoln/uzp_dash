@@ -71,35 +71,104 @@ def _asset(name: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-def _months(engine, months: tuple | None) -> tuple[str, str, str]:
-    """Три месяца разбора: последний, предыдущий и опорный для предыдущего.
+def _ym(value: str) -> str:
+    """«2026-09» или «2026-09-30» → дата КОНЦА месяца строкой.
 
-    Передали явно — берём как есть (выкладка может понадобиться за прошлый
-    квартал). Не передали — три последних месяца витрины.
-
-    Пусто в витрине — не «данных нет», а конкретная причина: какие уровни и типы
-    организаций там лежат на самом деле. Именно на этом слайды и спотыкались:
-    запрос шёл по level_name='sb', которого на проме не существует.
+    Месяц в витрине лежит последним днём, и помнить, что у сентября это 30-е, а
+    у августа 31-е, читатель не обязан: в параметрах отчёта пишется месяц.
     """
-    if months:
-        if len(months) != 3:
-            raise ValueError("months — ровно три даты конца месяца: "
-                             "(сентябрь, август, июль)")
-        got = [str(m) for m in months]
-    else:
+    v = str(value).strip()
+    if not v:
+        return ""
+    try:
+        return str(pd.Period(v[:7], freq="M").to_timestamp("M").date())
+    except Exception as ex:                   # noqa: BLE001 — это разбор ввода
+        raise ValueError(f"месяц «{value}» не разобрался: ожидается «2026-09» "
+                         f"или «2026-09-30»") from ex
+
+
+def _months(engine, months: tuple | None = None, month: str = "",
+            compare: str = "") -> tuple[str, str, str, str]:
+    """Месяцы разбора: последний, предыдущий, опорный и месяц для сравнения.
+
+    Первые три отвечают на вопрос «что происходит сейчас»: снижение за сентябрь
+    — это сентябрь минус август, за август — август минус июль, поэтому опорный
+    месяц нужен, хотя сам по себе не показывается. Четвёртый отвечает на другой
+    вопрос: сезонная это просадка или портфель теряется весь год.
+
+    Что можно задать:
+      month   — отчётный месяц («2026-09»); пусто — последний в витрине;
+      compare — с чем сравнивать год к году («2025-09»); пусто — тот же месяц
+                год назад;
+      months  — три-четыре точные даты конца месяца, если нужно обойти подбор
+                целиком (например, сравнить квартал с кварталом).
+
+    Предыдущие месяцы берутся не «минус один месяц», а ближайшие более ранние
+    ИЗ ТЕХ, ЧТО ЕСТЬ в витрине: она грузится не каждый месяц, и вычитание из
+    отсутствующего месяца дало бы снижение на весь портфель. Если месяцы вышли
+    не подряд, слайд об этом говорит отдельной строкой.
+    """
+    have: list[str] = []
+    try:
         df = read_sql(engine, Q.MONTHS, {"lvl": Q.LEVEL, "org": Q.ORG_TYPE})
-        if len(df) < 3:
-            have = read_sql(engine, Q.LEVELS)
+        have = [str(pd.Timestamp(d).date()) for d in df["report_dt"]]
+    except Exception as ex:                   # noqa: BLE001 — скажем об этом ниже
+        progress.done(f"ВНИМАНИЕ: список месяцев витрины не прочитался "
+                      f"({type(ex).__name__}: {ex})")
+    if have:
+        progress.done("Месяцы в витрине: "
+                      + ", ".join(x[:7] for x in have[:14])
+                      + (" …" if len(have) > 14 else ""))
+
+    if months:                                # полный ручной режим
+        if len(months) not in (3, 4):
+            raise ValueError("months — три даты конца месяца "
+                             "(сентябрь, август, июль) и необязательная "
+                             "четвёртая: месяц для сравнения год к году")
+        got = [_ym(m) for m in months[:3]]
+        yoy = _ym(months[3]) if len(months) == 4 else ""
+    else:
+        if not have:
+            hv = read_sql(engine, Q.LEVELS)
             what = " · ".join(
                 f"{r.level_name}/{r.org_type}: {int(r.n)} строк, последний "
-                f"{pd.Timestamp(r.last_dt).date()}" for r in have.itertuples()
+                f"{pd.Timestamp(r.last_dt).date()}" for r in hv.itertuples()
             ) or "таблица пуста"
             raise RuntimeError(
-                f"в витрине uzp_dwh_company_holding_metric нет трёх месяцев на "
+                f"в витрине uzp_dwh_company_holding_metric нет месяцев на "
                 f"уровне {Q.LEVEL}/{Q.ORG_TYPE}. Что в ней есть: {what}")
-        got = [str(pd.Timestamp(d).date()) for d in df["report_dt"].head(3)]
-    progress.done(f"Месяцы разбора: {got[2]} → {got[1]} → {got[0]}")
-    return got[0], got[1], got[2]
+        m0 = _ym(month) if month else have[0]
+        if m0 not in have:
+            raise RuntimeError(
+                f"месяца {m0[:7]} в витрине нет. Доступны: "
+                + ", ".join(x[:7] for x in have))
+        # предыдущие — ближайшие более ранние из имеющихся, а не «минус месяц»
+        earlier = [x for x in have if x < m0]
+        if len(earlier) < 2:
+            raise RuntimeError(
+                f"до {m0[:7]} в витрине меньше двух месяцев — снижение за два "
+                f"месяца посчитать не из чего. Доступны: "
+                + ", ".join(x[:7] for x in have))
+        got = [m0, earlier[0], earlier[1]]
+        yoy = _ym(compare) if compare else ""
+
+    if not yoy and not (months and len(months) == 4):
+        # тот же месяц год назад: конец месяца, а не «минус 365 дней»
+        yoy = str((pd.Timestamp(got[0]).to_period("M") - 12)
+                  .to_timestamp("M").date())
+    if yoy and have and yoy not in have:
+        # список витрины мог не дотянуться — спрашиваем про месяц напрямую
+        chk = read_sql(engine, Q.MONTH_EXISTS,
+                       {"lvl": Q.LEVEL, "org": Q.ORG_TYPE, "m": yoy})
+        if chk.empty or not int(chk.iloc[0]["n"]):
+            progress.done(
+                f"Месяца {yoy[:7]} в витрине нет — сравнение год к году на "
+                f"слайдах не показывается. Доступны: "
+                + ", ".join(x[:7] for x in have))
+            yoy = ""
+    progress.done(f"Месяцы разбора: {got[2]} → {got[1]} → {got[0]}"
+                  + (f" · сравнение с {yoy}" if yoy else " · без года к году"))
+    return got[0], got[1], got[2], yoy
 
 
 def _gap_note(m0: str, m1: str, m2: str) -> str:
@@ -132,10 +201,15 @@ def _segments_present(engine) -> str:
                       for r in df.head(12).itertuples())
 
 
-def _load(engine, m0: str, m1: str, m2: str) -> pd.DataFrame:
-    """Портфель сегмента по трём месяцам на грейне (ТБ, организация)."""
+def _load(engine, m0: str, m1: str, m2: str, my: str = "") -> pd.DataFrame:
+    """Портфель сегмента по месяцам разбора на грейне (ТБ, организация).
+
+    Четвёртый месяц (год назад) может отсутствовать — тогда в отбор уходит
+    повтор опорного месяца, колонка прошлого года остаётся нулевой и сравнение
+    год к году нигде не показывается.
+    """
     segs = tuple(RGS_BIG)
-    p = {"segs": segs, "m0": m0, "m1": m1, "m2": m2,
+    p = {"segs": segs, "m0": m0, "m1": m1, "m2": m2, "my": my or m2,
          "lvl": Q.LEVEL, "org": Q.ORG_TYPE}
     raw = read_sql(engine, Q.ORGS, p)
     if raw.empty:
@@ -144,10 +218,14 @@ def _load(engine, m0: str, m1: str, m2: str) -> pd.DataFrame:
             f"пусто (уровень {Q.LEVEL}/{Q.ORG_TYPE}). Сегменты в справочнике "
             f"организаций: {_segments_present(engine)}")
     raw["report_dt"] = [str(pd.Timestamp(x).date()) for x in raw["report_dt"]]
+    cols = [m2, m1, m0] + ([my] if my and my not in (m2, m1, m0) else [])
     wide = (raw.pivot_table(index=["tb_short", "inn"], columns="report_dt",
                             values="fl", aggfunc="sum")
-               .reindex(columns=[m2, m1, m0]).fillna(0.0).reset_index())
-    wide.columns = ["tb_short", "inn", "fl2", "fl1", "fl0"]
+               .reindex(columns=cols).fillna(0.0).reset_index())
+    wide.columns = (["tb_short", "inn", "fl2", "fl1", "fl0"]
+                    + (["fly"] if len(cols) == 4 else []))
+    if "fly" not in wide:
+        wide["fly"] = 0.0
 
     comp = read_sql(engine, Q.COMPANY, {"segs": segs})
     wide = wide.merge(comp, on="inn", how="left")
@@ -185,6 +263,7 @@ def _load(engine, m0: str, m1: str, m2: str) -> pd.DataFrame:
     wide["d_last"] = wide["fl0"] - wide["fl1"]     # за последний месяц
     wide["d_prev"] = wide["fl1"] - wide["fl2"]     # за предыдущий
     wide["d_two"] = wide["fl0"] - wide["fl2"]      # за оба месяца
+    wide["d_yoy"] = wide["fl0"] - wide["fly"]      # год к году
     return wide
 
 
@@ -230,11 +309,12 @@ def _cut(df: pd.DataFrame, col: str) -> pd.DataFrame:
     """Свод по разрезу (ведомство или холдинг), худшее снижение — сверху."""
     g = (df.groupby(col, as_index=False)
            .agg(n=("inn", "nunique"), fl2=("fl2", "sum"), fl1=("fl1", "sum"),
-                fl0=("fl0", "sum")))
+                fl0=("fl0", "sum"), fly=("fly", "sum")))
     g = g.rename(columns={col: "name"})
     g["d_last"] = g["fl0"] - g["fl1"]
     g["d_prev"] = g["fl1"] - g["fl2"]
     g["d_two"] = g["fl0"] - g["fl2"]
+    g["d_yoy"] = g["fl0"] - g["fly"]
     # Доля в снижении считается от СУММЫ СНИЖЕНИЙ, а не от итога сегмента: итог
     # может быть почти нулевым (одни строки падают, другие растут), и деление
     # на него дало бы доли в сотни процентов.
@@ -312,6 +392,15 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
                f'{_pct(d_two, fl2)} · снижение в {n_down} '
                + C.plural(n_down, what, whats, whats), _cls(d_two))
     )
+    # Пятая плашка — другой вопрос: не «что было в эти два месяца», а
+    # «сезонная это просадка или портфель теряется». Без неё снижение за два
+    # месяца нечем взвесить.
+    yoy = "my_nom" in lbl
+    if yoy:
+        fly = df["fly"].sum()
+        d_yoy = fl0 - fly
+        kpis += _kpi(f'Год к году, к {lbl["my_dat"]}', _num(d_yoy),
+                     f'{_pct(d_yoy, fly)} · было {C.fmt_num(fly)}', _cls(d_yoy))
     # Вывод одной строкой: где сосредоточено снижение. Считается по тем же
     # числам, что в таблице, — на слайде не должно быть мысли, которую нельзя
     # проверить глазами по строке ниже.
@@ -347,6 +436,7 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
             + _delta_cell(r.d_prev, r.fl2)
             + _delta_cell(r.d_last, r.fl1)
             + _delta_cell(r.d_two, r.fl2)
+            + (_delta_cell(r.d_yoy, r.fly) if yoy else "")
             + f'<td class="share">{bar}</td></tr>')
     if len(rest):
         many = {"ag": ("ведомства", "ведомств"), "hd": ("холдинга", "холдингов"),
@@ -361,6 +451,8 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
             + _delta_cell(rest["d_prev"].sum(), rest["fl2"].sum())
             + _delta_cell(rest["d_last"].sum(), rest["fl1"].sum())
             + _delta_cell(rest["d_two"].sum(), rest["fl2"].sum())
+            + (_delta_cell(rest["d_yoy"].sum(), rest["fly"].sum())
+               if yoy else "")
             + f'<td class="share"><span class="bar-v">'
               f'{rest["share"].sum() * 100:.0f}%</span></td></tr>')
     total = (
@@ -373,8 +465,12 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
         f'<td class="num dim">{C.fmt_num(fl1)}</td>'
         f'<td class="num">{C.fmt_num(fl0)}</td>'
         + _delta_cell(d_prev, fl2) + _delta_cell(d_last, fl1)
-        + _delta_cell(d_two, fl2) + '<td class="share"></td></tr>')
+        + _delta_cell(d_two, fl2)
+        + (_delta_cell(fl0 - df["fly"].sum(), df["fly"].sum()) if yoy else "")
+        + '<td class="share"></td></tr>')
     head = {"ag": "Ведомство", "hd": "Холдинг", "in": "Отрасль"}[cut]
+    yoy_th = (f'<th class="num">год к году<br>к {C.esc(lbl["my_dat"])}</th>'
+              if yoy else "")
     return f"""{_scope(tb)}
   <div class="kpis">{kpis}</div>
   {lead}
@@ -388,6 +484,7 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
         <th class="num">за {C.esc(lbl["m1_acc"])}</th>
         <th class="num">за {C.esc(lbl["m0_acc"])}</th>
         <th class="num">за два месяца</th>
+        {yoy_th}
         <th class="share">доля в снижении</th>
       </tr>
     </thead>
@@ -396,7 +493,14 @@ def _body_cut(df: pd.DataFrame, g: pd.DataFrame, lbl: dict, tb: str,
 
 
 def _body_orgs(df: pd.DataFrame, lbl: dict, tb: str, has_holding: bool) -> str:
-    """Тело слайда 2 для одного варианта: раскрытие до ИНН."""
+    """Тело слайда 2 для одного варианта: раскрытие до ИНН.
+
+    Порядок — по снижению за два месяца: слайд отвечает на вопрос «что
+    происходит сейчас». Колонка года к году стоит рядом, чтобы по той же
+    строке было видно, разовая это просадка или организация теряет портфель
+    весь год.
+    """
+    yoy = "my_nom" in lbl
     down = df[df["d_two"] < -0.5].sort_values("d_two", kind="stable")
     shown = down.head(TOP_N)
     rows = []
@@ -414,14 +518,16 @@ def _body_orgs(df: pd.DataFrame, lbl: dict, tb: str, has_holding: bool) -> str:
             f'<td class="num">{C.fmt_num(r.fl0)}</td>'
             + _delta_cell(r.d_prev, r.fl2)
             + _delta_cell(r.d_last, r.fl1)
-            + _delta_cell(r.d_two, r.fl2) + '</tr>')
+            + _delta_cell(r.d_two, r.fl2)
+            + (_delta_cell(r.d_yoy, r.fly) if yoy else "") + '</tr>')
     if not rows:
-        rows.append('<tr><td class="rk"></td><td class="name" colspan="6">'
+        rows.append('<tr><td class="rk"></td><td class="name" colspan="7">'
                     'Организаций со снижением портфеля за эти два месяца нет.'
                     '</td></tr>')
     tail_n = len(down) - len(shown)
     if tail_n > 0:
         tail_fl = down["d_two"].iloc[len(shown):].sum()
+        tail_yoy = down["d_yoy"].iloc[len(shown):].sum()
         rows.append(
             f'<tr class="tail"><td class="rk">…</td>'
             f'<td class="name">ещё {C.fmt_num(tail_n)} '
@@ -429,7 +535,9 @@ def _body_orgs(df: pd.DataFrame, lbl: dict, tb: str, has_holding: bool) -> str:
             + ' со снижением<i>полный список — в выгрузке</i></td>'
               '<td class="num dim"></td><td class="num dim"></td>'
               '<td class="num dim"></td><td class="num dim"></td>'
-            + f'<td class="num down"><b>{_num(tail_fl)}</b><i></i></td></tr>')
+            + f'<td class="num down"><b>{_num(tail_fl)}</b><i></i></td>'
+            + (f'<td class="num {_cls(tail_yoy)}"><b>{_num(tail_yoy)}</b>'
+               f'<i></i></td>' if yoy else "") + '</tr>')
     total_down = down["d_two"].sum()
     n_up = int((df["d_two"] > 0.5).sum())
     lead = (
@@ -454,6 +562,8 @@ def _body_orgs(df: pd.DataFrame, lbl: dict, tb: str, has_holding: bool) -> str:
         <th class="num">за {C.esc(lbl["m1_acc"])}</th>
         <th class="num">за {C.esc(lbl["m0_acc"])}</th>
         <th class="num">за два месяца</th>
+        {f'<th class="num">год к году<br>к {C.esc(lbl["my_dat"])}</th>'
+         if yoy else ""}
       </tr>
     </thead>
     <tbody>{"".join(rows)}</tbody>
@@ -569,7 +679,8 @@ h1{margin:4px 0 0;font-size:27px;line-height:1.15;letter-spacing:-.02em;
   border-left:3px solid var(--bad); background:color-mix(in srgb,var(--bad) 6%,transparent);
   border-radius:0 8px 8px 0;
 }
-.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:10px 0 6px}
+.kpis{display:grid;gap:12px;margin:10px 0 6px;
+  grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr))}
 .kpi{border:1px solid var(--separator);border-left:3px solid var(--separator);
   border-radius:12px;padding:10px 14px}
 .kpi.down{border-left-color:var(--bad)} .kpi.up{border-left-color:var(--good)}
@@ -616,7 +727,6 @@ td.share{white-space:nowrap}
 .note{margin:12px 0 0;font-size:11.5px;line-height:1.45;color:var(--text-2)}
 .foot{max-width:1320px;margin:0 auto;font-size:12px;color:var(--text-2)}
 @media (max-width:900px){
-  .kpis{grid-template-columns:repeat(2,1fr)}
   h1{font-size:22px}
   table.t{font-size:12.5px}
   .dl{margin-left:0}
@@ -684,6 +794,8 @@ function rgsXlsx(){
 # --------------------------------------------------------------------------- #
 def _export(variants: list, lbl: dict) -> str:
     """Данные выгрузки — по варианту на банк, теми же числами, что на слайде."""
+    yoy = "my_nom" in lbl
+
     def cut_head(first: str) -> list:
         return [first, "Организаций",
                 f'Портфель на конец {lbl["m2_gen"]}',
@@ -694,14 +806,18 @@ def _export(variants: list, lbl: dict) -> str:
                 f'Изменение за {lbl["m0_acc"]}',
                 f'Изменение за {lbl["m0_acc"]}, %',
                 "Изменение за два месяца", "Изменение за два месяца, %",
-                "Доля в снижении, %"]
+                "Доля в снижении, %"] + ([
+                f'Портфель на конец {lbl["my_gen"]}',
+                "Изменение год к году", "Изменение год к году, %"] if yoy else [])
 
     head_o = ["Организация", "ИНН", "Ведомство", "Отрасль", "Холдинг", "ТБ",
               f'Портфель на конец {lbl["m2_gen"]}',
               f'Портфель на конец {lbl["m1_gen"]}',
               f'Портфель на конец {lbl["m0_gen"]}',
               f'Изменение за {lbl["m1_acc"]}', f'Изменение за {lbl["m0_acc"]}',
-              "Изменение за два месяца", "Изменение за два месяца, %"]
+              "Изменение за два месяца", "Изменение за два месяца, %"] + ([
+              f'Портфель на конец {lbl["my_gen"]}',
+              "Изменение год к году", "Изменение год к году, %"] if yoy else [])
 
     def pct(d, b):
         return "" if not b else f"{d / b * 100:.1f}".replace(".", ",")
@@ -712,13 +828,17 @@ def _export(variants: list, lbl: dict) -> str:
                  int(r.d_last), pct(r.d_last, r.fl1),
                  int(r.d_two), pct(r.d_two, r.fl2),
                  f"{r.share * 100:.0f}" if r.share > 0 else ""]
+                + ([int(r.fly), int(r.d_yoy), pct(r.d_yoy, r.fly)] if yoy else [])
                 for r in g.itertuples()]
         fl2, fl1, fl0 = sub["fl2"].sum(), sub["fl1"].sum(), sub["fl0"].sum()
+        fly = sub["fly"].sum()
         rows.append(["Итого РГС", int(sub["inn"].nunique()),
                      int(fl2), int(fl1), int(fl0),
                      int(fl1 - fl2), pct(fl1 - fl2, fl2),
                      int(fl0 - fl1), pct(fl0 - fl1, fl1),
-                     int(fl0 - fl2), pct(fl0 - fl2, fl2), ""])
+                     int(fl0 - fl2), pct(fl0 - fl2, fl2), ""]
+                    + ([int(fly), int(fl0 - fly), pct(fl0 - fly, fly)]
+                       if yoy else []))
         return rows
 
     out = {}
@@ -735,7 +855,10 @@ def _export(variants: list, lbl: dict) -> str:
                    r.holding_name, r.tb_short,
                    int(r.fl2), int(r.fl1), int(r.fl0),
                    int(r.d_prev), int(r.d_last), int(r.d_two),
-                   pct(r.d_two, r.fl2)] for r in down.itertuples()],
+                   pct(r.d_two, r.fl2)]
+                  + ([int(r.fly), int(r.d_yoy), pct(r.d_yoy, r.fly)]
+                     if yoy else [])
+                  for r in down.itertuples()],
         }
     data = {"head_c": cut_head("Ведомство"), "head_h": cut_head("Холдинг"),
             "head_i": cut_head("Отрасль"), "head_o": head_o, "vars": out,
@@ -775,8 +898,9 @@ def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
     s1 = _slide(
         "Сегмент РГС · региональный госсектор",
         "Снижение портфеля: ведомства, холдинги, отрасли",
-        f'{C.esc(lbl["m1_nom"])} и {C.esc(lbl["m0_nom"])}<br>'
-        '<span>портфель получателей на конец месяца</span>',
+        f'{C.esc(lbl["m1_nom"])} и {C.esc(lbl["m0_nom"])}'
+        + (f' · год к году к {C.esc(lbl["my_dat"])}' if "my_nom" in lbl else "")
+        + '<br><span>портфель получателей на конец месяца</span>',
         note_gap + bodies1,
         "Снижение за месяц — портфель на конец этого месяца минус портфель на "
         "конец предыдущего. Проценты считаются к началу своего периода. Доля в "
@@ -787,7 +911,13 @@ def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
         "справочника организаций, отрасль — из витрины атрибутов ЕПК "
         "(uzp_data_epk_consolidation); где они не заполнены, строка так и "
         "называется. Отрасль грубее ведомства — школа, больница и суд в ней "
-        "неразличимы, — но это записанный признак, а не вывод по вывеске.")
+        "неразличимы, — но это записанный признак, а не вывод по вывеске."
+        + (f' Год к году — тот же месяц год назад ({lbl["m0_nom"]} к '
+           f'{lbl["my_dat"]}): он отвечает не на «что было за эти два месяца», '
+           f'а на «сезонная это просадка или портфель теряется весь год».'
+           if "my_nom" in lbl else
+           ' Сравнения год к году нет: месяца годичной давности в витрине не '
+           'нашлось.'))
     s2 = _slide(
         "Сегмент РГС · раскрытие до организации",
         "Где именно снизился портфель",
@@ -838,11 +968,13 @@ def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
 </html>"""
 
 
-def _labels(m0: str, m1: str, m2: str) -> dict:
+def _labels(m0: str, m1: str, m2: str, my: str = "") -> dict:
     def lab(dt, case="nom"):
         ts = pd.Timestamp(dt)
         return C.month_ru(f"{ts.month:02d}.{ts.year}", case)
-    return {
+    extra = ({"my_nom": lab(my), "my_gen": lab(my, "gen"),
+              "my_dat": lab(my, "dat")} if my else {})
+    return extra | {
         "m0_nom": lab(m0), "m1_nom": lab(m1), "m2_nom": lab(m2),
         "m0_gen": lab(m0, "gen"), "m1_gen": lab(m1, "gen"),
         "m2_gen": lab(m2, "gen"),
@@ -859,20 +991,28 @@ def build_dash(ctx: Context) -> str:
     params: {"months": ("2026-09-30", "2026-08-31", "2026-07-31")} — если нужно
     зафиксировать месяцы; без него берутся три последних из витрины.
     """
-    months = (ctx.params or {}).get("months")
-    m0, m1, m2 = _months(ctx.engine, tuple(months) if months else None)
-    df = _load(ctx.engine, m0, m1, m2)
-    return _html(df, _labels(m0, m1, m2), _gap_note(m0, m1, m2))
+    p = ctx.params or {}
+    months = p.get("months")
+    m0, m1, m2, my = _months(ctx.engine, tuple(months) if months else None,
+                             month=p.get("month", ""),
+                             compare=p.get("compare", ""))
+    df = _load(ctx.engine, m0, m1, m2, my)
+    return _html(df, _labels(m0, m1, m2, my), _gap_note(m0, m1, m2))
 
 
 def build(conn: str | None = None, months: tuple | None = None,
+          month: str = "", compare: str = "",
           out_dir: Path | None = None, verbose: bool = True) -> str:
-    """Собрать слайды без реестра — одной строкой из тетрадки или консоли."""
+    """Собрать слайды без реестра — одной строкой из тетрадки или консоли.
+
+    month   — отчётный месяц «2026-09» (пусто — последний в витрине);
+    compare — месяц для сравнения год к году «2025-09» (пусто — год назад).
+    """
     progress.enable(verbose=verbose)
     engine = get_engine(config.db_url(conn))
-    m0, m1, m2 = _months(engine, months)
-    df = _load(engine, m0, m1, m2)
-    html = _html(df, _labels(m0, m1, m2), _gap_note(m0, m1, m2))
+    m0, m1, m2, my = _months(engine, months, month=month, compare=compare)
+    df = _load(engine, m0, m1, m2, my)
+    html = _html(df, _labels(m0, m1, m2, my), _gap_note(m0, m1, m2))
     d = Path(out_dir or config.OUTPUT_DIR)
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"rgs_slides_{datetime.now():%Y%m%d_%H%M%S}.html"
@@ -884,4 +1024,4 @@ def build(conn: str | None = None, months: tuple | None = None,
 if __name__ == "__main__":        # python -m uzp_dash.dashboards.rgs_slides.view
     import sys
     a = sys.argv[1:]
-    build(months=tuple(a[:3]) if len(a) >= 3 else None)
+    build(month=a[0] if a else "", compare=a[1] if len(a) > 1 else "")
