@@ -52,6 +52,15 @@ MIN_SEG_GAP = 1.0
 # «где мы потеряли больше всего и что там делали», а не заменяет собой выгрузку:
 # хвост из тысяч мелких оттоков читать никто не будет, и он подписывается числом.
 OUTFLOW_TOP_N = 25
+# Сколько организаций уходит в подложку «детализация до ИНН». Это не топ
+# раздела (там пятнадцать), а полный список уровня — но с потолком: на
+# проме организаций с потерями тысячи, и все они в документ не поедут.
+# Двести строк на уровень — это около 0,4 МБ на все тринадцать уровней;
+# триста давали уже 0,6 МБ, а дальше двухсот список всё равно не читают.
+OUTFLOW_DETAIL_N = 200
+# Ярлык организации, у которой сегмента в справочнике нет. Отдельной
+# строкой, а не припиской к крупнейшему сегменту: это отсутствие данных.
+SEG_UNKNOWN = "сегмент не указан"
 # Сколько клиентов показывать в каждой из двух групп раздела «Отток».
 TOP_CLIENTS = 15
 # Сколько организаций показывать в раскрытой ячейке матрицы (единица × сегмент).
@@ -244,7 +253,8 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
                                  fc_stats["conv_by_gosb"], d,
                                  unit_src="tb_id", unit_label="ТБ",
                                  funnel_months=b.fmonths, trend=b.trend)
-    a.outflow = _outflow_top(a, b.fmonths, b.promises, b.tb_of)
+    a.outflow = _outflow_top(a, b.fmonths, b.promises, b.tb_of,
+                             seg_by_inn=b.seg_by_inn)
     _log_outflow_section(a)
     return a
 
@@ -315,7 +325,8 @@ def finish(ctx, b: Bank, a: Analysis, text_df) -> Analysis:
                                  a.fc_stats.get("conv", {}),
                                  a.fc_stats.get("conv_by_gosb", {}), d,
                                  funnel_months=fmonths, trend=b.trend)
-    a.outflow = _outflow_top(a, fmonths, b.promises, b.tb_of)
+    a.outflow = _outflow_top(a, fmonths, b.promises, b.tb_of,
+                             seg_by_inn=b.seg_by_inn)
     _log_outflow_section(a)
     n_named = sum(sum(len(g["rows"]) for g in v["out_groups"])
                   for v in a.gosb_detail.values())
@@ -2025,7 +2036,7 @@ def _outflow_reasons(rows: list) -> tuple[list, int, float]:
 
 def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
                  promises: pd.DataFrame | None = None, tb_of: dict | None = None,
-                 top_n: int = OUTFLOW_TOP_N) -> dict:
+                 top_n: int = OUTFLOW_TOP_N, seg_by_inn: dict | None = None) -> dict:
     """Крупнейшие оттоки уровня и что по ним делали.
 
     Собирается из тех же строк (единица, организация), что и остальной разбор, но
@@ -2102,6 +2113,9 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
             ins = a.insights.get(k, {})
             rows.append({
                 "inn": inn, "unit": unit_name.get(uid, str(uid)),
+                # сегмент закреплён за организацией в справочнике клиентов —
+                # тем же, по которому сегмент проставляется во всём отчёте
+                "seg": (seg_by_inn or {}).get(inn) or SEG_UNKNOWN,
                 "name": names.get(k, f"Орг. {inn}"), "emp": emp_of.get(k, ""),
                 "gone": float(r.out_qty), "ret": float(r.ret_qty),
                 "kept": float(r.out_kept), "months": months,
@@ -2160,7 +2174,35 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
     returned = sorted((r for r in all_rows if r["ret"] > 0),
                       key=lambda x: (-x["ret"], -x["gone"]))
     reasons, known_n, known_kept = _outflow_reasons(rows)
+    # РАЗРЕЗ ПО СЕГМЕНТУ. Свод причин и итоги считаются ещё раз по каждому
+    # сегменту — теми же правилами, что и по уровню целиком. Пересчитывать их
+    # в браузере нельзя: получилось бы второе место, где живёт арифметика
+    # отчёта, и однажды эти два места разошлись бы.
+    segs = [s for s in segments.ORDER if s in {r["seg"] for r in rows}]
+    segs += sorted({r["seg"] for r in rows} - set(segs))
+    by_seg = {}
+    for sname in segs:
+        sub = [r for r in rows if r["seg"] == sname]
+        s_reasons, s_n, s_kept = _outflow_reasons(sub)
+        pr = [r for r in sub if r["promise_broken"]]
+        wk = [r for r in sub
+              if not r["promise_broken"] and r["tasks"] and r["ret"] <= 0]
+        by_seg[sname] = {
+            "reasons": s_reasons, "reason_known_n": s_n,
+            "reason_known_kept": s_kept,
+            "n_all": len(sub),
+            "tot_gone": sum(r["gone"] for r in sub),
+            "tot_ret": sum(r["ret"] for r in sub),
+            "tot_kept": sum(r["kept"] for r in sub),
+            "n_promised": len(pr), "kept_promised": sum(r["kept"] for r in pr),
+            "n_worked": len(wk), "kept_worked": sum(r["kept"] for r in wk),
+        }
     return {
+        "segs": segs, "by_seg": by_seg,
+        # полный список для подложки «детализация до ИНН»: те же строки, что и
+        # в топе, только без обрезки по пятнадцати. Потолок всё же есть —
+        # документ со всеми организациями прома никто не откроет
+        "detail": rows[:OUTFLOW_DETAIL_N],
         "rows": top,
         "reasons": reasons,
         "reason_known_n": known_n, "reason_known_kept": known_kept,

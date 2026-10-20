@@ -960,3 +960,44 @@ body.pdf-measure #print-root .of-pane[hidden] { display: block !important; }
 .forecast-panel .forecast-toggle:hover {
   color: var(--accent); border-color: var(--accent); background: none;
 }
+
+/* ============================================================
+   Отток: фильтр по сегменту и подложка с детализацией
+   ============================================================
+   Раздел отвечает на вопрос «где мы теряем», а теряем мы по-разному в разных
+   сегментах: в РГС уходят ведомствами, в ММБ — поштучно. Фильтр стоит над
+   плашками, потому что действует на все сразу. */
+.of-flt {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px;
+  margin: 12px 0 6px;
+}
+.of-flt-l { font-size: 12.5px; color: var(--text-2); }
+.of-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.of-seg-b {
+  font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  color: var(--text-2); background: var(--surface-solid);
+  border: 1px solid var(--separator); border-radius: 999px; padding: 4px 12px;
+}
+.of-seg-b:hover { color: var(--text); border-color: var(--text-2); }
+.of-seg-b.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+/* выгрузка раздела — контурной кнопкой: это уточнение, а не главное действие
+   раздела, и спорить с плашками переключателя оно не должно */
+.of-detail {
+  margin-left: auto; font: inherit; font-size: 12.5px; font-weight: 600;
+  cursor: pointer; color: var(--accent); background: var(--surface-solid);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--separator));
+  border-radius: 999px; padding: 4px 13px;
+}
+.of-detail:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-solid));
+}
+.of-flt-sum { margin: 0 0 12px; font-size: 13px; color: var(--text-2); }
+.of-flt-sum b { color: var(--text); font-weight: 650; }
+.of-flt-sum b.bad { color: var(--bad); }
+.of-empty { margin: 8px 0 0; }
+/* на бумаге фильтр не нужен: печатается то, что выбрано, а кнопки не нажать */
+@media print {
+  .of-flt { display: none !important; }
+  .of-seg[hidden] { display: none !important; }
+}

@@ -22,6 +22,9 @@ from ... import progress
 from . import analyze, bank, prompts, queries, segments, snapshot
 
 SEG_ORDER = segments.ORDER   # короткие названия сегментов (КСБ, РГС, …)
+# Ключ варианта «без фильтра» в разделе «Отток». Звёздочка, а не пустая
+# строка: пустое значение data-атрибута теряется при копировании разметки.
+ALL_SEG = "*"
 
 # Оформление отчёта собрано пользователем и лежит рядом, в assets/:
 #   ux.css / ux.js.txt — его стиль и скрипт, скопированы из его файла БАЙТ В БАЙТ.
@@ -251,7 +254,8 @@ def build(ctx: Context) -> str:
         meta=meta,
         body=(_BOOT_JS + _tabs([a for a, _ in levels]) + _help_bar() + bodies
               + _cell_dialog() + _tb_portfolio_dialog(sb, preps, b)
-              + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _TBDYN_JS + _FLOW_JS),
+              + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _OFD_JS
+              + _TBDYN_JS + _FLOW_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
         css=_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css"),
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
@@ -317,7 +321,7 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     secs = [
         ("matrix", _matrix(a, story.get("matrix"), idx)),
         ("gosb", _problem_gosb(a, story.get("gosb"), idx)),
-        ("outflow", _outflow_section(a, story.get("outflow"))),
+        ("outflow", _outflow_section(a, story.get("outflow"), idx)),
         ("flow", _flow_section(a, idx)),
     ]
     # Поимённый список живёт только на уровне ТБ: на уровне банка работают с ТБ,
@@ -2492,6 +2496,126 @@ _UXFIX_JS = """
 """
 
 
+# Фильтр раздела «Отток» по сегменту и подложка с детализацией до
+# организации (в видимом тексте — «номер организации»: слово «ИНН»
+# из готового документа вычищается, см. render/html.sanitize).
+#
+# Фильтр ничего не считает: варианты свода и строки итога уже свёрстаны, скрипт
+# только показывает нужный и прячет строки таблиц по атрибуту сегмента. Подложка
+# строит таблицу на месте — из словаря уровня, по тому же приёму, что и
+# раскрытие ячейки матрицы: триста строк на тринадцать уровней в разметке весили
+# бы больше самого отчёта.
+_OFD_JS = """
+<script>
+(function(){
+  var ALL = '*';
+
+  function lvlOf(el){ return el ? el.closest('.lvl') : null; }
+  function segOf(lvl){ return (lvl && lvl.dataset.ofSeg) || ALL; }
+
+  /* показать вариант выбранного сегмента и спрятать чужие строки таблиц */
+  function applySeg(lvl, seg){
+    if(!lvl) return;
+    lvl.dataset.ofSeg = seg;
+    var sec = lvl.querySelector(':scope > section#' + CSS.escape(lvl.id.replace('lvl-', 'sec-') + '-outflow'))
+           || lvl.querySelector('[id$="-outflow"]');
+    if(!sec) return;
+    sec.querySelectorAll('.of-seg').forEach(function(v){
+      v.hidden = (v.dataset.seg !== seg);
+    });
+    sec.querySelectorAll('.of-chips .of-seg-b').forEach(function(b){
+      b.classList.toggle('on', b.dataset.seg === seg);
+    });
+    sec.querySelectorAll('table tbody tr[data-seg]').forEach(function(tr){
+      tr.hidden = !(seg === ALL || tr.dataset.seg === seg);
+    });
+    /* таблица, где после фильтра не осталось ни строки, молчать не должна */
+    sec.querySelectorAll('table').forEach(function(t){
+      var body = t.tBodies[0];
+      if(!body) return;
+      var all = body.querySelectorAll('tr[data-seg]');
+      if(!all.length) return;
+      var shown = body.querySelectorAll('tr[data-seg]:not([hidden])').length;
+      var note = t.parentNode.querySelector(':scope > .of-empty');
+      if(!shown){
+        if(!note){
+          note = document.createElement('p');
+          note.className = 'of-empty g-act';
+          note.textContent = 'В этом сегменте таких клиентов нет.';
+          t.parentNode.insertBefore(note, t.nextSibling);
+        }
+        note.hidden = false;
+        t.hidden = true;
+      } else {
+        if(note) note.hidden = true;
+        t.hidden = false;
+      }
+    });
+  }
+
+  document.addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('.of-seg-b') : null;
+    if(!b) return;
+    applySeg(lvlOf(b), b.dataset.seg || ALL);
+  });
+
+  /* --- выгрузка раздела: свод и детализация по организациям ----------
+     На экране детализации нет намеренно: читателю раздела нужны списки и свод,
+     а построчный разбор до организации — это работа в Excel. Поэтому данные
+     лежат в документе молча и попадают только в книгу, отдельным листом. */
+  var COLS = ['Организация', 'номер организации', 'Подразделение', 'Сегмент',
+              'отток', 'возврат', 'потери', 'период оттока', 'причина ухода',
+              'что обещали', 'ответственный'];
+
+  function detailRows(lvl, seg){
+    var d = (window.__OFD || {})[lvl ? lvl.id : ''] || {};
+    var rows = (d.rows || []).filter(function(r){
+      return seg === ALL || r[3] === seg;
+    });
+    return [COLS].concat(rows.map(function(r){
+      /* потери уходят со знаком минус: в книге это убыль, а не величина */
+      return [r[0], r[1], r[2], r[3], r[4], r[5], -r[6], r[7], r[8], r[9], r[10]];
+    }));
+  }
+
+  /* Свод причин берём из той же разметки, что видит читатель, — из варианта
+     выбранного сегмента. Пересчитывать его в скрипте нельзя: доли и покрытие
+     считаны при сборке, и второй расчёт однажды разошёлся бы с первым. */
+  function reasonRows(sec, seg){
+    var host = sec.querySelector('.of-reasons');
+    if(!host) return [];
+    var box = host.querySelector('.of-seg[data-seg="' + CSS.escape(seg) + '"]');
+    /* сегментов меньше двух — вариантов нет, свод в разделе один */
+    var t = (box || host).querySelector('table');
+    if(!t) return [];
+    var out = [];
+    Array.prototype.forEach.call(t.rows, function(tr){
+      out.push(Array.prototype.map.call(tr.cells, function(td){
+        return (td.textContent || '').replace(/\\s+/g, ' ').trim();
+      }));
+    });
+    return out;
+  }
+
+  window.ofXls = function(btn){
+    if(typeof window.xlsxBook !== 'function') return;
+    var lvl = lvlOf(btn);
+    var sec = btn.closest('section');
+    var seg = segOf(lvl);
+    var name = lvl ? lvl.querySelector('.lvl-name') : null;
+    var who = (name ? name.textContent.trim() + ' — ' : '') + 'Отток'
+            + (seg === ALL ? '' : ', ' + seg);
+    window.xlsxBook(who, [
+      {name: 'Свод по причинам', rows: reasonRows(sec, seg)},
+      {name: 'Детализация по организациям', rows: detailRows(lvl, seg)}
+    ]);
+  };
+
+})();
+</script>
+"""
+
+
 def _cell_dialog() -> str:
     """Оверлей раскрытой ячейки матрицы — ОДИН на весь документ.
 
@@ -3149,43 +3273,60 @@ _XLS_JS = """
   }
 
   /* Публичная точка: массив массивов -> .xlsx в загрузки браузера */
-  window.xlsxDownload = function(title, rows){
-    if(!rows || !rows.length) return;
+  /* Книга из нескольких листов: sheets = [{name, rows}, …].
+     Нужна выгрузке раздела «Отток» — там в одном файле уезжают и свод, и
+     детализация по организациям, которую на экране не показываем. */
+  window.xlsxBook = function(title, sheets){
+    sheets = (sheets || []).filter(function(x){ return x && x.rows && x.rows.length; });
+    if(!sheets.length) return;
+    var types = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+      + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+      + '<Default Extension="xml" ContentType="application/xml"/>'
+      + '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'];
+    var book = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+      + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'];
+    var rels = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+      + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'];
+    var sheetFiles = [];
+    sheets.forEach(function(sh, i){
+      var n = i + 1;
+      types.push('<Override PartName="/xl/worksheets/sheet' + n + '.xml" '
+        + 'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>');
+      book.push('<sheet name="' + xesc(sheetName(sh.name || ('Лист' + n)))
+        + '" sheetId="' + n + '" r:id="rId' + n + '"/>');
+      rels.push('<Relationship Id="rId' + n + '" Type="http://schemas.openxmlformats.org'
+        + '/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet'
+        + n + '.xml"/>');
+      sheetFiles.push({name: 'xl/worksheets/sheet' + n + '.xml',
+                       data: enc.encode(sheetXml(sh.rows))});
+    });
+    types.push('</Types>');
+    book.push('</sheets></workbook>');
+    rels.push('</Relationships>');
     var files = [
-      {name: '[Content_Types].xml', data: enc.encode(
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        + '<Default Extension="xml" ContentType="application/xml"/>'
-        + '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-        + '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-        + '</Types>')},
+      {name: '[Content_Types].xml', data: enc.encode(types.join(''))},
       {name: '_rels/.rels', data: enc.encode(
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
         + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
         + '</Relationships>')},
-      {name: 'xl/workbook.xml', data: enc.encode(
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-        + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        + '<sheets><sheet name="' + xesc(sheetName(title)) + '" sheetId="1" r:id="rId1"/></sheets>'
-        + '</workbook>')},
-      {name: 'xl/_rels/workbook.xml.rels', data: enc.encode(
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        + '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-        + '</Relationships>')},
-      {name: 'xl/worksheets/sheet1.xml', data: enc.encode(sheetXml(rows))}
-    ];
-    var blob = zip(files);
-    var url = URL.createObjectURL(blob);
+      {name: 'xl/workbook.xml', data: enc.encode(book.join(''))},
+      {name: 'xl/_rels/workbook.xml.rels', data: enc.encode(rels.join(''))}
+    ].concat(sheetFiles);
+    var url = URL.createObjectURL(zip(files));
     var a = document.createElement('a');
     a.href = url;
     a.download = fileName(title);
     document.body.appendChild(a);
     a.click();
     setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 0);
+  };
+
+  /* Один лист — частный случай книги: правила именования и упаковки одни. */
+  window.xlsxDownload = function(title, rows){
+    window.xlsxBook(title, [{name: sheetName(title), rows: rows}]);
   };
 
   /* Текст ячейки таблицы: подписи второй строкой (ответственный, «Орг. N»)
@@ -4204,6 +4345,110 @@ def _flow_donor(f: dict) -> tuple | None:
     return name, out[name], (top["to"], top["fl"]) if top else None
 
 
+def _of_seg_var(seg: str, inner: str, first: bool) -> str:
+    """Кусок раздела, который зависит от выбранного сегмента.
+
+    Варианты считаются и верстаются заранее, по одному на сегмент, а кнопка
+    лишь показывает нужный: вся арифметика свода — доли, покрытие, склонения —
+    остаётся в Python. Пересчёт в браузере означал бы вторую копию правил
+    отчёта, и однажды эти две копии разошлись бы.
+    """
+    return (f'<div class="of-seg" data-seg="{C.esc(seg)}"'
+            + ('' if first else ' hidden') + f'>{inner}</div>')
+
+
+def _outflow_filter(o: dict, idx: int) -> str:
+    """Фильтр раздела по сегменту и вход в подложку с детализацией до ИНН."""
+    segs = o.get("segs") or []
+    if len(segs) < 2:
+        return ""
+    chips = [f'<button type="button" class="of-seg-b on" data-seg="{ALL_SEG}">'
+             f'Все сегменты</button>']
+    chips += [f'<button type="button" class="of-seg-b" data-seg="{C.esc(x)}">'
+              f'{C.esc(x)}</button>' for x in segs]
+    # строка-итог по выбранному сегменту: числа посчитаны здесь, не в скрипте
+    lines = [_of_seg_var(ALL_SEG, _outflow_sum(o, "по всем сегментам"), True)]
+    for x in segs:
+        d = (o.get("by_seg") or {}).get(x) or {}
+        lines.append(_of_seg_var(x, _outflow_sum(d, f'сегмент {x}'), False))
+    return (
+        f'<div class="of-flt" data-lvl="{idx}">'
+        f'<span class="of-flt-l">Сегмент:</span>'
+        f'<span class="of-chips">{"".join(chips)}</span>'
+        f'<button type="button" class="of-detail" onclick="ofXls(this)" '
+        f'title="Книга из двух листов: свод по причинам и построчная '
+        f'детализация по организациям">'
+        f'Выгрузить в Excel: свод и детализация</button>'
+        f'</div><div class="of-flt-sum">{"".join(lines)}</div>')
+
+
+def _outflow_sum(d: dict, who: str) -> str:
+    """Одна строка итога: сколько организаций и потерь в выбранном срезе."""
+    n = int(d.get("n_all") or 0)
+    if not n:
+        return f'<span>{C.esc(who)}: организаций с потерями нет.</span>'
+    return (
+        f'<span>{C.esc(who)}: <b>{C.fmt_num(n)}</b> '
+        + _plural(n, "организация", "организации", "организаций")
+        + f' · безвозвратные потери <b class="bad">{C.fmt_num(d.get("tot_kept") or 0)}</b> чел'
+        + (f' · обещали вернуть и не вернули {C.fmt_num(d.get("n_promised") or 0)}'
+           if d.get("n_promised") else "")
+        + (f' · отработаны без результата {C.fmt_num(d.get("n_worked") or 0)}'
+           if d.get("n_worked") else "")
+        + '</span>')
+
+
+def _outflow_detail_data(a: analyze.Analysis, idx: int) -> str:
+    """Состав подложки — данными для скрипта, а не разметкой.
+
+    Организаций с потерями на уровне сотни, и разворачивать каждую строкой
+    таблицы незачем: построчный разбор до организации — работа в Excel, а не
+    чтение с экрана. Поэтому в документ едет компактный массив, а книгу собирает
+    `ofXls` в момент выгрузки — тем же приёмом, что и раскрытие ячейки
+    матрицы (см. `_cell_data`), только на экран этот массив не попадает: его
+    единственный потребитель — отдельный лист книги Excel.
+    """
+    o = a.outflow or {}
+    rows = o.get("detail") or []
+    if not rows:
+        return ""
+    cur = (a.dates or {}).get("label", "")
+    payload = {
+        "n_all": int(o.get("n_all") or 0),
+        # сколько организаций с потерями в каждом сегменте ВСЕГО: подложка
+        # показывает только крупнейшие, и без этого числа часть принимали бы
+        # за целое
+        "seg_n": {k: int(v.get("n_all") or 0)
+                  for k, v in (o.get("by_seg") or {}).items()},
+        "unit": a.unit_label,
+        "rows": [[r["name"], str(r["inn"]), r["unit"], r.get("seg", ""),
+                  round(r["gone"]), round(r["ret"]), round(r["kept"]),
+                  ", ".join(r["months"][:4]),
+                  r.get("out_reason", "") or "",
+                  _promise_text(r, cur),
+                  r.get("emp", "") or ""] for r in rows],
+    }
+    js = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    return (f'<script>window.__OFD=window.__OFD||{{}};'
+            f'window.__OFD["lvl-{idx}"]={js};</script>')
+
+
+def _promise_text(r: dict, cur_label: str) -> str:
+    """Что обещали по клиенту — одной строкой, без разметки: едет в подложку."""
+    p = r.get("promise") or {}
+    if not p:
+        return ""
+    qty, month = p.get("qty"), p.get("month")
+    parts = []
+    if qty:
+        parts.append(f"обещали вернуть {qty:.0f} чел")
+    else:
+        parts.append("обещали вернуть")
+    if month:
+        parts.append(f"срок {month}")
+    return " · ".join(parts)
+
+
 def _outflow_funnel(o: dict) -> str:
     """Три числа воронки оттока над списками: где именно теряем управляемость.
 
@@ -4235,7 +4480,8 @@ def _outflow_funnel(o: dict) -> str:
     return f'<div class="of-kpis">{cells}</div>'
 
 
-def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
+def _outflow_section(a: analyze.Analysis, ai: str | None = None,
+                     idx: int = 0) -> str:
     """Раздел «Отток»: два списка по результату отработки.
 
     Остальной отчёт смотрит вперёд — кого брать в работу, чтобы закрыть план. Этот
@@ -4295,8 +4541,23 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
     # затем два разреза по результату работы. Свод стоит первым и открыт по
     # умолчанию: он отвечает на вопрос раздела целиком, а списки — точечно.
     groups = []
+    # Свод причин зависит от выбранного сегмента, поэтому он собирается
+    # вариантами: по уровню целиком и по каждому сегменту отдельно.
+    segs = o.get("segs") or []
     summary = _outflow_reasons(o)
     if summary:
+        if len(segs) >= 2:
+            parts = [_of_seg_var(ALL_SEG, summary, True)]
+            for sname in segs:
+                d = dict((o.get("by_seg") or {}).get(sname) or {})
+                parts.append(_of_seg_var(sname, _outflow_reasons(d)
+                                         or '<p class="g-act">У этого сегмента '
+                                            'причины ухода в задачах не '
+                                            'зафиксированы.</p>', False))
+            summary = "".join(parts)
+        # контейнер нужен выгрузке: по нему она находит таблицу свода именно
+        # выбранного сегмента, а не строку итога под фильтром
+        summary = f'<div class="of-reasons">{summary}</div>' 
         groups.append({"title": "Общий свод по причинам оттока",
                        "sub": _reasons_tab_sub(o), "html": summary})
     # Вторая плашка — обратный срез: не «где не получилось», а кого вернули.
@@ -4339,7 +4600,9 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None) -> str:
                                               (a.dates or {}).get("label", ""),
                                               n_all, kept_all)})
     return C.section(
-        "Отток", _ai(ai) + C.card(head + _outflow_tabs(groups)),
+        "Отток",
+        _ai(ai) + C.card(head + _outflow_filter(o, idx) + _outflow_tabs(groups))
+        + _outflow_detail_data(a, idx),
         eyebrow="Безвозвратные потери портфеля",
         desc="Кого потеряли за три закрытых месяца, кого вернули и чем "
              "закончилась работа: отдельно возвраты поимённо, отдельно "
@@ -4494,6 +4757,8 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
         return ""
     has_emp = any(r["emp"] for r in rows_src)
     is_promise = kind == "promise"
+    # атрибут сегмента на строке — по нему фильтр прячет лишние
+    attrs: list[str] = []
     has_work = is_promise or any(r["tasks"] for r in rows_src)
     tot = sum(r["kept"] for r in rows_src)
     rows = []
@@ -4536,6 +4801,7 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
         if has_work:
             row.append(work)
         rows.append(row)
+        attrs.append(f' data-seg="{C.esc(r.get("seg", ""))}"')
     cols = [f"Организация · {unit}" + (" · ответственный" if has_emp else ""),
             "отток", "возврат", "потери", "период оттока"]
     if has_work:
@@ -4554,7 +4820,7 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
     return (
         f'<h4 style="margin-top:22px">{cap}</h4>'
         f'<p class="g-act" style="margin:0 0 10px">{C.esc(lead)}</p>'
-        + C.table(cols, rows, num_cols=[1, 2, 3])
+        + C.table(cols, rows, num_cols=[1, 2, 3], row_attrs=attrs)
     )
 
 
@@ -4579,7 +4845,7 @@ def _returned_group(rows_src: list, unit: str, o: dict) -> str:
     ret_full = float(o.get("ret_full") or 0)
     n_task = int(o.get("n_ret_task") or 0)
     shown = sum(r["ret"] for r in rows_src)
-    rows = []
+    rows, attrs = [], []
     for r in rows_src:
         when = ", ".join(r["months"][:3]) + (f" и ещё {len(r['months']) - 3}"
                                              if len(r["months"]) > 3 else "")
@@ -4620,6 +4886,7 @@ def _returned_group(rows_src: list, unit: str, o: dict) -> str:
             C.esc(when) or "—",
             work,
         ])
+        attrs.append(f' data-seg="{C.esc(r.get("seg", ""))}"')
     cols = [f"Организация · {unit}" + (" · ответственный" if has_emp else ""),
             "отток", "возврат", "доля возврата", "осталось потерь",
             "период оттока", "чем сопровождался возврат"]
@@ -4643,7 +4910,7 @@ def _returned_group(rows_src: list, unit: str, o: dict) -> str:
         f'{C.fmt_num(o.get("ret_returned") or 0)} чел по {C.fmt_num(n_all)} '
         f'{_plural(n_all, "клиенту", "клиентам", "клиентам")}</h4>'
         f'<p class="g-act" style="margin:0 0 10px">{lead}</p>'
-        + C.table(cols, rows, num_cols=[1, 2, 3, 4]) + tail
+        + C.table(cols, rows, num_cols=[1, 2, 3, 4], row_attrs=attrs) + tail
     )
 
 

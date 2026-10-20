@@ -61,17 +61,26 @@ def meter(exec_pct: float | None) -> str:
     return f'<div class="meter"><span style="width:{pct:.1f}%;background:{color}"></span></div>'
 
 
-def table(headers: Sequence[str], rows: Iterable[Sequence[str]], num_cols: Sequence[int] = ()) -> str:
+def table(headers: Sequence[str], rows: Iterable[Sequence[str]],
+          num_cols: Sequence[int] = (),
+          row_attrs: Sequence[str] | None = None) -> str:
+    """Таблица. `row_attrs` — готовая строка атрибутов на каждую строку тела.
+
+    Нужна фильтрам на странице: чтобы спрятать строки по сегменту, скрипту надо
+    по чему-то их различать, а дописывать атрибут регуляркой поверх готовой
+    разметки — верный способ однажды попасть не в тот `<tr>`.
+    """
     num = set(num_cols)
     head = "".join(
         f'<th class="{"num" if i in num else ""}">{esc(h)}</th>' for i, h in enumerate(headers)
     )
     body = []
-    for r in rows:
+    for i_row, r in enumerate(rows):
         cells = "".join(
             f'<td class="{"num" if i in num else ""}">{c}</td>' for i, c in enumerate(r)
         )
-        body.append(f"<tr>{cells}</tr>")
+        attr = (row_attrs[i_row] if row_attrs and i_row < len(row_attrs) else "")
+        body.append(f"<tr{attr}>{cells}</tr>")
     return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
