@@ -159,6 +159,9 @@ def build(ctx: Context) -> str:
     таблицы читались по 12 раз.
     """
     prompts.reset_gateway()
+    # словарь подсказок собирается по ходу разметки; в одном процессе отчёт
+    # могут собрать дважды, и остатки прошлой сборки в нём не нужны
+    _HELP_TEXTS.clear()
     b = bank.load(ctx)
 
     # Порядок вкладок — алфавитный, и сортируется он здесь, а не полагается на
@@ -254,8 +257,9 @@ def build(ctx: Context) -> str:
         meta=meta,
         body=(_BOOT_JS + _tabs([a for a, _ in levels]) + _help_bar() + bodies
               + _cell_dialog() + _tb_portfolio_dialog(sb, preps, b)
+              + _help_data() + _HELP_JS
               + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _OFD_JS
-              + _TBDYN_JS + _FLOW_JS),
+              + _MX_JS + _TBDYN_JS + _FLOW_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
         css=_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css"),
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
@@ -1241,8 +1245,17 @@ def _matrix(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
         + C.table([f"{C.esc(a.unit_label)} × сегмент", "Выполн.",
                    "Отклонение, чел", "Доля отклонения"],
                   top, num_cols=[2, 3]))
+    # Выгрузка раздела — книгой из трёх листов. На экране матрица отвечает на
+    # вопрос «где», а построчный разбор до организации — работа в Excel: в
+    # разметку он не едет, берётся из того же словаря, что и раскрытие ячейки.
+    dl = ('<div class="of-flt"><span class="of-flt-l">Раздел целиком:</span>'
+          '<button type="button" class="of-detail" onclick="mxXls(this)" '
+          'title="Книга из трёх листов: матрица, ТОП по невыполнению и '
+          'детализация по организациям">'
+          'Выгрузить в Excel: матрица и детализация</button></div>')
     return C.section(f"Матрица выполнения {a.unit_label}/сегмент",
-                     _ai(ai) + f'<div class="grid cols-2">{heat}{top_tbl}</div>'
+                     _ai(ai) + dl
+                     + f'<div class="grid cols-2">{heat}{top_tbl}</div>'
                      + _cell_data(a, idx, cells),
                      eyebrow="Диагностика по прогнозу")
 
@@ -1270,8 +1283,10 @@ def _cell_data(a: analyze.Analysis, idx: int, cells: dict) -> str:
         payload[f"{uid}|{seg}"] = {
             "n": cell["n"], "fl": round(cell["fl"]),
             "top": round(cell.get("top_fl", 0)),
+            # номер организации идёт ПОСЛЕДНИМ: оверлей читает строку по
+            # индексам, и вставка в середину сдвинула бы ему все колонки
             "rows": [[r["name"], round(r["yoy"]), round(r["cur"]), round(r["was"]),
-                      r["emp"]] for r in cell["rows"]],
+                      r["emp"], str(r["inn"])] for r in cell["rows"]],
         }
     if not payload:
         return ""
@@ -1477,19 +1492,80 @@ def _group_html(g: dict, work: str, key: str, why,
     )
 
 
+# Тексты подсказок «как считаем» — ОДИН раз на документ.
+#
+# Подсказки одинаковы во всех карточках уровня и повторяются в каждой из сотни
+# с лишним: в собранном отчёте на них уходило 430 КБ — семь процентов файла за
+# один и тот же текст. Поэтому текст кладётся в словарь документа, а в разметке
+# остаётся заголовок и ключ; содержимое подставляется при первом раскрытии
+# (см. `_HELP_JS`) и перед выгрузкой в PDF.
+_HELP_TEXTS: dict[str, str] = {}
+
+
 def _gd_help(*lines: str, title: str = "Как считаем этот блок") -> str:
     """Подсказка «как считаем» под заголовком блока карточки.
 
-    Нативный `<details>`: закрыта по умолчанию, открывается кликом и с клавиатуры,
-    работает без скрипта и раскрывается сама при печати. Читателю карточки объяснение
-    нужно один раз, поэтому строкой, а не постоянным текстом на пол-экрана.
+    Нативный `<details>`: закрыта по умолчанию, открывается кликом и с клавиатуры.
+    Читателю карточки объяснение нужно один раз, поэтому строкой, а не постоянным
+    текстом на пол-экрана.
 
     Язык подсказки — про смысл числа, а не про источник: названия таблиц и полей
     управляющему ничего не говорят и только удлиняют текст.
     """
     body = "".join(f"<p>{x}</p>" for x in lines if x)
-    return (f'<details class="gd-help"><summary>{C.esc(title)}</summary>'
-            f'<div class="gd-help-b">{body}</div></details>')
+    if not body:
+        return ""
+    key = f"h{len(_HELP_TEXTS)}"
+    for k, v in _HELP_TEXTS.items():          # одинаковый текст — один ключ
+        if v == body:
+            key = k
+            break
+    else:
+        _HELP_TEXTS[key] = body
+    return (f'<details class="gd-help" data-h="{key}">'
+            f'<summary>{C.esc(title)}</summary>'
+            f'<div class="gd-help-b"></div></details>')
+
+
+def _help_data() -> str:
+    """Словарь подсказок в документ — один раз, после всей разметки."""
+    if not _HELP_TEXTS:
+        return ""
+    js = json.dumps(_HELP_TEXTS, ensure_ascii=False).replace("</", "<\\/")
+    return f'<script>window.__HELP={js};</script>'
+
+
+# Подстановка текста подсказки в момент раскрытия.
+#
+# Без скрипта подсказка окажется пустой, поэтому заголовок остаётся в разметке
+# всегда: читатель видит, что объяснение есть. Перед выгрузкой в PDF заполняются
+# все сразу — на бумаге раскрывать нечего.
+_HELP_JS = """
+<script>
+(function(){
+  function fill(d){
+    if(!d || d.dataset.filled === '1') return;
+    var box = d.querySelector('.gd-help-b');
+    var txt = (window.__HELP || {})[d.dataset.h];
+    if(!box || !txt) return;
+    box.innerHTML = txt;
+    d.dataset.filled = '1';
+  }
+  document.addEventListener('toggle', function(e){
+    var d = e.target;
+    if(d && d.classList && d.classList.contains('gd-help') && d.open) fill(d);
+  }, true);
+  /* клик ловим и на перехвате: toggle всплывает не во всех браузерах */
+  document.addEventListener('click', function(e){
+    var d = e.target.closest ? e.target.closest('details.gd-help') : null;
+    if(d) setTimeout(function(){ fill(d); }, 0);
+  }, true);
+  window.helpFillAll = function(root){
+    (root || document).querySelectorAll('details.gd-help').forEach(fill);
+  };
+})();
+</script>
+"""
 
 
 def _gd_verdict(c: dict, det: dict, d: dict, flow: dict | None,
@@ -2661,6 +2737,72 @@ def _cell_dialog() -> str:
     )
 
 
+# Выгрузка раздела «Матрица выполнения» — книгой из трёх листов.
+#
+# На экране матрица отвечает на вопрос «где не выполняется план», а построчный
+# разбор до организации в разметку не едет: он нужен в работе, а не в чтении, и
+# берётся из того же словаря, что и раскрытие ячейки (см. `_cell_data`).
+_MX_JS = """
+<script>
+(function(){
+  /* таблицу из разметки читаем как есть: на экране и в книге одни и те же числа */
+  function domRows(t){
+    var out = [];
+    if(!t) return out;
+    Array.prototype.forEach.call(t.rows, function(tr){
+      out.push(Array.prototype.map.call(tr.cells, function(td){
+        return (td.textContent || '').replace(/\\s+/g, ' ').trim();
+      }));
+    });
+    return out;
+  }
+
+  window.mxXls = function(btn){
+    if(typeof window.xlsxBook !== 'function') return;
+    var sec = btn.closest('section');
+    var lvl = btn.closest('.lvl');
+    if(!sec || !lvl) return;
+    var heat = sec.querySelector('table.matrix');
+    var top = null;
+    Array.prototype.forEach.call(sec.querySelectorAll('table'), function(t){
+      if(t !== heat && !top) top = t;
+    });
+
+    /* Детализация: все ячейки уровня подряд. Ключ словаря — «единица|сегмент»,
+       имя единицы берём из первой колонки той же строки матрицы, чтобы в книге
+       стояло то же название, что на экране. */
+    var names = {};
+    if(heat && heat.tBodies[0]){
+      Array.prototype.forEach.call(heat.tBodies[0].rows, function(tr){
+        var hit = tr.querySelector('td[data-cell]');
+        if(hit) names[hit.getAttribute('data-cell').split('|')[0]] =
+          (tr.cells[0].textContent || '').trim();
+      });
+    }
+    var cells = (window.__CELLS || {})[lvl.id] || {};
+    var det = [['Подразделение', 'Сегмент', 'Организация', 'номер организации',
+                'Изменение за год, чел', 'Сейчас, чел', 'Год назад, чел',
+                'Ответственный']];
+    Object.keys(cells).forEach(function(key){
+      var parts = key.split('|'), unit = names[parts[0]] || parts[0];
+      (cells[key].rows || []).forEach(function(r){
+        det.push([unit, parts[1], r[0], r[5] || '', r[1], r[2], r[3], r[4] || '']);
+      });
+    });
+
+    var name = lvl.querySelector('.lvl-name');
+    window.xlsxBook((name ? name.textContent.trim() + ' — ' : '')
+      + 'Матрица выполнения', [
+      {name: 'Матрица', rows: domRows(heat)},
+      {name: 'ТОП по невыполнению', rows: domRows(top)},
+      {name: 'Детализация по организациям', rows: det}
+    ]);
+  };
+})();
+</script>
+"""
+
+
 # Раскрытие ячейки матрицы: состав берётся из словаря уровня, разметка строится
 # на месте. Оверлей один на документ — см. `_cell_dialog`.
 _CELL_JS = """
@@ -2722,9 +2864,12 @@ function cellOpen(td){
         + cellNum(cell.top) + ' чел из \\u2212' + cellNum(cell.fl)
         + ' чел снижения ячейки.</div>';
     }
-    window.__cdRows = [['Организация', 'Ответственный', 'Изменение за год, чел',
+    window.__cdRows = [['Организация', 'номер организации', 'Ответственный',
+      'Изменение за год, чел',
                         'Сейчас, чел', 'Год назад, чел']].concat(
-      rows.map(function(r){ return [r[0], r[4] || '', r[1], r[2], r[3]]; }));
+      rows.map(function(r){
+        return [r[0], r[5] || '', r[4] || '', r[1], r[2], r[3]];
+      }));
     window.__cdName = unit + ' ' + seg + ' — снижение за год';
   }
   dlg.showModal();
@@ -3086,6 +3231,9 @@ function exportLevelPdf(idx){
   var lvl = document.getElementById('lvl-' + idx);
   var root = document.getElementById('print-root');
   if(!lvl || !root) return;
+  /* на бумаге подсказки раскрыты, а текст в них подставляется скриптом —
+     заполняем все до клонирования, иначе в PDF уедут пустые блоки */
+  if(typeof window.helpFillAll === 'function') window.helpFillAll(document);
   root.innerHTML = '';
   var clone = lvl.cloneNode(true);
   clone.removeAttribute('hidden');

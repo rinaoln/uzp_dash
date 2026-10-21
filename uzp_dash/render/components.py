@@ -71,13 +71,18 @@ def table(headers: Sequence[str], rows: Iterable[Sequence[str]],
     разметки — верный способ однажды попасть не в тот `<tr>`.
     """
     num = set(num_cols)
+    # Атрибут пишем только там, где он что-то значит: пустой class="" стоял у
+    # каждой текстовой ячейки, а их в отчёте сотни тысяч — это десятки килобайт
+    # ни за что.
     head = "".join(
-        f'<th class="{"num" if i in num else ""}">{esc(h)}</th>' for i, h in enumerate(headers)
+        f'<th{" class=\"num\"" if i in num else ""}>{esc(h)}</th>'
+        for i, h in enumerate(headers)
     )
     body = []
     for i_row, r in enumerate(rows):
         cells = "".join(
-            f'<td class="{"num" if i in num else ""}">{c}</td>' for i, c in enumerate(r)
+            f'<td{" class=\"num\"" if i in num else ""}>{c}</td>'
+            for i, c in enumerate(r)
         )
         attr = (row_attrs[i_row] if row_attrs and i_row < len(row_attrs) else "")
         body.append(f"<tr{attr}>{cells}</tr>")
@@ -277,7 +282,7 @@ def _grid(ticks: list[float], y_of, fmt=lambda v: fmt_num(v)) -> str:
     for t in ticks:
         y = y_of(t)
         out.append(
-            f'<line x1="{_PL}" y1="{y:.1f}" x2="{_CW - _PR}" y2="{y:.1f}" '
+            f'<line x1="{_PL}" y1="{y:.0f}" x2="{_CW - _PR}" y2="{y:.0f}" '
             f'stroke="var(--separator)" stroke-width="1"/>'
             f'<text x="{_PL - 8}" y="{y + 4:.1f}" text-anchor="end" font-size="11" '
             f'fill="var(--text-2)">{esc(fmt(t))}</text>')
@@ -327,14 +332,14 @@ def _months_axis(rows: list[dict], row_label: str = "") -> str:
         if i % every:
             continue
         x = _x_of(i, n)
-        out.append(f'<text x="{x:.1f}" y="{_CH - 32}" text-anchor="middle" '
+        out.append(f'<text x="{x:.0f}" y="{_CH - 32}" text-anchor="middle" '
                    f'font-size="11" fill="var(--text-2)">{esc(r["short"])}</text>')
         dv = _axis_delta(rows, i)
         if dv is None:
             continue
         col = "var(--good)" if dv >= 0 else "var(--bad)"
         sign = "+" if dv >= 0 else "−"
-        out.append(f'<text x="{x:.1f}" y="{_CH - 14}" text-anchor="middle" '
+        out.append(f'<text x="{x:.0f}" y="{_CH - 14}" text-anchor="middle" '
                    f'font-size="10.5" font-weight="600" fill="{col}">'
                    f'{esc(sign + fmt_num(abs(dv)))}</text>')
     return "".join(out)
@@ -367,13 +372,13 @@ def trend_plan_fact(rows: list[dict]) -> str:
         return _PT + (_CH - _PT - _PB) * (1 - (v - lo) / (hi - lo or 1))
 
     def path(key):
-        return " ".join(f'{_x_of(i, n):.1f},{y_of(r[key]):.1f}'
+        return " ".join(f'{_x_of(i, n):.0f},{y_of(r[key]):.0f}'
                         for i, r in enumerate(rows))
 
     fact_pts = path("fact")
     # пунктир плана идёт только по месяцам, где план есть: у прежней методики он
     # совпал бы с фактом точка в точку и читался как «план выполнен ровно»
-    plan_pts = " ".join(f'{_x_of(i, n):.1f},{y_of(r["plan"]):.1f}'
+    plan_pts = " ".join(f'{_x_of(i, n):.0f},{y_of(r["plan"]):.0f}'
                         for i, r in enumerate(rows) if not r.get("no_plan"))
     has_plan = len([r for r in rows if not r.get("no_plan")]) >= 2
     dots, vals = [], []
@@ -385,22 +390,22 @@ def trend_plan_fact(rows: list[dict]) -> str:
                f'факт {fmt_num(r["fact"])} · план {fmt_num(r["plan"])} · '
                f'выполнение {ex:.0f}%')
         dots.append(
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="var(--accent)" '
+            f'<circle cx="{x:.0f}" cy="{y:.0f}" r="4" fill="var(--accent)" '
             f'stroke="var(--surface-solid)" stroke-width="2">'
             f'<title>{esc(r["label"])}: {esc(tip)}</title></circle>')
         # значение факта над точкой: управляющему нужна величина, а не только форма
         # кривой. Ниже плана — подпись уходит вверх, выше — тоже вверх, но от точки,
         # поэтому линия плана её не перечёркивает
         vals.append(
-            f'<text x="{x:.1f}" y="{y - 11:.1f}" text-anchor="middle" font-size="9.5" '
+            f'<text x="{x:.0f}" y="{y - 11:.0f}" text-anchor="middle" font-size="9.5" '
             f'font-weight="600" fill="var(--text)">{esc(fmt_num(r["fact"]))}</text>')
     # подписи прямо у концов линий: надёжнее легенды, её приходится сопоставлять
     ly_f, ly_p = y_of(rows[-1]["fact"]), y_of(rows[-1]["plan"])
     if abs(ly_f - ly_p) < 14:            # линии сошлись — разводим подписи
         ly_p = ly_f + 14
-    ends = (f'<text x="{_CW - _PR + 6}" y="{ly_f + 4:.1f}" font-size="12" '
+    ends = (f'<text x="{_CW - _PR + 6}" y="{ly_f + 4:.0f}" font-size="12" '
             f'font-weight="700" fill="var(--accent)">факт</text>'
-            + (f'<text x="{_CW - _PR + 6}" y="{ly_p + 4:.1f}" font-size="12" '
+            + (f'<text x="{_CW - _PR + 6}" y="{ly_p + 4:.0f}" font-size="12" '
                f'font-weight="600" fill="var(--text-2)">план</text>'
                if has_plan else ""))
     under = ("изменение портфеля к прошлому месяцу" if no_plan_all(rows)
@@ -460,7 +465,7 @@ def trend_delta(rows: list[dict]) -> str:
         col = "var(--good)" if dv >= 0 else "var(--bad)"
         ex = (r["fact"] / r["plan"] * 100) if r["plan"] else 0
         bars.append(
-            f'<rect x="{x:.1f}" y="{y:.1f}" width="{bw:.1f}" height="{h:.1f}" rx="3" '
+            f'<rect x="{x:.0f}" y="{y:.0f}" width="{bw:.0f}" height="{h:.0f}" rx="3" '
             f'fill="{col}"><title>{esc(r["label"])}: {"+" if dv >= 0 else "−"}'
             f'{fmt_num(abs(dv))} чел к плану · выполнение {ex:.0f}%</title></rect>')
     ticks = [t for t in _ticks(-mx, mx, 3) if abs(t) > mx * 0.02]
@@ -469,7 +474,7 @@ def trend_delta(rows: list[dict]) -> str:
         f'<svg viewBox="0 0 {_CW} {_CH}" role="img" preserveAspectRatio="xMidYMid meet" '
         f'aria-label="Отклонение факта от плана помесячно">'
         + _grid(ticks, y_of, fmt=lambda v: ("+" if v > 0 else "−") + fmt_num(abs(v)))
-        + f'<line x1="{_PL}" y1="{zero:.1f}" x2="{_CW - _PR}" y2="{zero:.1f}" '
+        + f'<line x1="{_PL}" y1="{zero:.0f}" x2="{_CW - _PR}" y2="{zero:.0f}" '
           f'stroke="var(--text-2)" stroke-width="1.5"/>'
         + "".join(bars) + _months_axis(rows)
         + '</svg></div>'
