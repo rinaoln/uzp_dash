@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import json
 import math
 import re
 from datetime import datetime
@@ -18,6 +17,7 @@ import pandas as pd
 from ...registry import Context, dashboard
 from ...render import components as C
 from ...render import page
+from ...render import veil
 from ... import progress
 from . import analyze, bank, prompts, queries, segments, snapshot
 
@@ -1292,9 +1292,9 @@ def _cell_data(a: analyze.Analysis, idx: int, cells: dict) -> str:
         }
     if not payload:
         return ""
-    js = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
-    return (f'<script>window.__CELLS=window.__CELLS||{{}};'
-            f'window.__CELLS["lvl-{idx}"]={js};</script>')
+    holder, expr = veil.hide(payload, f"d-cells-{idx}")
+    return (f'{holder}<script>window.__CELLS=window.__CELLS||{{}};'
+            f'window.__CELLS["lvl-{idx}"]={expr};</script>')
 
 
 def _gap_cell(v: float) -> str:
@@ -1533,8 +1533,8 @@ def _help_data() -> str:
     """Словарь подсказок в документ — один раз, после всей разметки."""
     if not _HELP_TEXTS:
         return ""
-    js = json.dumps(_HELP_TEXTS, ensure_ascii=False).replace("</", "<\\/")
-    return f'<script>window.__HELP={js};</script>'
+    holder, expr = veil.hide(_HELP_TEXTS, "d-help")
+    return f'{holder}<script>window.__HELP={expr};</script>'
 
 
 # Подстановка текста подсказки в момент раскрытия.
@@ -4194,9 +4194,9 @@ def _flow_units_data(f: dict, idx: int) -> str:
     data = {"all": _flow_unit_rows(f.get("units") or [], 0)}
     for sg in segs:
         data[sg] = _flow_unit_rows((f.get("seg_units") or {}).get(sg) or [], 0)
-    js = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
-    return (f'<script>window.__FLOWU=window.__FLOWU||{{}};'
-            f'window.__FLOWU["{idx}"]={js};</script>')
+    holder, expr = veil.hide(data, f"d-flow-{idx}")
+    return (f'{holder}<script>window.__FLOWU=window.__FLOWU||{{}};'
+            f'window.__FLOWU["{idx}"]={expr};</script>')
 
 
 def _pct_signed(v: float) -> str:
@@ -4503,9 +4503,9 @@ def _outflow_detail_data(a: analyze.Analysis, idx: int) -> str:
                   round((r.get("move") or {}).get("fl", 0)),
                   _move_text(r.get("move"))] for r in rows],
     }
-    js = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
-    return (f'<script>window.__OFD=window.__OFD||{{}};'
-            f'window.__OFD["lvl-{idx}"]={js};</script>')
+    holder, expr = veil.hide(payload, f"d-out-{idx}")
+    return (f'{holder}<script>window.__OFD=window.__OFD||{{}};'
+            f'window.__OFD["lvl-{idx}"]={expr};</script>')
 
 
 def _move_text(mv: dict | None) -> str:

@@ -145,6 +145,7 @@ def load(ctx) -> Bank:
 
     mgr = read_sql(e, Q.ORG_MANAGER, {"role": Q.ROLE_ATTACHED})
     orgs = _merge_manager(orgs, mgr)
+    orgs = _hide_emp_names(orgs, ctx.params or {})
 
     progress.step("Активности воронки за 3 мес: агрегат по (ГОСБ, ИНН)")
     pf = {"ref_funnel": d["ref_funnel"], "funnel_from": d["funnel_from"],
@@ -960,6 +961,43 @@ def _merge_manager(orgs: pd.DataFrame, mgr: pd.DataFrame) -> pd.DataFrame:
                       f"{len(out)} — в отчёт попали дубли строк")
     out["emp_fio"] = out["emp_fio"].fillna("")
     _log_manager(out, m)
+    return out
+
+
+def _hide_emp_names(orgs: pd.DataFrame, params: dict) -> pd.DataFrame:
+    """ФИО закреплённого сотрудника → табельный номер. ПО ЗАПРОСУ, не по умолчанию.
+
+    По умолчанию в отчёте стоят ИМЕНА — так было и так нужно для работы: строка
+    списка называет, с кем говорить об этой организации, и табельный номер этого
+    не заменяет.
+
+    Параметр emp_names=False меняет имена на табельные номера. Он нужен ровно для
+    одного случая: готовый файл уходит по почте, а почтовый фильтр блокирует
+    отправку из-за персональных данных. Тогда почтовая версия собирается с этим
+    параметром, а полная — обычным способом.
+
+    Пустое закрепление остаётся пустым: «закрепления нет» и «имя не показываем»
+    — разные вещи, и путать их в отчёте нельзя.
+    """
+    if orgs is None or orgs.empty or "emp_fio" not in orgs:
+        return orgs
+    if params.get("emp_names", True):
+        return orgs
+    out = orgs.copy()
+    fio = out["emp_fio"].astype(str).str.strip()
+    ids = out["emp_saphr_id"] if "emp_saphr_id" in out else None
+    label = []
+    for i, nm in enumerate(fio):
+        if not nm:
+            label.append("")
+            continue
+        tab = None if ids is None else ids.iloc[i]
+        label.append(f"таб. {int(tab)}" if pd.notna(tab) else "закреплён")
+    out["emp_fio"] = label
+    n = int((fio != "").sum())
+    progress.done(f"По просьбе сборки (emp_names=False) ФИО заменены табельным "
+                  f"номером: {n} закреплений. Полная версия с именами собирается "
+                  f"без этого параметра")
     return out
 
 

@@ -29,7 +29,6 @@ LLM. Запускается как любой другой дэш: generate_dash
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -39,6 +38,7 @@ from ... import agency, anonymize, config, progress
 from ...db import get_engine, read_sql
 from ...registry import Context, dashboard
 from ...render import components as C
+from ...render import veil
 from ..tb_health import segments
 from . import queries as Q
 
@@ -870,8 +870,8 @@ def _export(variants: list, lbl: dict) -> str:
     data = {"head_c": cut_head("Ведомство"), "head_h": cut_head("Холдинг"),
             "head_i": cut_head("Отрасль"), "head_o": head_o, "vars": out,
             "period": f'{lbl["m1_nom"]} — {lbl["m0_nom"]}'}
-    js = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
-    return f'<script>window.__RGS={js};</script>'
+    holder, expr = veil.hide(data, "rgs-data")
+    return f'{holder}<script>window.__RGS={expr};</script>'
 
 
 def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
@@ -960,6 +960,7 @@ def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
 <style>{_CSS}</style>
 </head>
 <body>
+{veil.DECODER}
 <div class="deck">
 {_toolbar(tbs)}
 {s1}

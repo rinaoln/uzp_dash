@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from .theme import BASE_CSS
+from .veil import DECODER
 
 # Требование безопасности: слово «ИНН» в файле блокирует пересылку отчёта.
 # Меняем на «Орг.» ТОЛЬКО как отдельное слово (иначе пострадают «длинный»,
@@ -40,6 +41,7 @@ def page(title: str, subtitle: str, body: str, footer: str = "",
 <style>{BASE_CSS if css is None else css}</style>
 </head>
 <body>
+{DECODER}
 <div class="wrap">
 <header>
 <div class="eyebrow">УЗП · Дэшборд</div>

@@ -9,6 +9,8 @@ import math
 import re
 from typing import Iterable, Sequence
 
+from . import veil
+
 
 def esc(v) -> str:
     return _html.escape("" if v is None else str(v))
@@ -539,8 +541,9 @@ def _bold(t: str) -> str:
 _PACK_DICT = ("lever", "gosb", "seg", "reason", "action", "emp")
 
 
-def _pack(rows: list[dict]) -> str:
-    """Строки таблицы → JS-выражение, которое разворачивается в те же объекты.
+def _pack(rows: list[dict], slot: str) -> tuple[str, str]:
+    """Строки таблицы → хранилище и JS-выражение, которое разворачивается в те же
+    объекты.
 
     Повторяющиеся строковые поля выносятся в словари, а сама строка становится
     массивом индексов и чисел: имена ключей перестают повторяться в каждой записи.
@@ -552,14 +555,11 @@ def _pack(rows: list[dict]) -> str:
 
     ФИО закреплённого сотрудника (`emp`) идёт именно СЛОВАРЁМ: сотрудников тысячи,
     а строк на проме десятки тысяч — повтор имени в каждой строке раздул бы файл.
+
+    САМ PAYLOAD В ДОКУМЕНТ ОТКРЫТЫМ ТЕКСТОМ НЕ ПОПАДАЕТ — см. `render/veil`.
     """
-    import json
-
-    def js(v):
-        return json.dumps(v, ensure_ascii=False).replace("</", "<\\/")
-
     if not rows:
-        return "[]"
+        return "", "[]"
     dicts = {c: [] for c in _PACK_DICT}
     idx = {c: {} for c in _PACK_DICT}
     for c in _PACK_DICT:
@@ -576,8 +576,10 @@ def _pack(rows: list[dict]) -> str:
                idx["action"][r.get("action") or ""],
                kidx[float(r.get("needk") or 0.0)],
                idx["emp"][r.get("emp") or ""]] for r in rows]
-    d = ",".join(f'{c[0]}:{js(dicts[c])}' for c in _PACK_DICT)
-    return (f'(function(){{var D={{{d}}},K={js(ks)},R={js(packed)};'
+    blob = {"d": {c[0]: dicts[c] for c in _PACK_DICT}, "k": ks, "r": packed}
+    holder, expr = veil.hide(blob, slot)
+    return (holder,
+            f'(function(){{var P={expr},D=P.d,K=P.k,R=P.r;'
             f'return R.map(function(x){{return {{inn:x[0],company:x[1],'
             f'lever:D.l[x[2]],gosb:D.g[x[3]],seg:D.s[x[4]],fl:x[5],fot:x[6],'
             f'reason:D.r[x[7]],action:D.a[x[8]],needk:K[x[9]],'
@@ -609,7 +611,7 @@ def orgs_explorer(table_id: str, rows: list[dict], gosb_options: list[str],
     JS распаковывает payload обратно в ТЕ ЖЕ объекты, поэтому фильтрация, поиск и
     отрисовка ниже не знают об упаковке вовсе.
     """
-    data = _pack(rows)
+    holder, data = _pack(rows, f"d-{esc(table_id)}")
     gopts = "".join(f'<option value="{esc(g)}">{esc(g)}</option>' for g in gosb_options)
     sopts = "".join(f'<option value="{esc(s)}">{esc(s)}</option>' for s in (seg_options or []))
     tid = esc(table_id)
@@ -641,6 +643,7 @@ def orgs_explorer(table_id: str, rows: list[dict], gosb_options: list[str],
     <th class="num">Эффект, чел</th><th class="num">ФОТ, млн</th><th>Причина / действие</th>
   </tr></thead><tbody></tbody>
 </table></div>
+{holder}
 <div class="pager">
   <div class="info" id="{tid}-i"></div>
   <div class="btns"><button id="{tid}-p">← Назад</button><button id="{tid}-n">Вперёд →</button></div>
