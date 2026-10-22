@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
-from ... import progress
+from ... import anonymize, progress
 from ...db import execute, read_sql, session
 from . import forecast, queries as Q, segments, text_rules
 
@@ -840,7 +840,17 @@ def _prepare_orgs(orgs: pd.DataFrame, apparat: set, tb_of: dict) -> pd.DataFrame
     o["fot_potential_mln"] = o["fot_potential_amt"] / RUB_TO_MLN
     o["fot_outflow_mln"] = o["fot_outflow_amt"] / RUB_TO_MLN
     o["seg_name"] = o["segment_big"].map(segments.short_of_big).fillna("—")
+    # ИМЯ ЧЕЛОВЕКА ВМЕСТО НАЗВАНИЯ. Индивидуальный предприниматель назван в
+    # справочнике собственным именем — это персональные данные, и в отчёт они
+    # не идут: вместо имени остаётся номер организации. Правило применяется
+    # здесь, в точке загрузки, и поэтому действует сразу везде — в списках, в
+    # карточках, в выгрузках и в псевдонимах для LLM.
     o["company_name"] = o["company_name"].fillna("")
+    o, n_person = anonymize.mask_people(o)
+    if n_person:
+        progress.done(f"Названия-имена людей заменены номером организации: "
+                      f"{n_person} из {len(o)} строк (ИП и КФХ названы в "
+                      f"справочнике именем владельца)")
     o["in_ref"] = o["in_ref"].fillna(False).astype(bool)
     return o
 

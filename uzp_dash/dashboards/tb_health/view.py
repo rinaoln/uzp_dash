@@ -1286,7 +1286,9 @@ def _cell_data(a: analyze.Analysis, idx: int, cells: dict) -> str:
             # номер организации идёт ПОСЛЕДНИМ: оверлей читает строку по
             # индексам, и вставка в середину сдвинула бы ему все колонки
             "rows": [[r["name"], round(r["yoy"]), round(r["cur"]), round(r["was"]),
-                      r["emp"], str(r["inn"])] for r in cell["rows"]],
+                      r["emp"], str(r["inn"]),
+                      round((r.get("move") or {}).get("fl", 0)),
+                      _move_text(r.get("move"))] for r in cell["rows"]],
         }
     if not payload:
         return ""
@@ -2662,7 +2664,8 @@ _OFD_JS = """
      лежат в документе молча и попадают только в книгу, отдельным листом. */
   var COLS = ['Организация', 'номер организации', 'Подразделение', 'Сегмент',
               'отток', 'возврат', 'потери', 'период оттока', 'причина ухода',
-              'что обещали', 'ответственный'];
+              'что обещали', 'ответственный',
+              'переток, чел', 'куда ушли ФЛ (номер организации)'];
 
   function detailRows(lvl, seg){
     var d = (window.__OFD || {})[lvl ? lvl.id : ''] || {};
@@ -2671,7 +2674,8 @@ _OFD_JS = """
     });
     return [COLS].concat(rows.map(function(r){
       /* потери уходят со знаком минус: в книге это убыль, а не величина */
-      return [r[0], r[1], r[2], r[3], r[4], r[5], -r[6], r[7], r[8], r[9], r[10]];
+      return [r[0], r[1], r[2], r[3], r[4], r[5], -r[6], r[7], r[8], r[9],
+              r[10], r[11] || '', r[12] || ''];
     }));
   }
 
@@ -2752,7 +2756,11 @@ def _cell_dialog() -> str:
             'строится прогноз.',
             '<b>Сегмент.</b> Берётся из справочника клиентов и закреплён за самой '
             'организацией, поэтому в строке подразделения она стоит ровно в одной '
-            'ячейке.')
+            'ячейке.',
+            '<b>Метка «переток».</b> У организации, из которой люди перешли в '
+            'другую организацию, рядом с названием стоит метка: снижение там '
+            'объясняется переходом, а не потерей клиента. Куда именно ушли и '
+            'сколько человек — в подсказке к метке и в выгрузке.')
         + '<div id="cd-rows"></div></div>'
         '</div></dialog>'
     )
@@ -2803,11 +2811,13 @@ _MX_JS = """
     var cells = (window.__CELLS || {})[lvl.id] || {};
     var det = [['Подразделение', 'Сегмент', 'Организация', 'номер организации',
                 'Изменение за год, чел', 'Сейчас, чел', 'Год назад, чел',
-                'Ответственный']];
+                'Ответственный', 'переток, чел',
+                'куда ушли ФЛ (номер организации)']];
     Object.keys(cells).forEach(function(key){
       var parts = key.split('|'), unit = names[parts[0]] || parts[0];
       (cells[key].rows || []).forEach(function(r){
-        det.push([unit, parts[1], r[0], r[5] || '', r[1], r[2], r[3], r[4] || '']);
+        det.push([unit, parts[1], r[0], r[5] || '', r[1], r[2], r[3],
+                  r[4] || '', r[6] || '', r[7] || '']);
       });
     });
 
@@ -2875,7 +2885,12 @@ function cellOpen(td){
   } else {
     host.innerHTML = rows.map(function(r){
       var emp = r[4] ? '<span class="gd-emp">' + cellEsc(r[4]) + '</span>' : '';
-      return '<div class="gd-row"><span>' + cellEsc(r[0]) + emp + '</span>'
+      /* людей не потеряли, а они перешли в другую организацию — это другой
+         разговор с клиентом, и видно это должно быть прямо в строке */
+      var mv = r[6] ? '<span class="mv-chip" title="Стали получать зарплату '
+        + 'в других организациях: ' + cellEsc(r[7]) + '. Полный список — в '
+        + 'выгрузке.">переток ' + cellNum(r[6]) + ' чел \u2192</span>' : '';
+      return '<div class="gd-row"><span>' + cellEsc(r[0]) + mv + emp + '</span>'
         + '<span>\\u2212' + cellNum(Math.abs(r[1])) + '</span>'
         + '<span class="gd-why">сейчас ' + cellNum(r[2]) + ' чел, год назад '
         + cellNum(r[3]) + ' чел</span></div>';
@@ -2886,10 +2901,11 @@ function cellOpen(td){
         + ' чел снижения ячейки.</div>';
     }
     window.__cdRows = [['Организация', 'номер организации', 'Ответственный',
-      'Изменение за год, чел',
-                        'Сейчас, чел', 'Год назад, чел']].concat(
+      'Изменение за год, чел', 'Сейчас, чел', 'Год назад, чел',
+      'переток, чел', 'куда ушли ФЛ (номер организации)']].concat(
       rows.map(function(r){
-        return [r[0], r[5] || '', r[4] || '', r[1], r[2], r[3]];
+        return [r[0], r[5] || '', r[4] || '', r[1], r[2], r[3],
+                r[6] || '', r[7] || ''];
       }));
     window.__cdName = unit + ' ' + seg + ' — снижение за год';
   }
@@ -4483,11 +4499,24 @@ def _outflow_detail_data(a: analyze.Analysis, idx: int) -> str:
                   ", ".join(r["months"][:4]),
                   r.get("out_reason", "") or "",
                   _promise_text(r, cur),
-                  r.get("emp", "") or ""] for r in rows],
+                  r.get("emp", "") or "",
+                  round((r.get("move") or {}).get("fl", 0)),
+                  _move_text(r.get("move"))] for r in rows],
     }
     js = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
     return (f'<script>window.__OFD=window.__OFD||{{}};'
             f'window.__OFD["lvl-{idx}"]={js};</script>')
+
+
+def _move_text(mv: dict | None) -> str:
+    """Куда ушли люди — одной строкой для выгрузки: ИНН и сколько человек."""
+    if not mv or not mv.get("to"):
+        return ""
+    out = "; ".join(f'{x["inn"]}' + (f' ({x["name"]})' if x["name"] else "")
+                    + f' — {x["fl"]:.0f} чел' for x in mv["to"])
+    if mv.get("n_to", 0) > len(mv["to"]):
+        out += f'; и ещё {mv["n_to"] - len(mv["to"])}'
+    return out
 
 
 def _promise_text(r: dict, cur_label: str) -> str:
@@ -4504,6 +4533,28 @@ def _promise_text(r: dict, cur_label: str) -> str:
     if month:
         parts.append(f"срок {month}")
     return " · ".join(parts)
+
+
+def _move_chip(mv: dict | None, month: str = "") -> str:
+    """Метка «переток» у строки организации.
+
+    Отток говорит, что людей стало меньше. Переток отвечает на следующий
+    вопрос — ушли ли они из банка или просто получают зарплату в другой
+    организации: разговор с клиентом в этих случаях разный. Поэтому метка
+    стоит прямо в строке, а куда именно ушли — в подсказке и в выгрузке.
+    """
+    if not mv or not mv.get("to"):
+        return ""
+    where = "; ".join(
+        f'{x["name"] or "Орг."} (ИНН {x["inn"]}) — {x["fl"]:.0f} чел'
+        for x in mv["to"])
+    more = (f'; и ещё {mv["n_to"] - len(mv["to"])} '
+            if mv.get("n_to", 0) > len(mv["to"]) else "")
+    when = f' за {C.month_ru(month)}' if month else ""
+    tip = (f'Люди этой организации стали получать зарплату в других '
+           f'организациях{when}: {where}{more}. Полный список — в выгрузке.')
+    return (f'<span class="mv-chip" title="{C.esc(tip)}">переток '
+            f'{C.fmt_num(mv["fl"])} чел →</span>')
 
 
 def _outflow_funnel(o: dict) -> str:
@@ -4584,6 +4635,14 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None,
             '<b>Когда обещание считается невыполненным.</b> Названо число — '
             'вернулось меньше обещанного. Названо без числа — не вернулся никто. '
             'Возврат берётся из витрины возвратов, а не со слов.',
+            '<b>Метка «переток» в строке.</b> Значит, что люди этой '
+            'организации стали получать зарплату в ДРУГОЙ организации — то '
+            'есть банк их не потерял, и разговор с клиентом здесь другой. '
+            'Подсказка при наведении называет, куда именно и сколько человек, '
+            'а полный список с номерами организаций уходит в выгрузку. '
+            'Считается по ведомостям за последнюю пару закрытых месяцев, а '
+            'окно оттока — три месяца: поэтому метка есть не у каждой строки, '
+            'и её число меньше оттока.',
             '<b>Почему клиент может не попасть ни в один список.</b> Часть людей '
             'вернулась — результат есть, пусть и неполный; либо месяц ухода старше '
             'окна, за которое мы видим работу по клиентам, и сказать о ней нечего.',
@@ -4655,7 +4714,8 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None,
         groups.append({"title": title, "sub": sub,
                        "html": _outflow_group(rows_src, unit, title, lead, kind,
                                               (a.dates or {}).get("label", ""),
-                                              n_all, kept_all)})
+                                              n_all, kept_all,
+                                              (a.flow or {}).get("m_cur", ""))})
     return C.section(
         "Отток",
         _ai(ai) + C.card(head + _outflow_filter(o, idx) + _outflow_tabs(groups))
@@ -4797,7 +4857,8 @@ def _month_passed(month: str, cur_label: str) -> bool:
 
 def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
                    kind: str = "worked", cur_label: str = "",
-                   n_all: int = 0, kept_all: float = 0.0) -> str:
+                   n_all: int = 0, kept_all: float = 0.0,
+                   move_month: str = "") -> str:
     """Одна группа раздела «Отток»: заголовок, пояснение и таблица клиентов.
 
     Последняя колонка зависит от группы и отвечает на её собственный вопрос: в
@@ -4849,7 +4910,8 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
         else:
             who = ""
         row = [
-            f'{C.esc(r["name"])}<div class="gd-emp">{C.esc(r["unit"])}{who}</div>',
+            f'{C.esc(r["name"])}{_move_chip(r.get("move"), move_month)}'
+            f'<div class="gd-emp">{C.esc(r["unit"])}{who}</div>',
             C.fmt_num(r["gone"]),
             C.fmt_num(r["ret"]) if r["ret"] else "—",
             f'<b style="color:var(--bad)">−{C.fmt_num(r["kept"])}</b>',

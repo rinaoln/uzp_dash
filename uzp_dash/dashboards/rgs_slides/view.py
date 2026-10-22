@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ... import agency, config, progress
+from ... import agency, anonymize, config, progress
 from ...db import get_engine, read_sql
 from ...registry import Context, dashboard
 from ...render import components as C
@@ -236,7 +236,14 @@ def _load(engine, m0: str, m1: str, m2: str, my: str = "") -> pd.DataFrame:
         wide["industry_name"] = ""
     wide["industry_name"] = (wide["industry_name"].fillna("").astype(str)
                              .str.strip())
-    wide["company_name"] = wide["company_name"].fillna("—")
+    wide["company_name"] = wide["company_name"].fillna("")
+    # Имя человека вместо названия организации (ИП, КФХ) в отчёт не идёт —
+    # то же правило, что и в основном отчёте, и живёт оно в одном месте
+    wide, n_person = anonymize.mask_people(wide)
+    if n_person:
+        progress.done(f"Названия-имена людей заменены номером организации: "
+                      f"{n_person} из {len(wide)} строк")
+    wide["company_name"] = wide["company_name"].replace("", "—")
 
     # Ведомство — правилами по наименованию: поля в витрине нет. Отрасль из
     # витрины ЕПК идёт подсказкой: она срабатывает только там, где наименование

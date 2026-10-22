@@ -61,6 +61,9 @@ OUTFLOW_DETAIL_N = 200
 # Ярлык организации, у которой сегмента в справочнике нет. Отдельной
 # строкой, а не припиской к крупнейшему сегменту: это отсутствие данных.
 SEG_UNKNOWN = "сегмент не указан"
+# Сколько направлений перетока показываем по одной организации. Больше трёх
+# в строку не читаются, а полный список уходит в выгрузку.
+MOVE_TOP_N = 3
 # Сколько клиентов показывать в каждой из двух групп раздела «Отток».
 TOP_CLIENTS = 15
 # Сколько организаций показывать в раскрытой ячейке матрицы (единица × сегмент).
@@ -123,6 +126,8 @@ class Analysis:
     cell_top: dict = field(default_factory=dict)
     ranks: dict = field(default_factory=dict)        # единица -> (ранг, всего ТБ)
     wow: dict = field(default_factory=dict)          # динамика к прошлой сборке
+    # ИНН откуда -> куда ушли его люди за последнюю пару закрытых месяцев
+    moves: dict = field(default_factory=dict)
     # Рабочие кадры уровня. Живут в объекте, потому что уровень собирается в два
     # шага: `prepare` (без БД и LLM) и `finish` (разбор текста) — между ними одним
     # запросом читаются тексты воронки сразу по всем уровням.
@@ -254,7 +259,7 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
                                  unit_src="tb_id", unit_label="ТБ",
                                  funnel_months=b.fmonths, trend=b.trend)
     a.outflow = _outflow_top(a, b.fmonths, b.promises, b.tb_of,
-                             seg_by_inn=b.seg_by_inn)
+                             seg_by_inn=b.seg_by_inn, moves=a.moves)
     _log_outflow_section(a)
     return a
 
@@ -326,7 +331,7 @@ def finish(ctx, b: Bank, a: Analysis, text_df) -> Analysis:
                                  a.fc_stats.get("conv_by_gosb", {}), d,
                                  funnel_months=fmonths, trend=b.trend)
     a.outflow = _outflow_top(a, fmonths, b.promises, b.tb_of,
-                             seg_by_inn=b.seg_by_inn)
+                             seg_by_inn=b.seg_by_inn, moves=a.moves)
     _log_outflow_section(a)
     n_named = sum(sum(len(g["rows"]) for g in v["out_groups"])
                   for v in a.gosb_detail.values())
@@ -406,7 +411,9 @@ def _assemble(b: Bank, tb_short: str, tb_id: int, tb_full: str, ref_date: str,
         level=level, unit_label=unit_label, unit_src=unit_src,
     )
     a.orgs, a.orgs_fc, a.detail, a.seg_gaps = orgs, orgs_fc, detail, seg_gaps
-    a.cell_top = _cell_top(detail, unit_src, b.seg_by_inn)
+    moves = _moves_by_inn(b, None if level == "sb" else tb_id)
+    a.moves = moves
+    a.cell_top = _cell_top(detail, unit_src, b.seg_by_inn, moves=moves)
     a.flow = _flow(b, None if level == "sb" else tb_id, unit_label)
     return a
 
@@ -622,6 +629,83 @@ def _flow_segments(cur: pd.DataFrame, b: Bank) -> tuple[list, float, float]:
     return out, same, cross
 
 
+def _moves_by_inn(b: Bank, tb_id: int | None = None,
+                  top_n: int = MOVE_TOP_N) -> dict:
+    """Куда ушли люди из организации: {ИНН откуда: {fl, to: [{inn, fl, name}]}}.
+
+    Отток показывает, что людей стало меньше. Это НЕ значит, что банк их
+    потерял: человек мог перейти в другую организацию и получать зарплату там
+    же, у нас. Разговор с клиентом в этих двух случаях разный, и отличить их
+    можно только по ведомостям — единственной витрине с физлицами.
+
+    Источник — те же строки `side='move'`, по которым считается переток между
+    сегментами: ведомости дают пару «ИНН откуда → ИНН куда» и число людей.
+    Поэтому разрез доступен РОВНО за последнюю пару закрытых месяцев, а окно
+    оттока — три месяца; на экране и в выгрузке месяц подписан, чтобы это
+    число не принимали за весь отток.
+
+    Направление без разбора (нечисловой ИНН в ведомости, организация вне
+    справочника) не выбрасывается: человек ушёл, и строка об этом остаётся —
+    просто без имени.
+    """
+    df = getattr(b, "flow", None)
+    if df is None or df.empty or "side" not in df:
+        return {}
+    last = df.attrs.get("m_cur")
+    mv = df[df["side"] == "move"]
+    if last and "month" in mv:
+        mv = mv[mv["month"] == last]
+    if tb_id is not None and "tb_id" in mv:
+        mv = mv[mv["tb_id"] == tb_id]
+    if mv.empty:
+        return {}
+    names = _org_names(b)
+    out: dict = {}
+    for r in mv.itertuples():
+        src, _, dst = str(r.kind).partition(">")
+        try:
+            src_i, dst_i = int(src), int(dst)
+        except ValueError:
+            continue
+        d = out.setdefault(src_i, {"fl": 0.0, "_to": {}})
+        d["fl"] += float(r.fl)
+        d["_to"][dst_i] = d["_to"].get(dst_i, 0.0) + float(r.fl)
+    for d in out.values():
+        rows = sorted(({"inn": i, "fl": f} for i, f in d["_to"].items()),
+                      key=lambda x: -x["fl"])
+        d["n_to"] = len(rows)
+        d["to"] = [{"inn": x["inn"], "fl": x["fl"],
+                    "name": names.get(x["inn"], "")} for x in rows[:top_n]]
+        d.pop("_to")
+    return out
+
+
+def _org_names(b: Bank) -> dict:
+    """ИНН → название организации по всему банку.
+
+    Карта нужна перетоку: организация, в которую ушли люди, может относиться к
+    другому подразделению и вообще к другому банку, поэтому имя ищется по всей
+    витрине, а не по срезу уровня. Не нашлось — остаётся один ИНН, и это
+    честнее выдуманного имени.
+    """
+    cached = getattr(b, "_names_cache", None)
+    if cached is not None:
+        return cached
+    names: dict = {}
+    for df in (getattr(b, "orgs", None), getattr(b, "orgs_tb", None)):
+        if df is None or df.empty or "company_name" not in df:
+            continue
+        for inn, nm in zip(df["inn"], df["company_name"]):
+            nm = str(nm or "").strip()
+            if nm and int(inn) not in names:
+                names[int(inn)] = nm
+    try:
+        b._names_cache = names
+    except Exception:                      # noqa: BLE001 — кэш необязателен
+        pass
+    return names
+
+
 def _flow_names(b: Bank, tb_id: int | None) -> dict:
     """Имена единиц уровня для таблицы движения."""
     if tb_id is None:
@@ -631,7 +715,7 @@ def _flow_names(b: Bank, tb_id: int | None) -> dict:
 
 
 def _cell_top(detail: pd.DataFrame, unit_src: str, seg_by_inn: dict,
-              top_n: int = CELL_TOP_N) -> dict:
+              top_n: int = CELL_TOP_N, moves: dict | None = None) -> dict:
     """Организации со снижением по ФЛ год к году в каждой ячейке (единица × сегмент).
 
     Это содержимое раскрытой ячейки матрицы: ячейка говорит, что сегмент не
@@ -673,6 +757,7 @@ def _cell_top(detail: pd.DataFrame, unit_src: str, seg_by_inn: dict,
             "name": str(getattr(r, "company_name", "") or "").strip() or f"Орг. {inn}",
             "emp": (str(getattr(r, "emp_fio", "") or "").strip() if has_emp else ""),
             "yoy": yoy, "cur": cur, "was": cur - yoy,
+            "move": (moves or {}).get(inn),
         })
     for cell in out.values():
         cell["rows"].sort(key=lambda x: x["yoy"])
@@ -2036,7 +2121,8 @@ def _outflow_reasons(rows: list) -> tuple[list, int, float]:
 
 def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
                  promises: pd.DataFrame | None = None, tb_of: dict | None = None,
-                 top_n: int = OUTFLOW_TOP_N, seg_by_inn: dict | None = None) -> dict:
+                 top_n: int = OUTFLOW_TOP_N, seg_by_inn: dict | None = None,
+                 moves: dict | None = None) -> dict:
     """Крупнейшие оттоки уровня и что по ним делали.
 
     Собирается из тех же строк (единица, организация), что и остальной разбор, но
@@ -2116,6 +2202,8 @@ def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,
                 # сегмент закреплён за организацией в справочнике клиентов —
                 # тем же, по которому сегмент проставляется во всём отчёте
                 "seg": (seg_by_inn or {}).get(inn) or SEG_UNKNOWN,
+                # куда ушли люди этой организации — если ведомости это знают
+                "move": (moves or {}).get(inn),
                 "name": names.get(k, f"Орг. {inn}"), "emp": emp_of.get(k, ""),
                 "gone": float(r.out_qty), "ret": float(r.ret_qty),
                 "kept": float(r.out_kept), "months": months,

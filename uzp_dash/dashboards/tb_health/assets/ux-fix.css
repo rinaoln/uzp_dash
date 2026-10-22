@@ -1107,3 +1107,20 @@ body.pdf-measure #print-root {
   .of-flt { display: none !important; }
   .of-seg[hidden] { display: none !important; }
 }
+
+/* ============================================================
+   Метка перетока в строке организации
+   ============================================================
+   Отток говорит, что людей стало меньше. Переток отвечает на следующий
+   вопрос — ушли ли они из банка или получают зарплату в другой организации у
+   нас же. Разговор с клиентом в этих случаях разный, поэтому метка стоит
+   прямо в строке: подсказка называет, куда именно ушли, полный список — в
+   выгрузке. Цвет нейтральный, не красный: это не потеря. */
+.mv-chip {
+  display: inline-block; margin-left: 6px; padding: 1px 7px;
+  font-size: 11px; font-weight: 650; white-space: nowrap; cursor: help;
+  color: var(--accent); border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.gd-row .mv-chip { margin-left: 7px; }
+@media print { .mv-chip { background: none; padding: 1px 0; } }
