@@ -2538,6 +2538,27 @@ _UXFIX_JS = """
     });
   });
 
+  /* Кнопка плашки показателей. Скрипт дизайна называет её «Показать
+     показатели» / «Свернуть показатели» и переписывает подпись при каждом
+     нажатии, поэтому правим не один раз, а после каждого клика: слушатель на
+     документе срабатывает позже обработчика самой кнопки. Файл дизайна не
+     трогаем — он остаётся копией макета. */
+  function fixToggle(){
+    document.querySelectorAll('.forecast-toggle').forEach(function(b){
+      var l = b.querySelector('.st-label');
+      if(!l) return;
+      var open = b.classList.contains('open');
+      var want = open ? 'Свернуть ФОТ и ФЛ' : 'Раскрыть ФОТ и ФЛ';
+      if(l.textContent !== want) l.textContent = want;
+      b.title = open
+        ? 'Нажмите, чтобы свернуть показатели по ФОТ и получателям'
+        : 'Нажмите, чтобы раскрыть показатели по ФОТ и получателям';
+    });
+  }
+  fixToggle();
+  window.addEventListener('load', fixToggle);
+  document.addEventListener('click', function(){ setTimeout(fixToggle, 0); });
+
   /* Подписи полей поиска в шапке: «Начните вводить название банк…» не влезало
      в поле и обрывалось на полуслове. */
   function fixPlaceholders(){
@@ -2993,185 +3014,57 @@ function pdfKeep(root){
   });
 }
 
-/* Единицы вёрстки: то, что нельзя разрывать между листами. Если сам блок выше
-   листа, разрыв неизбежен — тогда единицами становится его начинка. Иначе
-   принтер уводит на следующий лист неделимую таблицу внутри высокой карточки,
-   а лист перед ней остаётся заполненным на четверть. */
+/* ПОДГОНКА ПОД ЛИСТ: ПРАВИЛА ВМЕСТО РАСЧЁТА РАСКЛАДКИ.
+   ---------------------------------------------------------------------------
+   Раньше здесь жила модель разбивки на листы: скрипт мерил положение каждого
+   блока, считал, на какой лист он попадёт, и ужимал масштаб, чтобы блок влез в
+   остаток листа. Модель приходилось держать в точности совпадающей с тем, как
+   страницу разложит принтер, — и она расходилась. Замер идёт на экране, печать
+   на листе 186 мм: другая ширина, другие переносы, другие брейкпоинты, плюс
+   forced break перед каждым разделом. Замер давал двадцать листов, Chrome
+   печатал тридцать, и аккуратно подогнанные блоки разъезжались.
+
+   Теперь скрипт не предсказывает раскладку вовсе. Он делает две вещи, для
+   которых положение блока на листе не нужно:
+
+     1) то, что шире полосы набора, ужимает по ШИРИНЕ (ширина от разбивки на
+        листы не зависит);
+     2) блоку выше половины листа РАЗРЕШАЕТ разрыв: двум таким на одном листе
+        всё равно не встать, а запрет разрыва только гонит блок на новый лист и
+        оставляет предыдущий полупустым.
+
+   Всё остальное делает сам браузер по правилам печати в ux-fix.css: блок
+   меньше половины листа помечен неделимым и не рвётся НИКОГДА, у таблиц
+   повторяется шапка и не рвутся строки, раздел начинается с нового листа.
+   Это не так плотно, как идеально подогнанная раскладка, зато верно всегда. */
 var PDF_ATOM = '.card, .gd-block, .print-keep, table, details, .kpi';
 
-function pdfUnits(root, maxH, top0){
-  var all = Array.prototype.slice.call(root.querySelectorAll(PDF_ATOM));
-  all.forEach(function(el){
-    var r = el.getBoundingClientRect();
-    el.__pdf = {el: el, sec: false, top: r.top - top0, h: r.height,
-                w: Math.max(el.scrollWidth, r.width)};
-  });
-  var units = [], big = [];
-  all.forEach(function(el){
-    var p = el.parentElement, own = true;
-    while(p && p !== root){
-      if(p.__pdf){
-        if(p.__pdf.h <= maxH){ own = false; break; }  /* целым идёт блок выше */
-        big.push(p);                                  /* а этот придётся рвать */
-      }
-      p = p.parentElement;
-    }
-    if(own) units.push(el.__pdf);
-  });
-  all.forEach(function(el){ el.__pdf = null; });
-  return {units: units, big: big};
-}
-
-/* Длинная таблица рвётся по строкам, и два разрыва портят лист особенно
-   заметно: шапка с единственной строкой под ней и одинокая последняя строка.
-   Считаем строки так же, как принтер, и в этих двух случаях сдвигаем таблицу
-   или уводим предыдущую строку вместе с последней. Возвращаем, сколько пустоты
-   при этом осталось на листах, — ниже по документу всё сдвинется на столько. */
-function pdfRows(tb, pos, maxH){
-  var rows = Array.prototype.map.call(tb.querySelectorAll('tbody tr'), function(tr){
-    return tr.getBoundingClientRect().height;
-  });
-  if(rows.length < 2) return 0;
-  var cap = tb.querySelector('caption'), th = tb.querySelector('thead');
-  var capH = cap ? cap.getBoundingClientRect().height : 0;
-  var headH = th ? th.getBoundingClientRect().height : 0;   /* шапка повторяется */
-  var add = 0;
-  /* шапка и первые две строки — всегда на одном листе */
-  if(pos > 1 && pos + capH + headH + rows[0] + rows[1] > maxH){
-    add += maxH - pos;
-    pos = 0;
-  }
-  var y = pos + capH + headH, start = 0;
-  for(var i = 0; i < rows.length; i++){
-    if(y + rows[i] <= maxH){ y += rows[i]; continue; }
-    if(i === rows.length - 1 && i - start >= 2){
-      y -= rows[i - 1];                  /* последняя строка не останется одна */
-      add += maxH - y;
-      y = headH + rows[i - 1];
-    } else {
-      add += maxH - y;
-      y = headH;
-    }
-    start = i;
-    y += rows[i];
-  }
-  return add;
-}
-
-/* Блок из одного текста — его можно разорвать между листами без потери
-   смысла. Таблица, график, шкала или плашка с числом так не читаются. */
-function pdfProse(el){
-  return !el.querySelector('table, .chart, svg, img, canvas, .meter, .bars');
-}
-
-/* Блок не влез в остаток листа, а за ним начинается новый раздел — значит,
-   уедет на отдельный лист и останется там один. Вместо этого слегка поджимаем
-   то, что на листе уже стоит: лист получается плотным, а не наполовину пустым.
-   Поджимаем только если масштаб остаётся читаемым. */
-function pdfPack(onPage, pos, h, maxH, minZoom){
-  if(!onPage.length || h > maxH * 0.5) return 0;
-  var mass = 0;
-  onPage.forEach(function(b){ mass += b.h; });
-  var need = h - (maxH - pos);            /* сколько миллиметров не хватает */
-  if(need <= 0 || mass <= 0) return 0;
-  var k = 1 - need * 1.03 / mass;         /* сжимаем только сами блоки */
-  if(k < 0.8 || k > 0.995) return 0;
-  var ok = onPage.every(function(b){
-    return (parseFloat(b.el.style.zoom) || 1) * k >= minZoom;
-  });
-  if(!ok) return 0;
-  onPage.forEach(function(b){
-    var cur = parseFloat(b.el.style.zoom) || 1;
-    b.el.style.zoom = Math.round(cur * k * 1000) / 1000;
-  });
-  return mass * (1 - k);                  /* столько места освободилось */
-}
-
-/* Один проход подгонки: по текущим положениям блоков решает, что ужать, что
-   перенести, а чему разрешить разрыв. Возвращает true, если что-то изменил. */
-function pdfPass(root, maxH, maxW){
-  var MIN_FILL = 0.75;      /* сильнее чем на четверть за шаг не ужимаем */
-  var MIN_ZOOM = 0.72;      /* и мельче 72% от исходного — никогда */
-  var top0 = root.getBoundingClientRect().top;
-  var got = pdfUnits(root, maxH, top0);
-  var items = got.units, changed = false;
-  got.big.forEach(function(el){
-    if(el.style.breakInside !== 'auto'){
-      el.style.breakInside = 'auto';
-      el.style.pageBreakInside = 'auto';
-      changed = true;
+/* «Один блок — один лист»: снимаем разрыв там, где он даёт пустой лист.
+   Правило в CSS ставит разрыв перед каждым блоком; здесь убираются два случая,
+   которые в разметке не выразить. Первый блок раздела — иначе на листе
+   остаётся один заголовок, а блок уезжает на следующий. Вложенный блок — иначе
+   карточка разрывается на собственной начинке. */
+function pdfOnePerPage(root){
+  var SEL = '.card, .kpi, .gd-block';
+  Array.prototype.forEach.call(root.querySelectorAll(SEL), function(el){
+    var host = el.parentElement ? el.parentElement.closest(SEL) : null;
+    if(host && root.contains(host)){
+      el.style.breakBefore = 'avoid';
+      el.style.pageBreakBefore = 'avoid';
     }
   });
-  Array.prototype.forEach.call(root.querySelectorAll('section'), function(el){
-    items.push({el: el, sec: true, top: el.getBoundingClientRect().top - top0});
-  });
-  items.sort(function(a, b){ return a.top - b.top; });
-
-  var shift = 0, page = -1, onPage = [];
-  items.forEach(function(it){
-    var pos = (it.top + shift) % maxH;
-    var pg = Math.floor((it.top + shift) / maxH);
-    if(pg !== page){ page = pg; onPage = []; }
-    if(it.sec){
-      if(pos > 1){ shift += maxH - pos; page++; onPage = []; }
-      return;
-    }
-    var h = it.h, cur = parseFloat(it.el.style.zoom) || 1;
-    if(it.w > maxW && it.w / h > 0.2){      /* режется по ширине */
-      var kw = maxW / it.w;
-      if(kw >= 0.6){
-        it.el.style.zoom = Math.round(cur * kw * 980) / 1000;
-        h *= kw * 0.98; cur *= kw * 0.98; changed = true;
-      }
-    }
-    var rest = maxH - pos;
-    if(h <= rest){ onPage.push({el: it.el, h: h}); return; }  /* влезает как есть */
-    if(h <= maxH){
-      var kf = rest / h;
-      /* Порог считается по ИТОГОВОМУ масштабу, а не по шагу: проходов
-         несколько, и два умеренных уменьшения подряд дают нечитаемый кегль. */
-      var k = kf * 0.97, total = cur * k;
-      if(kf >= MIN_FILL && total >= MIN_ZOOM){
-        it.el.style.zoom = Math.round(total * 1000) / 1000;
-        shift -= h * (1 - k);
-        changed = true;
-      } else if(pdfProse(it.el) && rest > maxH * 0.25){
-        /* Сплошной текст (вывод, рекомендация) переносить целиком незачем:
-           абзац спокойно продолжается на следующем листе, а предыдущий лист
-           остаётся заполненным. Рвать нельзя только то, что читается как
-           единая картинка: таблицу, график, плашку с цифрой. */
-        if(it.el.style.breakInside !== 'auto'){
-          it.el.style.breakInside = 'auto';
-          it.el.style.pageBreakInside = 'auto';
-          changed = true;
-        }
-      } else {
-        var saved = pdfPack(onPage, pos, h, maxH, MIN_ZOOM);
-        if(saved){ shift -= saved; changed = true; }
-        else shift += rest;                 /* целиком на следующий лист */
-      }
-      onPage.push({el: it.el, h: h});
-      return;
-    }
-    onPage.push({el: it.el, h: h});
-    if(it.el.tagName === 'TABLE'){           /* выше листа — рвём по строкам */
-      shift += pdfRows(it.el, pos, maxH);
-    }
-    if(it.el.style.breakInside !== 'auto'){
-      it.el.style.breakInside = 'auto';
-      it.el.style.pageBreakInside = 'auto';
-      changed = true;
+  var hosts = Array.prototype.slice.call(root.querySelectorAll('section, .gd-sheet'));
+  hosts.unshift(root);
+  hosts.forEach(function(host){
+    var first = host.querySelector(SEL);
+    if(first){
+      first.style.breakBefore = 'avoid';
+      first.style.pageBreakBefore = 'avoid';
     }
   });
-  return changed;
 }
 
 function pdfFit(root){
-  /* Раскладка по листам считается так же, как её посчитает принтер: по реальным
-     положениям блоков в размерах листа. Проходов несколько: уменьшение одного
-     блока сдвигает все, что идут ниже, и после первого прохода картина другая.
-     Два-три прохода сходятся; больше делать незачем — дальше меняются доли
-     миллиметра. */
   var PAGE_MM_H = 273, PAGE_MM_W = 186;   /* A4 за вычетом полей 12 мм */
   document.body.classList.add('pdf-measure');
   var probe = document.createElement('div');
@@ -3179,12 +3072,26 @@ function pdfFit(root){
   root.appendChild(probe);
   var px = probe.getBoundingClientRect().height / 100;
   probe.remove();
-  var maxH = PAGE_MM_H * px, maxW = PAGE_MM_W * px;
-  for(var pass = 0; pass < 3; pass++){
-    if(!pdfPass(root, maxH, maxW)) break;
-  }
-  Array.prototype.forEach.call(root.querySelectorAll('.print-keep'), function(el){
-    if(el.getBoundingClientRect().height > maxH){
+  var maxH = PAGE_MM_H * px, maxW = PAGE_MM_W * px, half = maxH * 0.5;
+
+  Array.prototype.forEach.call(root.querySelectorAll(PDF_ATOM), function(el){
+    var r = el.getBoundingClientRect();
+    var w = Math.max(el.scrollWidth, r.width);
+    if(w > maxW){
+      /* мельче 60% не ужимаем: нечитаемая таблица хуже обрезанной */
+      var k = maxW / w;
+      if(k >= 0.6){
+        var cur = parseFloat(el.style.zoom) || 1;
+        el.style.zoom = Math.round(cur * k * 980) / 1000;
+        r = el.getBoundingClientRect();
+      }
+    }
+    /* Решение принимается по ВЫЧИСЛЕННОМУ стилю: печатные правила живут не в
+       @media print, а рядом с раскладкой, поэтому здесь видно ровно то, что
+       увидит принтер. Блоку выше половины листа запрет разрыва только вредит:
+       пары ему всё равно не найдётся, а предыдущий лист останется пустым. */
+    if(r.height > half &&
+       getComputedStyle(el).breakInside !== 'auto'){
       el.style.breakInside = 'auto';
       el.style.pageBreakInside = 'auto';
     }
@@ -3219,6 +3126,7 @@ function exportCardPdf(uid){
   root.querySelectorAll('details').forEach(function(d){ d.open = true; });
   pdfKeep(root);
   pdfFit(root);
+  pdfOnePerPage(root);
   document.body.classList.add('printing-card');
   window.print();
 }
@@ -3285,6 +3193,7 @@ function exportLevelPdf(idx){
   root.appendChild(clone);
   pdfKeep(root);
   pdfFit(root);
+  pdfOnePerPage(root);
   document.body.classList.add('printing-card');
   window.print();
 }

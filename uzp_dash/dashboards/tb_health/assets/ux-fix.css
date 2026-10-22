@@ -353,15 +353,11 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
   body.printing-card #print-root {
     display: block !important; max-width: none; margin: 0; padding: 0;
   }
-  #print-root .gd-block, #print-root .gd-grp { break-inside: avoid; }
-  #print-root details { break-inside: avoid; }
   /* выгрузка целого уровня: раскладка экрана (боковая колонка, липкие панели,
      ограничение высоты оверлеев) на бумаге только мешает */
   #print-root .lvl { display: block !important; }
   #print-root .app-sidebar, #print-root nav.lvls, #print-root .top-switchers,
   #print-root .read-progress, #print-root .quicknav { display: none !important; }
-  #print-root .card, #print-root section { break-inside: auto; }
-  #print-root .gcard, #print-root .chart { break-inside: avoid; }
   #print-root .lvl-name { font-size: 22px; }
   #print-root .grid.cols-2 { display: block; }
   /* сворачивалки на бумаге превращаются в обычные заголовки */
@@ -377,9 +373,7 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
   .hub-wrap, .hub-back { display: none !important; }
   /* сводка руководителя на бумаге не рвётся: это четыре строки, из-за которых
      отчёт и открывают, и половина их на другом листе бессмысленна */
-  #print-root .es { break-inside: avoid; }
   #print-root .of-kpis { display: block !important; }
-  #print-root .of-kpi { break-inside: avoid; margin-bottom: 6px; }
   .lvl[data-hub-view] > section { display: block !important; }
 
   /* --- РАЗБИВКА НА СТРАНИЦЫ ---
@@ -726,12 +720,124 @@ body.pdf-measure #print-root {
   position: absolute; left: -20000px; top: 0;
   width: 186mm; max-width: 186mm;
 }
-body.pdf-measure #print-root .gcards,
-body.pdf-measure #print-root .grid,
-body.pdf-measure #print-root .of-kpis,
-body.pdf-measure #print-root .hub { display: block !important; }
-body.pdf-measure #print-root .of-tabs { display: none !important; }
-body.pdf-measure #print-root .of-pane[hidden] { display: block !important; }
+
+/* ============================================================
+   ПЕЧАТНАЯ РАСКЛАДКА — ОДНОКОЛОНОЧНАЯ, КАК НА ТЕЛЕФОНЕ
+   ============================================================
+   Правила написаны БЕЗ медиазапроса и привязаны к #print-root, который вне
+   печати всё равно скрыт. Это принципиально: они обязаны одинаково работать в
+   двух разных случаях — при ЗАМЕРЕ перед печатью (body.pdf-measure, обычный
+   экран) и при самой ПЕЧАТИ.
+
+   Иначе получается то, из-за чего страницы и рвались: замер идёт в окне
+   браузера (1440 px), а лист — это 186 мм, то есть примерно 700 px, и на нём
+   срабатывают мобильные брейкпоинты, которых при замере не было. Сводка
+   руководителя на экране в две колонки, а на бумаге в одну; экранные панели
+   (фильтры, переключатели, кнопка «дальше», счётчик просмотра) при замере
+   занимают высоту, а на печати их нет. Подгонка считала одну раскладку, а
+   принтер печатал другую — и аккуратно подогнанные блоки разъезжались.
+
+   Поэтому здесь задана ровно одна раскладка: один столбец, никаких сеток,
+   никаких экранных органов управления. */
+
+/* 1. Сетки — в столбик. Отступ между блоками тот же, что и на бумаге. */
+#print-root .grid,
+#print-root .grid.cols-2,
+#print-root .grid.cols-3,
+#print-root .grid.cols-4,
+#print-root .gcards,
+#print-root .kpis,
+#print-root .of-kpis,
+#print-root .hub,
+#print-root .app-layout { display: block !important; }
+#print-root .gcards > *,
+#print-root .grid > *,
+#print-root .kpis > *,
+#print-root .of-kpis > * { margin: 0 0 12px !important; }
+
+/* 2. Всё, что на листе — строка за строкой, а не колонками */
+#print-root .es-row { grid-template-columns: 1fr !important; gap: 2px !important; }
+#print-root .hbar { grid-template-columns: 1fr !important; }
+
+/* 3. Экранные органы управления на бумаге не печатаются — значит, и при
+      замере их быть не должно: иначе подгонка считает лишние сантиметры. */
+#print-root .hub-wrap, #print-root .hub-back, #print-root .hub-prog,
+#print-root .help-bar, #print-root .sec-next, #print-root .gc-sort,
+#print-root .of-flt, #print-root .of-flt-sum, #print-root .of-tabs,
+#print-root .section-hint, #print-root .hub-lead, #print-root .flow-seg,
+#print-root .of-wrap > p.sub, #print-root .gd-backnav, #print-root .gd-export,
+#print-root .gd-close, #print-root .lvl-pdf, #print-root .lvl-up,
+#print-root .mgmt-trigger, #print-root .tbdyn-trigger, #print-root .xls-bar,
+#print-root .app-sidebar, #print-root nav.lvls, #print-root .top-switchers,
+#print-root .read-progress, #print-root .quicknav,
+#print-root .forecast-toggle, #print-root .dl, #print-root .of-detail,
+#print-root .tb-b, #print-root .cut-b { display: none !important; }
+
+/* 4. Скрытое переключателем — на бумаге видно целиком: переключать нечем */
+#print-root .of-pane[hidden] { display: block !important; }
+#print-root .of-wrap.tabbed > .of-pane > h4 { display: block !important; }
+/* …кроме вариантов одного и того же блока: они повторили бы друг друга */
+#print-root .of-seg[hidden], #print-root .var[hidden] { display: none !important; }
+
+/* 5. Оверлей на бумаге — обычный блок: ни прокрутки, ни ограничения высоты */
+#print-root .gd-sheet, #print-root .gd {
+  max-height: none !important; overflow: visible !important;
+}
+#print-root .lvl { display: block !important; }
+#print-root .lvl-name { font-size: 22px; }
+
+/* 6. Ничего не выезжает за полосу набора: длинное имя переносится, число —
+      нет (разорванное пополам число хуже узкой колонки) */
+#print-root table { width: 100% !important; }
+#print-root td, #print-root th { word-break: break-word; }
+#print-root td.num, #print-root th.num, #print-root .rk { white-space: nowrap; }
+#print-root .chart svg { width: 100% !important; }
+
+/* 7. РАЗБИВКА НА ЛИСТЫ. Правила стоят здесь, а не в @media print, по той же
+      причине, что и раскладка: их должно быть видно и при замере, и скрипту
+      подгонки — он читает вычисленный стиль, чтобы знать, что уже разрешено
+      рвать, а что нет.
+
+      ПОРЯДОК ВАЖЕН. Сначала общее разрешение рвать карточки и разделы — без
+      него высокий блок не поместится никуда, — и только потом перечень
+      неделимого. У обоих правил одинаковая специфичность (#id + класс), и
+      побеждает то, что записано ниже. Когда разрешение стояло последним, оно
+      перебивало запрет: плашка показателя резалась пополам между листами
+      ровно поэтому. */
+#print-root .card, #print-root section { break-inside: auto; }
+#print-root .gcard, #print-root .kpi, #print-root .chart,
+#print-root .gd-block, #print-root .gd-grp, #print-root .card.ai,
+#print-root .card.reco, #print-root .es, #print-root .of-kpi,
+#print-root details, #print-root .print-keep { break-inside: avoid; }
+#print-root .of-kpi { margin-bottom: 6px; }
+/* ОДИН БЛОК — ОДИН ЛИСТ.
+   Лист, взятый из середины отчёта, должен читаться сам по себе: один блок,
+   его заголовок и его числа. Поэтому каждая карточка, плашка показателя и
+   блок карточки подразделения начинаются с нового листа, а раздел — тем
+   более. Исключения (первый блок раздела, вложенный блок) снимает скрипт
+   подгонки: в разметке их не выразить, у разделов после перестройки разная
+   структура. */
+#print-root section { break-before: page; }
+#print-root .card, #print-root .kpi, #print-root .gd-block { break-before: page; }
+#print-root section:first-of-type { break-before: auto; }
+/* таблица рвётся по строкам, шапка повторяется, строка не делится */
+#print-root table { break-inside: auto; }
+#print-root thead { display: table-header-group; }
+#print-root tfoot { display: table-footer-group; }
+#print-root tr, #print-root td, #print-root th {
+  break-inside: avoid !important; page-break-inside: avoid !important;
+}
+#print-root h2, #print-root h3, #print-root h4,
+#print-root .eyebrow, #print-root .ch-cap,
+#print-root caption, #print-root .print-sec-head { break-after: avoid; }
+#print-root p, #print-root li { orphans: 3; widows: 3; }
+
+/* 8. Подпись раздела на листе — её высоту тоже надо посчитать при замере */
+#print-root .print-sec-head {
+  font-size: 8.5px; letter-spacing: 0.03em; text-transform: uppercase;
+  color: #8e8e93; border-bottom: 1px solid rgba(0,0,0,0.10);
+  padding-bottom: 3px; margin-bottom: 10px;
+}
 
 /* ============================================================
    Вывод в начале карточки ТБ/ГОСБ
