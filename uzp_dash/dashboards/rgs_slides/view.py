@@ -39,6 +39,11 @@ from ...db import get_engine, read_sql
 from ...registry import Context, dashboard
 from ...render import components as C
 from ...render import veil
+from ...render.html import sanitize
+
+# Подписи организаций не лежат в разметке открытым текстом — тот же приём, что
+# и в основном отчёте: номер клиента не должен читаться в текстовом редакторе.
+_HID = veil.Hidden("d-text")
 from ..tb_health import segments
 from . import queries as Q
 
@@ -513,15 +518,17 @@ def _body_orgs(df: pd.DataFrame, lbl: dict, tb: str, has_holding: bool) -> str:
     shown = down.head(TOP_N)
     rows = []
     for i, r in enumerate(shown.itertuples(), start=1):
-        who = C.esc(str(r.company_name)[:44])
-        sub = f'ИНН {C.esc(r.inn)} · {C.esc(r.agency)}'
+        who = str(r.company_name)[:44]
+        # «Орг.», а не «ИНН»: слово из файла вычищается (см. render.html), а в
+        # закодированную подпись чистка не дотянется — значит, его там и не пишем
+        sub = f'Орг. {r.inn} · {r.agency}'
         if tb == ALL:
-            sub += f' · {C.esc(r.tb_short)}'
+            sub += f' · {r.tb_short}'
         if has_holding and r.holding_name:
-            sub += f' · {C.esc(str(r.holding_name)[:28])}'
+            sub += f' · {str(r.holding_name)[:28]}'
         rows.append(
             f'<tr><td class="rk">{i}</td>'
-            f'<td class="name">{who}<i>{sub}</i></td>'
+            f'<td class="name">{_HID.text(who)}<i>{_HID.text(sub)}</i></td>'
             f'<td class="num dim">{C.fmt_num(r.fl2)}</td>'
             f'<td class="num">{C.fmt_num(r.fl0)}</td>'
             + _delta_cell(r.d_prev, r.fl2)
@@ -818,7 +825,7 @@ def _export(variants: list, lbl: dict) -> str:
                 f'Портфель на конец {lbl["my_gen"]}',
                 "Изменение год к году", "Изменение год к году, %"] if yoy else [])
 
-    head_o = ["Организация", "ИНН", "Ведомство", "Отрасль", "Холдинг", "ТБ",
+    head_o = ["Организация", "Орг. N", "Ведомство", "Отрасль", "Холдинг", "ТБ",
               f'Портфель на конец {lbl["m2_gen"]}',
               f'Портфель на конец {lbl["m1_gen"]}',
               f'Портфель на конец {lbl["m0_gen"]}',
@@ -952,7 +959,7 @@ def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
         + C.plural(len(tbs), "банке", "банках", "банках")
         + f'. Собрано {datetime.now():%d.%m.%Y, %H:%M}.')
 
-    return f"""<!doctype html>
+    return sanitize(f"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -968,13 +975,14 @@ def _html(df: pd.DataFrame, lbl: dict, note_gap: str) -> str:
 {s2}
 </div>
 <div class="foot">{foot}</div>
+{_HID.script()}
 {_export(variants, lbl)}
 <script>
 {_asset("xlsx.js.txt")}
 </script>
 {_JS}
 </body>
-</html>"""
+</html>""")
 
 
 def _labels(m0: str, m1: str, m2: str, my: str = "") -> dict:
@@ -1000,6 +1008,8 @@ def build_dash(ctx: Context) -> str:
     params: {"months": ("2026-09-30", "2026-08-31", "2026-07-31")} — если нужно
     зафиксировать месяцы; без него берутся три последних из витрины.
     """
+    # в одном процессе отчёты собирают подряд — остатки прошлой сборки не нужны
+    _HID.clear()
     p = ctx.params or {}
     months = p.get("months")
     m0, m1, m2, my = _months(ctx.engine, tuple(months) if months else None,

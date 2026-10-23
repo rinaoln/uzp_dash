@@ -162,6 +162,7 @@ def build(ctx: Context) -> str:
     # словарь подсказок собирается по ходу разметки; в одном процессе отчёт
     # могут собрать дважды, и остатки прошлой сборки в нём не нужны
     _HELP_TEXTS.clear()
+    _HID.clear()
     b = bank.load(ctx)
 
     # Порядок вкладок — алфавитный, и сортируется он здесь, а не полагается на
@@ -257,7 +258,7 @@ def build(ctx: Context) -> str:
         meta=meta,
         body=(_BOOT_JS + _tabs([a for a, _ in levels]) + _help_bar() + bodies
               + _cell_dialog() + _tb_portfolio_dialog(sb, preps, b)
-              + _help_data() + _HELP_JS
+              + _HID.script() + _help_data() + _HELP_JS
               + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _OFD_JS
               + _MX_JS + _TBDYN_JS + _FLOW_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
@@ -1447,7 +1448,7 @@ def _org_rows(rows: list, key: str, tail_n: int, tail_fl: float,
         # фразового делает разметку невалидной. Перевод строки даёт CSS
         sub = f'<span class="gd-emp">{C.esc(emp)}</span>' if emp else ""
         out.append(
-            f'<div class="gd-row"><span>{C.esc(r["name"])}{sub}</span>'
+            f'<div class="gd-row"><span>{_HID.text(r["name"])}{sub}</span>'
             f'<span>{mark}{C.fmt_num(abs(r[key]))}</span>'
             f'<span class="gd-why">{C.esc(why_fn(r)) or "—"}</span></div>')
     if tail_n:
@@ -1570,6 +1571,10 @@ def _group_html(g: dict, work: str, key: str, why,
 # остаётся заголовок и ключ; содержимое подставляется при первом раскрытии
 # (см. `_HELP_JS`) и перед выгрузкой в PDF.
 _HELP_TEXTS: dict[str, str] = {}
+
+# Подписи организаций не лежат в разметке открытым текстом: после замены имён
+# людей на номер там оказывался номер клиента в каждой строке. См. veil.Hidden.
+_HID = veil.Hidden("d-text")
 
 
 def _gd_help(*lines: str, title: str = "Как считаем этот блок") -> str:
@@ -4626,14 +4631,14 @@ def _move_chip(mv: dict | None, month: str = "") -> str:
     if not mv or not mv.get("to"):
         return ""
     where = "; ".join(
-        f'{x["name"] or "Орг."} (ИНН {x["inn"]}) — {x["fl"]:.0f} чел'
+        f'{x["name"] or "Орг."} ({x["inn"]}) — {x["fl"]:.0f} чел'
         for x in mv["to"])
     more = (f'; и ещё {mv["n_to"] - len(mv["to"])} '
             if mv.get("n_to", 0) > len(mv["to"]) else "")
     when = f' за {C.month_ru(month)}' if month else ""
     tip = (f'Люди этой организации стали получать зарплату в других '
            f'организациях{when}: {where}{more}. Полный список — в выгрузке.')
-    return (f'<span class="mv-chip" title="{C.esc(tip)}">переток '
+    return (f'<span class="mv-chip"{_HID.title(tip)}>переток '
             f'{C.fmt_num(mv["fl"])} чел →</span>')
 
 
@@ -4990,7 +4995,7 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
         else:
             who = ""
         row = [
-            f'{C.esc(r["name"])}{_move_chip(r.get("move"), move_month)}'
+            f'{_HID.text(r["name"])}{_move_chip(r.get("move"), move_month)}'
             f'<div class="gd-emp">{C.esc(r["unit"])}{who}</div>',
             C.fmt_num(r["gone"]),
             C.fmt_num(r["ret"]) if r["ret"] else "—",
@@ -5077,7 +5082,7 @@ def _returned_group(rows_src: list, unit: str, o: dict) -> str:
         else:
             who = ""
         rows.append([
-            f'{C.esc(r["name"])}<div class="gd-emp">{C.esc(r["unit"])}{who}</div>',
+            f'{_HID.text(r["name"])}<div class="gd-emp">{C.esc(r["unit"])}{who}</div>',
             C.fmt_num(r["gone"]),
             f'<b style="color:var(--good)">{C.fmt_num(r["ret"])}</b>',
             f'{share:.0f}%',

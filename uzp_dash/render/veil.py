@@ -106,3 +106,73 @@ window.__vd=function(id,k){
   return JSON.parse(t);
 };
 </script>"""
+
+
+class Hidden:
+    """Подписи, которых не должно быть в разметке открытым текстом.
+
+    ЗАЧЕМ ОТДЕЛЬНО ОТ `hide`. `hide` прячет массивы — то, что на экран само не
+    выводится. Здесь наоборот: текст НУЖНО показать, и спрятать его от
+    текстового редактора можно единственным способом — не писать в разметку
+    вовсе, а подставить скриптом из того же закодированного массива.
+
+    Так уезжает подпись организации. После замены имён людей на номер (см.
+    `anonymize.org_label`) в вёрстке осталось четыре с половиной сотни строк
+    вида «Орг. 1000134503» — номер клиента открытым текстом в каждой.
+
+    ЧТО ЭТО МЕНЯЕТ, А ЧТО НЕТ. На экране всё как было. В блокноте вместо
+    подписи пустой элемент. Без скрипта подписи не будет вовсе — поэтому сюда
+    идёт только то, что и так рисуется скриптом или рядом с ним; разметка,
+    которая обязана работать без JS, остаётся как есть.
+
+    Словарь общий на документ и с дедупликацией: одна и та же организация
+    встречается на нескольких уровнях отчёта, и хранить её подпись тринадцать
+    раз незачем.
+    """
+
+    def __init__(self, slot: str = "d-text"):
+        self.slot = slot
+        self._list: list[str] = []
+        self._idx: dict[str, int] = {}
+
+    def clear(self) -> None:
+        """В одном процессе отчёт собирают дважды — остатки прошлой не нужны."""
+        self._list.clear()
+        self._idx.clear()
+
+    def _n(self, text: str) -> int:
+        if text not in self._idx:
+            self._idx[text] = len(self._list)
+            self._list.append(text)
+        return self._idx[text]
+
+    def text(self, value) -> str:
+        """Подпись → пустой элемент-место. Заполнится скриптом."""
+        s = str(value or "").strip()
+        if not s:
+            return ""
+        return f'<span class="vx" data-v="{self._n(s)}"></span>'
+
+    def title(self, value) -> str:
+        """Подсказка → атрибут для подстановки в title. Готовый кусок атрибутов."""
+        s = str(value or "").strip()
+        if not s:
+            return ""
+        return f' data-vt="{self._n(s)}"'
+
+    def script(self) -> str:
+        """Хранилище и заполнение. Ставится ПОСЛЕ всей размеченной подписи.
+
+        Заполнение идёт синхронно, по ходу разбора документа, а не по
+        DOMContentLoaded: отчёт до готовности раскладки закрыт маской, и подписи
+        должны встать под ней, а не появиться на глазах у читателя.
+        """
+        if not self._list:
+            return ""
+        holder, expr = hide(self._list, self.slot)
+        return (holder + "<script>(function(){var D=" + expr + ",i,e;"
+                "var a=document.querySelectorAll('.vx');"
+                "for(i=0;i<a.length;i++){e=a[i];e.textContent=D[+e.getAttribute('data-v')];}"
+                "var b=document.querySelectorAll('[data-vt]');"
+                "for(i=0;i<b.length;i++){e=b[i];e.title=D[+e.getAttribute('data-vt')];}"
+                "})();</script>")
