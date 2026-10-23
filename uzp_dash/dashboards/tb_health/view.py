@@ -337,7 +337,7 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     secs = [(key, html) for key, html in secs if html]
     return (
         _lvl_head(a, idx)
-        + _hero(a)
+        + _hero(a, idx, {k: _sec_title(h) for k, h in secs})
         + _kpis(a)
         # Легенда цвета стоит там, где цвет впервые работает, — сразу под
         # плашкой прогноза и сводкой. Внизу страницы её читали уже после того,
@@ -639,7 +639,34 @@ def _concentration(a: analyze.Analysis) -> dict | None:
             "rest_exec": (fact / plan) if plan > 0 else None}
 
 
-def _asks(a: analyze.Analysis, conc: dict | None) -> list:
+def _go(idx: int, key: str, titles: dict) -> str:
+    """Ссылка из пункта «Необходимые действия» в раздел, где видны организации.
+
+    Пункт называет проблему числом — «358 организаций обещали вернуть» — но сам
+    список стоит в разделе, и до него читатель добирался через экран выбора,
+    вспоминая по дороге, в каком именно разделе смотреть. Ссылка снимает этот
+    шаг.
+
+    ОБЫЧНАЯ ССЫЛКА `href="#sec-N-key"`, а не кнопка: в режиме одного раздела её
+    перехватывает скрипт и открывает раздел (см. _HUB_JS), а без скрипта — когда
+    все разделы на странице сразу, в печати и в PDF — она остаётся рабочим
+    якорем. Разделы фильтруются по наличию содержимого, поэтому ссылка не
+    рисуется вовсе, если такого раздела на уровне нет.
+    """
+    t = re.sub(r"<[^>]+>", "", titles.get(key) or "").strip()
+    if not t:
+        return ""
+    # ССЫЛКА ОТДЕЛЬНОЙ СТРОКОЙ ПОД ПУНКТОМ, а не внутри предложения: пункт
+    # заканчивается точкой, и продолжение за ней читалось как новая фраза
+    # («…28 127 чел. см. раздел «Детализация по ТБ»»). Отдельной строкой она
+    # ещё и находится глазами — пунктов в списке до трёх.
+    # Неразрывный пробел перед стрелкой — чтобы она не переносилась одна.
+    return (f'<a class="es-go" href="#sec-{idx}-{key}">'
+            f'Смотреть организации: раздел «{C.esc(t)}»<i>&nbsp;→</i></a>')
+
+
+def _asks(a: analyze.Analysis, conc: dict | None, idx: int,
+          titles: dict) -> list:
     """Что нужно от руководства — правилами по числам отчёта, а не словами.
 
     Решение руководителя — это закрепить ответственного, задать срок или
@@ -654,7 +681,8 @@ def _asks(a: analyze.Analysis, conc: dict | None) -> list:
         part = ('всё отклонение от плана' if conc["share"] >= 0.995
                 else f'{conc["share"]*100:.0f}% отклонения от плана')
         out.append(f'Закрепить сроки и ответственного по {C.esc(conc["name"])}: '
-                   f'на него приходится {part}, {C.fmt_num(conc["gap"])} чел.')
+                   f'на него приходится {part}, {C.fmt_num(conc["gap"])} чел.'
+                   + _go(idx, "gosb", titles))
     o = a.outflow or {}
     if o.get("n_promised"):
         n = int(o["n_promised"])
@@ -663,25 +691,28 @@ def _asks(a: analyze.Analysis, conc: dict | None) -> list:
                              "организаций обещали")
                    + f' вернуть получателей '
                      f'({C.fmt_num(o.get("kept_promised") or 0)} чел), '
-                     f'возврата нет.')
+                     f'возврата нет.'
+                   + _go(idx, "outflow", titles))
     tot_kept = float(o.get("tot_kept") or 0)
     if tot_kept:
         no_reason = max(0.0, tot_kept - float(o.get("reason_known_kept") or 0))
         if no_reason / tot_kept >= 0.3:
             out.append(f'Ввести обязательную фиксацию причины оттока: сейчас '
                        f'причина не указана у {no_reason / tot_kept * 100:.0f}% '
-                       f'безвозвратных потерь ({C.fmt_num(no_reason)} чел).')
+                       f'безвозвратных потерь ({C.fmt_num(no_reason)} чел).'
+                       + _go(idx, "outflow", titles))
     nw = sum(int(c.get("not_worked") or 0) for c in (a.gosb_cards or []))
     fl_nw = sum(float(c.get("fl_not_worked") or 0) for c in (a.gosb_cards or []))
     if nw:
         out.append(f'Обеспечить привлечение потенциала по {C.fmt_num(nw)} '
                    + _plural(nw, "организации", "организациям", "организациям")
                    + f' — это +{C.fmt_num(fl_nw)} чел к портфелю, и без них '
-                     f'отклонение от плана не закрывается.')
+                     f'отклонение от плана не закрывается.'
+                   + _go(idx, "orgs", titles))
     return out[:3]
 
 
-def _exec_summary(a: analyze.Analysis) -> str:
+def _exec_summary(a: analyze.Analysis, idx: int, titles: dict) -> str:
     """Сводка для руководителя — четырьмя строками, на первом экране.
 
     Отчёт отвечал на вопрос «что происходит» только после двух переходов: итог
@@ -734,7 +765,7 @@ def _exec_summary(a: analyze.Analysis) -> str:
                       + _plural(need, "организации", "организациям",
                                 "организациям")
                       + ' — уже в работе.'))
-    asks = _asks(a, conc)
+    asks = _asks(a, conc, idx, titles)
     rows = "".join(f'<div class="es-row"><i>{C.esc(k)}</i><span>{v}</span></div>'
                    for k, v in lines)
     if asks:
@@ -745,7 +776,7 @@ def _exec_summary(a: analyze.Analysis) -> str:
 
 
 # --------------------------------------------------------------------------- #
-def _hero(a: analyze.Analysis) -> str:
+def _hero(a: analyze.Analysis, idx: int, titles: dict) -> str:
     """Вердикт по ПРОГНОЗУ текущего месяца. Закрытый месяц — строкой ниже:
     это единственная твёрдая цифра, и по ней же считается ранг ТБ."""
     r = a.verdict["rcp"]
@@ -778,7 +809,8 @@ def _hero(a: analyze.Analysis) -> str:
         f'<b>{C.fmt_num(r["fact"])}</b> '
         f'при плане {C.fmt_num(r["plan"])} · '
         f'<b style="color:{_col(r["exec"])}">{_pct(r["exec"])}</b> · '
-        f'{_delta_html(r["fact"] - r["plan"], "чел")}</div>'
+        f'{_delta_html(r["fact"] - r["plan"], "чел")}'
+        f'{_wow_chip(a, "rcp", "чел")}</div>'
         # Бейджа про разрыв до плана здесь нет: gap_rcp — это ровно план минус
         # прогноз, то же число и с тем же знаком уже стоит в строке выше.
         + C.meter(r["exec"])
@@ -788,12 +820,13 @@ def _hero(a: analyze.Analysis) -> str:
         # процент набран как остальные числа строки и окрашен по статусу — так же, как
         # выполнение показано в карточках показателей ниже
           f'<b style="color:{_col(fot["exec"])}">{_pct(fot["exec"])}</b> · '
-          f'{_delta_html((fot["fact"] - fot["plan"]) / 1e6, "млн ₽")}</div>'
+          f'{_delta_html((fot["fact"] - fot["plan"]) / 1e6, "млн ₽")}'
+          f'{_wow_chip(a, "fot", "млн ₽", scale=1e6, digits=1, eps=0.05)}</div>'
         + f'<div class="row2">{closed_txt}</div>'
         + _wow_row(a)
         # сводка стоит ВНУТРИ плашки прогноза: это первый экран уровня, и
         # ответ на «что происходит с портфелем» должен быть виден без прокрутки
-        + _exec_summary(a)
+        + _exec_summary(a, idx, titles)
     )
     return C.card(inner, cls="hero")
 
@@ -831,46 +864,81 @@ def _wow_pp(delta: float | None) -> str:
         return ""
     col = "var(--good)" if delta > 0 else "var(--bad)"
     sign = "+" if delta > 0 else "−"
-    return f'<b style="color:{col}">{sign}{abs(delta) * 100:.1f} п.п.</b>'
+    # запятая, а не точка: дробь в русском отчёте пишется через запятую
+    return (f'<b style="color:{col}">{sign}'
+            f'{abs(delta) * 100:.1f}'.replace(".", ",") + ' п.п.</b>')
+
+
+def _wow_chip(a: analyze.Analysis, key: str, unit: str, scale: float = 1.0,
+              digits: int = 0, eps: float = 0.5) -> str:
+    """Изменение прогноза к прошлой сборке — ПРЯМО В СТРОКЕ показателя, сразу за
+    отклонением от плана.
+
+    Зачем здесь, а не только отдельной строкой ниже: отклонение от плана
+    отвечает «сколько не хватает», но не отвечает «идём мы к плану или от него».
+    Второй вопрос — первый, который задают по плашке, и ответ на него должен
+    стоять рядом с числом, а не абзацем ниже.
+
+    ПЕРИОД НАЗЫВАЕТСЯ ЧИСЛОМ ДНЕЙ, а не словом «неделя». Базовая сборка берётся
+    по правилу «самая свежая из достаточно старых» (см. snapshot.load_base), и
+    на деле ей бывает и пять дней, и девять: подписать такое «за неделю» —
+    значит соврать в обе стороны. Если возраст базы неизвестен, вместо периода
+    стоит её дата.
+
+    Разделитель « · » живёт ВНУТРИ приписки: без изменения приписки нет вовсе, и
+    висящая точка в конце строки не останется.
+    """
+    w = a.wow or {}
+    d = w.get(key) or {}
+    if not d:
+        return ""
+    txt = _wow_num(float(d.get("fc") or 0) / scale, unit, digits, eps)
+    if not txt:
+        return ""
+    days = w.get("days")
+    period = (f"за {days} {C.plural(days, 'день', 'дня', 'дней')}" if days
+              else f"к сборке от {C.esc(w.get('full', ''))}")
+    was = float((w.get("was") or {}).get(key) or 0) / scale
+    now = float((a.verdict.get(key) or {}).get("fact") or 0) / scale
+    tip = (f' title="прогноз на {C.esc((a.dates or {}).get("label", ""))}: '
+           f'{C.fmt_num(was, digits=digits)} {C.esc(unit)} в сборке от '
+           f'{C.esc(w.get("full", ""))} → {C.fmt_num(now, digits=digits)} '
+           f'{C.esc(unit)} сейчас"')
+    return f'<span class="wow-i"{tip}> · {period} {txt}</span>'
 
 
 def _wow_row(a: analyze.Analysis) -> str:
-    """Строка «неделя к неделе» в плашке прогноза — или пусто.
+    """Строка-основание под плашкой прогноза: с чем сравниваются приписки.
 
     Сравнение идёт с прошлой СБОРКОЙ отчёта: в витрине недельного грейна нет
-    (см. snapshot.py). Поэтому дата базовой сборки подписана прямо в строке — без
-    неё непонятно, за какой период показано изменение. Если базы нет или ни одно
-    число не изменилось, строки не будет вовсе.
+    (см. snapshot.py). Поэтому дата базовой сборки и её возраст подписаны прямо
+    в строке — без них непонятно, за какой период показаны изменения.
+
+    ПРОГНОЗА В СТРОКЕ НЕТ НАМЕРЕННО: его изменение стоит выше, в самих строках
+    получателей и ФОТ (см. `_wow_chip`), и повторять его здесь — значит сказать
+    одно и то же дважды в трёх строках. Здесь остаётся то, чего в строках
+    показателей нет: менялись ли за это время план и выполнение.
+
+    Строка выводится ВСЕГДА, когда база есть, даже если ничего не изменилось:
+    она объясняет период у приписок выше. Нет базы — нет и строки.
     """
     w = a.wow or {}
     if not w.get("rcp"):
         return ""
-    rcp, fot = w["rcp"], w.get("fot") or {}
+    rcp = w["rcp"]
     parts = []
-    fc = _wow_num(rcp["fc"], "чел")
-    if fc:
-        parts.append(f"прогноз получателей {fc}")
     plan = _wow_num(rcp.get("plan", 0), "чел")
     if plan:
         parts.append(f"план {plan}")
     ex = _wow_pp(rcp.get("exec"))
     if ex:
         parts.append(f"выполнение {ex}")
-    fot_d = _wow_num(fot.get("fc", 0) / 1e6, "млн ₽", 1, 0.05)
-    if fot_d:
-        parts.append(f"прогноз ФОТ {fot_d}")
-    if not parts:
-        return ""
-    # Подсказка называет ОБА прогноза — базовый и текущий. Сравнение идёт по
-    # прогнозу витрины на один и тот же месяц, и это должно проверяться на месте,
-    # без открытия снимка прошлой сборки.
-    was = (w.get("was") or {}).get("rcp")
-    now = float(a.verdict["rcp"]["fact"] or 0)
-    tip = (f' title="прогноз получателей на {C.esc((a.dates or {}).get("label", ""))}: '
-           f'{C.fmt_num(was)} в сборке от {C.esc(w["full"])} → {C.fmt_num(now)} сейчас"'
-           if was else "")
-    return (f'<div class="row2 wow"{tip}>Неделя к неделе, к сборке от '
-            f'{C.esc(w["full"])}: ' + " · ".join(parts) + '</div>')
+    days = w.get("days")
+    age = f" ({days} {C.plural(days, 'день', 'дня', 'дней')} назад)" if days else ""
+    body = (": " + " · ".join(parts) if parts
+            else " — план и выполнение не изменились")
+    return (f'<div class="row2 wow">Неделя к неделе, к сборке от '
+            f'{C.esc(w["full"])}{age}{body}</div>')
 
 
 def _wow_unit(a: analyze.Analysis, unit_id: int, cls: str = "g-wow") -> str:
@@ -2388,6 +2456,18 @@ _HUB_JS = """
     lvl.querySelectorAll(':scope > .hub-wrap .hub-tile').forEach(function(t){
       t.addEventListener('click', function(){
         hubOpen(lvl, document.getElementById(t.dataset.sec));
+      });
+    });
+    /* Ссылки из «Необходимых действий» в раздел с организациями. Обычный якорь
+       в режиме одного раздела не сработал бы: раздел скрыт, прокручивать не к
+       чему. Поэтому переход перехватываем и открываем раздел, а href оставляем
+       как есть — он нужен там, где скрипта нет (печать, PDF). */
+    lvl.querySelectorAll('.es-go').forEach(function(b){
+      b.addEventListener('click', function(e){
+        var sec = document.getElementById((b.getAttribute('href') || '').slice(1));
+        if(!sec) return;
+        e.preventDefault();
+        hubOpen(lvl, sec);
       });
     });
     var home = lvl.querySelector(':scope > .hub-back .hub-home');
@@ -5094,5 +5174,5 @@ def _pct(exec_pct) -> str:
     if (99.5 <= p < 100) or (94.5 <= p < 95):
         # округление отбрасываем вниз: 99.96% округлились бы в «100.0%» и снова
         # встали бы рядом с жёлтым, ради чего вся эта ветка и написана
-        return f"{math.floor(p * 10) / 10:.1f}%"
+        return f"{math.floor(p * 10) / 10:.1f}%".replace(".", ",")
     return f"{p:.0f}%"
