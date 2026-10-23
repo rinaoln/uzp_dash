@@ -239,7 +239,8 @@ def _load(engine, m0: str, m1: str, m2: str, my: str = "") -> pd.DataFrame:
     wide["company_name"] = wide["company_name"].fillna("")
     # Имя человека вместо названия организации (ИП, КФХ) в отчёт не идёт —
     # то же правило, что и в основном отчёте, и живёт оно в одном месте
-    wide, n_person = anonymize.mask_people(wide)
+    # Сегмент тут один — РГС, строгое правило ММБ к нему не применяется
+    wide, n_person, _ = anonymize.mask_people(wide)
     if n_person:
         progress.done(f"Названия-имена людей заменены номером организации: "
                       f"{n_person} из {len(wide)} строк")
