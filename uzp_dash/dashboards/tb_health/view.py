@@ -1446,7 +1446,7 @@ def _org_rows(rows: list, key: str, tail_n: int, tail_fl: float,
         emp = str(r.get("emp") or "").strip() if with_emp else ""
         # span, а не div: ячейка сетки — сам <span>, а блочный элемент внутри
         # фразового делает разметку невалидной. Перевод строки даёт CSS
-        sub = f'<span class="gd-emp">{C.esc(emp)}</span>' if emp else ""
+        sub = f'<span class="gd-emp">{_HID.text(emp)}</span>' if emp else ""
         out.append(
             f'<div class="gd-row"><span>{_HID.text(r["name"])}{sub}</span>'
             f'<span>{mark}{C.fmt_num(abs(r[key]))}</span>'
@@ -4989,7 +4989,7 @@ def _outflow_group(rows_src: list, unit: str, title: str, lead: str,
         # в строке нет, и писать «закрепления нет» было бы неправдой — там просто
         # другой разрез. Отсутствие закрепления называем только там, где оно видно
         if r["emp"]:
-            who = f' · {C.esc(r["emp"])}'
+            who = f' · {_HID.text(r["emp"])}'
         elif has_emp:
             who = ' · <span style="color:var(--warn)">закрепления нет</span>'
         else:
@@ -5076,7 +5076,7 @@ def _returned_group(rows_src: list, unit: str, o: dict) -> str:
         if r.get("out_reason"):
             work += f'<div class="gd-emp">причина ухода: {C.esc(r["out_reason"])}</div>'
         if r["emp"]:
-            who = f' · {C.esc(r["emp"])}'
+            who = f' · {_HID.text(r["emp"])}'
         elif has_emp:
             who = ' · <span style="color:var(--warn)">закрепления нет</span>'
         else:
