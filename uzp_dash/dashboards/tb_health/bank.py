@@ -35,6 +35,15 @@ OUT_MIN_QTY = 3
 YOY_DEPTH = 13
 # Глубина графиков динамики портфеля и план/факт — 12 ЗАКРЫТЫХ месяцев.
 TREND_MONTHS = 12
+# А ГРУЗИТСЯ ВДВОЕ БОЛЬШЕ. Показываем по-прежнему двенадцать месяцев, но каждому
+# из них нужен свой «год назад»: без месяцев −13…−23 сравнение год к году есть
+# только у самого старого месяца окна, то есть ни у одного из показанных.
+# Второй год нужен и для «с начала года» — декабрь предыдущего года в окно из
+# двенадцати месяцев попадает не всегда.
+#
+# Это НЕ удваивает запрос по стоимости: строки помесячные, на уровень их десятки,
+# и витрина метрик хранит 96 месяцев (профиль прома) — глубина есть.
+TREND_LOAD_MONTHS = TREND_MONTHS * 2
 # Аппарат ТБ — не продающее подразделение, в разборе ему делать нечего. Опознаётся
 # по имени, но с обязательной оговоркой: если аппарат — ЕДИНСТВЕННОЕ подразделение
 # своего ТБ (Московский банк), исключать его нельзя, иначе ТБ обнулится.
@@ -51,6 +60,7 @@ class Bank:
     gosb_name: dict                   # new_gosb_id -> имя
     verdict: pd.DataFrame             # план/факт уровней tb и sb за три месяца
     trend: pd.DataFrame               # план/факт помесячно за 12 закрытых месяцев
+    trend_seg: pd.DataFrame           # тот же факт в разрезе сегментов
     unit_seg: pd.DataFrame            # ГОСБ × сегмент, обе опорные даты
     unit_tot: pd.DataFrame            # итоги ГОСБ, обе опорные даты
     unit_tot_fot: pd.DataFrame        # то же по ФОТ — только для выгрузки в Excel
@@ -108,7 +118,7 @@ def load(ctx) -> Bank:
                       f"вердикт банка неоднозначен, берётся строка с наибольшим фактом")
     _log_metrics(verdict, d)
 
-    progress.step(f"История плана и факта за {TREND_MONTHS} закрытых месяцев "
+    progress.step(f"История плана и факта за {TREND_LOAD_MONTHS} закрытых месяцев "
                   f"(банк, ТБ, ГОСБ)")
     trend = read_sql(e, Q.MONTHLY_TREND, {"m_rcp": Q.METRIC_RECIPIENTS,
                                           "m_rcp_h1": Q.METRIC_RECIPIENTS_H1,
@@ -117,6 +127,23 @@ def load(ctx) -> Bank:
                                           "ref_closed": d["ref_closed"]})
     trend["end_dt"] = pd.to_datetime(trend["end_dt"]).dt.date
     _log_trend(trend, d)
+    # тот же период в разрезе сегментов — для матрицы «сегмент × месяц».
+    # Срез вспомогательный: не прочитался — матрицы просто не будет.
+    try:
+        trend_seg = read_sql(e, Q.MONTHLY_TREND_SEG,
+                             {"m_rcp": Q.METRIC_RECIPIENTS,
+                              "m_rcp_h1": Q.METRIC_RECIPIENTS_H1,
+                              "metric_switch": Q.METRIC_SWITCH_DT,
+                              "trend_from": d["trend_from"],
+                              "ref_closed": d["ref_closed"]})
+        trend_seg["end_dt"] = pd.to_datetime(trend_seg["end_dt"]).dt.date
+        progress.done(f"История по сегментам: {len(trend_seg)} строк, "
+                      f"{trend_seg['seg_code'].nunique()} сегментов — из них "
+                      f"строится матрица «сегмент × месяц» год к году")
+    except Exception as err:               # noqa: BLE001 — срез необязательный
+        progress.warn(f"История по сегментам не прочиталась ({str(err)[:120]}) — "
+                      f"матрицы «сегмент × месяц» в динамике не будет")
+        trend_seg = pd.DataFrame()
 
     progress.step("Матрица ГОСБ × сегмент и итоги ГОСБ по всему банку")
     unit_seg = read_sql(e, Q.UNIT_SEG, {"m_rcp": Q.METRIC_RECIPIENTS,
@@ -135,13 +162,17 @@ def load(ctx) -> Bank:
         f["end_dt"] = pd.to_datetime(f["end_dt"]).dt.date
     _log_units(unit_seg, unit_tot, d)
 
+    ORGS_EMPTY.clear()
     progress.step("Витрина организаций по всему банку (потенциал/отток/год к году)")
     orgs = read_sql(e, Q.ORGS_ALL, {"ref_closed": d["ref_closed"]})
     orgs_tb = _only_known_tb(read_sql(e, Q.ORGS_TB, {"ref_closed": d["ref_closed"]}),
                              tb_ids, "строк витрины уровня ТБ")
+    _check_orgs_month(e, orgs, d["ref_closed"])
     orgs = _prepare_orgs(orgs, apparat, tb_of)
     orgs_tb = _prepare_orgs_tb(orgs_tb, orgs)
     _log_orgs(orgs, orgs_tb)
+
+    orgs = _merge_industry(e, orgs)
 
     mgr = read_sql(e, Q.ORG_MANAGER, {"role": Q.ROLE_ATTACHED})
     orgs = _merge_manager(orgs, mgr)
@@ -183,7 +214,8 @@ def load(ctx) -> Bank:
                   if not orgs.empty and "seg_name" in orgs else {})
 
     return Bank(dates=d, tbs=tbs, apparat=apparat, tb_of=tb_of, gosb_name=gosb_name,
-                verdict=verdict, trend=trend, unit_seg=unit_seg, unit_tot=unit_tot,
+                verdict=verdict, trend=trend, trend_seg=trend_seg,
+                unit_seg=unit_seg, unit_tot=unit_tot,
                 unit_tot_fot=unit_tot_fot,
                 orgs=orgs, orgs_tb=orgs_tb, fagg=fagg, act_tot=act_tot, act_brk=act_brk,
                 fmonths=fmonths, orgs_fc=orgs_fc, conv=conv, seg_by_inn=seg_by_inn,
@@ -377,6 +409,8 @@ def _flow_run(engine, months: list, params: dict) -> "pd.DataFrame | None":
             got["month"] = f"{cur:%m.%Y}"
             got["prev_month"] = f"{prev:%m.%Y}"
             frames.append(got)
+        # разрезы по физлицам — ПОКА temp-таблица жива и на том же соединении
+        people = _people_cuts(engine, conn, q, months[-1])
     if not frames:
         return None
     df = pd.concat(frames, ignore_index=True)
@@ -386,6 +420,7 @@ def _flow_run(engine, months: list, params: dict) -> "pd.DataFrame | None":
     df["unit_id"] = df["unit_id"].astype("int64")
     df["tb_id"] = df["tb_id"].astype("int64")
     df["fl"] = forecast.num(df, "fl")
+    df.attrs["people"] = people
     last = df["month"].iloc[-1]
     cur_df = df[df["month"] == last]
     flow = cur_df[cur_df["side"] == "flow"]
@@ -423,6 +458,39 @@ def _flow_pair(engine, conn, q: dict, prev, cur, tries: list) -> "pd.DataFrame |
             progress.warn(f"Частей {parts} — не хватило ресурсов "
                           f"({str(ex).split(chr(10))[0][:160]}). Пробуем мельче.")
     return None
+
+
+def _people_cuts(engine, conn, q: dict, m_cur) -> dict:
+    """Разрезы по физлицам за последний закрытый месяц.
+
+    Два из трёх читаются из temp-таблицы `uzp_flow_pairs`, которая уже построена
+    ради перетока: это НОЛЬ дополнительных сканов витрины ведомостей. Третий —
+    состав по видам зачислений — требует своего прохода, потому что вид в
+    temp-таблицу не попадает, там он уже свёрнут в зарплатную сумму.
+
+    Ни один из трёх не обязателен: не вышло — вернётся пусто, разделы отчёта
+    просто не нарисуются. Падать из-за вспомогательного разреза, когда основной
+    разбор уже посчитан, нельзя.
+    """
+    out: dict = {}
+    pq = {**q, "m_cur": m_cur}
+    for key, sql, what in (("size", Q.PAYROLL_SIZE, "размер зачислений"),
+                           ("multi", Q.PAYROLL_MULTI, "совместители"),
+                           ("tenure", Q.PAYROLL_TENURE, "давность получения"),
+                           ("kinds", Q.PAYROLL_KINDS, "виды зачислений")):
+        try:
+            out[key] = read_sql(engine, sql, pq, conn=conn)
+        except Exception as ex:            # noqa: BLE001 — разрез необязательный
+            _rollback(conn)
+            progress.warn(f"Разрез «{what}» не посчитался "
+                          f"({str(ex).split(chr(10))[0][:140]}) — в структуре "
+                          f"портфеля его не будет")
+            out[key] = pd.DataFrame()
+    got = [k for k, v in out.items() if not v.empty]
+    if got:
+        progress.done(f"Разрезы по физлицам за {m_cur:%m.%Y}: "
+                      f"{', '.join(got)} — идут в «Структуру портфеля»")
+    return out
 
 
 def _plural_mon(n: int) -> str:
@@ -606,7 +674,7 @@ def dates(engine, params: dict) -> dict:
     plan_from = (p_cur - PIPE_MONTHS).to_timestamp().date()
     # окно графиков динамики: TREND_MONTHS закрытых месяцев, заканчивая закрытым.
     # Первое число окна — начало месяца, чтобы условие по end_dt взяло его целиком.
-    trend_from = (p_closed - (TREND_MONTHS - 1)).to_timestamp().date()
+    trend_from = (p_closed - (TREND_LOAD_MONTHS - 1)).to_timestamp().date()
     # days_left — сколько КАЛЕНДАРНОГО времени осталось, чтобы привлечения по сделкам
     # успели дойти. Меряется по РЕАЛЬНОЙ текущей дате.
     today = params.get("today")
@@ -890,6 +958,86 @@ def _prepare_orgs_tb(orgs_tb: pd.DataFrame, orgs: pd.DataFrame) -> pd.DataFrame:
     t = t.merge(ref, on=["tb_id", "inn"], how="left")
     t["in_ref"] = t["in_ref"].fillna(False).astype(bool)
     return t
+
+
+# Причина пустой витрины организаций — одной строкой, чтобы отчёт мог её показать,
+# а не просто не нарисовать блок. Список, а не строка: сборка в одном процессе
+# может идти дважды, и `clear()` на старте надёжнее переприсваивания.
+ORGS_EMPTY: list[str] = []
+
+
+def _check_orgs_month(engine, orgs: pd.DataFrame, ref_closed) -> None:
+    """Назвать причину, если витрина организаций за нужный месяц пуста.
+
+    Витрина заполняется не каждый месяц: в профиле прома из двенадцати месяцев
+    года в ней десять. Запрос за отсутствующий месяц возвращает ноль строк и не
+    жалуется, а в отчёте молча пропадает всё, что считается по организациям, —
+    потенциал, список к работе, годовой тренд. Отличить это от «плана никто не
+    завалил» по готовому файлу нельзя, поэтому причину называем сразу и в логе.
+
+    Отчёт на этом НЕ ПАДАЕТ: остальные блоки считаются по другим витринам и
+    остаются рабочими. Сообщение попадает и в сам отчёт — см. view._no_orgs_note.
+    """
+    if orgs is not None and not orgs.empty:
+        return
+    try:
+        have = read_sql(engine, Q.ORGS_MONTHS, {})
+        got = [str(x)[:10] for x in have.iloc[:, 0]]
+        # в сообщение идут шесть последних: оно читается в логе и в отчёте, и
+        # двадцать четыре даты в одной фразе никто не дочитает
+        months = (", ".join(got[:6]) + (" и раньше" if len(got) > 6 else "")
+                  if got else "ни одного")
+    except Exception as err:                      # noqa: BLE001 — диагностика
+        months = f"список получить не удалось ({err})"
+    msg = (f"Витрина организаций за {str(ref_closed)[:10]} пуста. В витрине есть "
+           f"месяцы: {months}. Пока нужного месяца в ней нет, блоки по "
+           f"организациям (потенциал, список к работе, годовой тренд) будут "
+           f"пустыми — остальной отчёт считается по другим витринам")
+    progress.done(msg)
+    ORGS_EMPTY.append(msg)
+
+
+def _merge_industry(engine, orgs: pd.DataFrame) -> pd.DataFrame:
+    """Приписать организациям отрасль из витрины атрибутов ЕПК.
+
+    Сначала точная связь по epk_id (это ключ витрины), затем запасная по ИНН —
+    ею добираются организации, чей epk_id в витрине не нашёлся. Два запроса, а
+    не один: соединение по двум ключам через OR планировщик разворачивает в
+    перебор (см. комментарий у самих запросов).
+
+    ОТРАСЛЬ ЗАПОЛНЕНА НЕ ВЕЗДЕ, и это нормально: она идёт отдельным разрезом со
+    строкой «Отрасль не указана», а доля покрытия печатается здесь же. Падать
+    из-за неё отчёт не должен — срез по отраслям вспомогательный, и если витрина
+    недоступна, остальной отчёт считается как обычно.
+    """
+    if orgs is None or orgs.empty:
+        return orgs
+    try:
+        by_epk = read_sql(engine, Q.INDUSTRY_BY_EPK, {})
+        by_inn = read_sql(engine, Q.INDUSTRY_BY_INN, {})
+    except Exception as err:                   # noqa: BLE001 — срез необязательный
+        progress.warn(f"Отрасли организаций не прочитались ({str(err)[:120]}) — "
+                      f"разрез по отраслям в структуре портфеля будет пустым")
+        orgs = orgs.copy()
+        orgs["industry_name"] = ""
+        return orgs
+    ind = pd.concat([by_epk, by_inn], ignore_index=True)
+    if ind.empty:
+        orgs = orgs.copy()
+        orgs["industry_name"] = ""
+    else:
+        ind["inn"] = pd.to_numeric(ind["inn"], errors="coerce")
+        ind = ind.dropna(subset=["inn"])
+        ind["inn"] = ind["inn"].astype("int64")
+        # по epk_id связь точнее, поэтому при совпадении остаётся первая строка
+        ind = ind.drop_duplicates("inn", keep="first")
+        orgs = orgs.merge(ind, on="inn", how="left")
+        orgs["industry_name"] = orgs["industry_name"].fillna("").astype(str).str.strip()
+    known = int((orgs["industry_name"] != "").sum())
+    progress.done(f"Отрасль организации известна у {known} из {len(orgs)} пар "
+                  f"(ГОСБ, организация) — {known / max(len(orgs), 1) * 100:.0f}%; "
+                  f"остальные идут строкой «Отрасль не указана»")
+    return orgs
 
 
 def _log_orgs(orgs: pd.DataFrame, orgs_tb: pd.DataFrame) -> None:

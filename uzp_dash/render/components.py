@@ -335,8 +335,17 @@ def _months_axis(rows: list[dict], row_label: str = "") -> str:
     if row_label and no_plan_all(rows):
         row_label = "± к прошлому месяцу, чел"
     if row_label:
-        out.append(f'<text x="{_PL - 8}" y="{_CH - 14}" text-anchor="end" '
-                   f'font-size="10" fill="var(--text-2)">{esc(row_label)}</text>')
+        # ПОДПИСЬ В ДВЕ СТРОКИ, если она длинная. Поле слева — 72px, подпись
+        # выровнена по правому краю от него и растёт влево: «± к прошлому
+        # месяцу, чел» в одну строку не помещалась и обрезалась краем полотна.
+        head, _, tail = row_label.rpartition(" ") if len(row_label) > 15 else ("", "", row_label)
+        if head:
+            out.append(f'<text x="{_PL - 8}" y="{_CH - 20}" text-anchor="end" '
+                       f'font-size="10" fill="var(--text-2)">{esc(head)}'
+                       f'<tspan x="{_PL - 8}" dy="11">{esc(tail)}</tspan></text>')
+        else:
+            out.append(f'<text x="{_PL - 8}" y="{_CH - 14}" text-anchor="end" '
+                       f'font-size="10" fill="var(--text-2)">{esc(row_label)}</text>')
     for i, r in enumerate(rows):
         if i % every:
             continue
@@ -370,6 +379,13 @@ def trend_plan_fact(rows: list[dict]) -> str:
     # и отдельной линией он только дублировал бы факт
     vals = [v for r in rows for v in
             ((r["fact"],) if r.get("no_plan") else (r["plan"], r["fact"])) if v]
+    # ЛИНИЯ «ГОД НАЗАД» рисуется, только если год назад есть у КАЖДОГО месяца окна.
+    # Ломаная по части точек соединила бы прямой месяцы через дырку в витрине и
+    # соврала бы о том, чего в данных нет, — тем же правилом живёт и сам ряд
+    # (см. analyze._trend_rows: дырку внутри окна не заполняем).
+    has_prev = all(r.get("prev") for r in rows) and len(rows) >= 2
+    if has_prev:
+        vals += [float(r["prev"]) for r in rows]
     if not vals:
         return ""
     lo, hi = min(vals), max(vals)
@@ -408,21 +424,53 @@ def trend_plan_fact(rows: list[dict]) -> str:
         vals.append(
             f'<text x="{x:.0f}" y="{y - 11:.0f}" text-anchor="middle" font-size="9.5" '
             f'font-weight="600" fill="var(--text)">{esc(fmt_num(r["fact"]))}</text>')
+        # ЗНАЧЕНИЯ ПРОШЛОГО ГОДА — ТАК ЖЕ, КАК ФАКТ: точка и число у неё. Без
+        # числа вторая линия отвечала только на «выше или ниже», а вопрос к ней
+        # другой — «на сколько», и считать это по сетке глазами невозможно.
+        #
+        # Подпись уходит на сторону, ПРОТИВОПОЛОЖНУЮ линии факта: портфель обычно
+        # растёт, прошлый год идёт ниже — и подпись под точкой; там, где он выше,
+        # она встаёт над точкой и не налезает на подпись факта.
+        if has_prev:
+            pv = float(r["prev"])
+            py = y_of(pv)
+            dy = 15 if py >= y else -9
+            dots.append(
+                f'<circle cx="{x:.0f}" cy="{py:.0f}" r="2.5" fill="var(--text-2)" '
+                f'stroke="var(--surface-solid)" stroke-width="1.5" opacity="0.85">'
+                f'<title>{esc(r["label"])}: год назад {esc(fmt_num(pv))} чел'
+                f'</title></circle>')
+            vals.append(
+                f'<text x="{x:.0f}" y="{py + dy:.0f}" text-anchor="middle" '
+                f'font-size="9" font-weight="600" fill="var(--text-2)">'
+                f'{esc(fmt_num(pv))}</text>')
     # подписи прямо у концов линий: надёжнее легенды, её приходится сопоставлять
+    prev_pts = (" ".join(f'{_x_of(i, n):.0f},{y_of(float(r["prev"])):.0f}'
+                         for i, r in enumerate(rows)) if has_prev else "")
     ly_f, ly_p = y_of(rows[-1]["fact"]), y_of(rows[-1]["plan"])
     if abs(ly_f - ly_p) < 14:            # линии сошлись — разводим подписи
         ly_p = ly_f + 14
+    ly_y = y_of(float(rows[-1]["prev"])) if has_prev else 0.0
+    # три подписи у правого края могут налезть друг на друга — разводим по очереди
+    for other in (ly_f, ly_p):
+        if has_prev and abs(ly_y - other) < 13:
+            ly_y = other + 13
     ends = (f'<text x="{_CW - _PR + 6}" y="{ly_f + 4:.0f}" font-size="12" '
             f'font-weight="700" fill="var(--accent)">факт</text>'
             + (f'<text x="{_CW - _PR + 6}" y="{ly_p + 4:.0f}" font-size="12" '
                f'font-weight="600" fill="var(--text-2)">план</text>'
-               if has_plan else ""))
+               if has_plan else "")
+            + (f'<text x="{_CW - _PR + 6}" y="{ly_y + 4:.0f}" font-size="11" '
+               f'font-weight="600" fill="var(--text-2)" opacity="0.85">год '
+               f'назад</text>' if has_prev else ""))
     under = ("изменение портфеля к прошлому месяцу" if no_plan_all(rows)
              else "отклонение факта от плана")
+    yoy_note = (' Пунктир «год назад» — тот же месяц годом раньше.'
+                if has_prev else "")
     cut = ("" if lo <= 0 else
            '<div class="ch-note">Шкала не начинается с нуля: масштаб подобран под '
            'размах изменений. Высота линии над осью величину портфеля не отражает. '
-           f'Под месяцем — {under}.</div>')
+           f'Под месяцем — {under}.{yoy_note}</div>')
     # единицы у шкалы и у нижнего ряда: без подписи числа на графике читаются как
     # «какие-то значения», а получатели (чел) и отклонение (тоже чел, но со знаком)
     # стоят в разных местах и в одну единицу не сливаются
@@ -438,6 +486,9 @@ def trend_plan_fact(rows: list[dict]) -> str:
         + (f'<polyline points="{plan_pts}" fill="none" stroke="var(--text-2)" '
            f'stroke-width="2" stroke-dasharray="6 4" stroke-linejoin="round"/>'
            if has_plan else "")
+        + (f'<polyline points="{prev_pts}" fill="none" stroke="var(--text-2)" '
+           f'stroke-width="1.5" stroke-dasharray="2 3" stroke-linejoin="round" '
+           f'opacity="0.75"/>' if has_prev else "")
         + f'<polyline points="{fact_pts}" fill="none" stroke="var(--accent)" '
           f'stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
         + "".join(dots) + "".join(vals) + ends
@@ -495,16 +546,38 @@ def trend_table(rows: list[dict]) -> str:
 
     Нужна не для красоты: график читается глазом, а числа читаются точно, и для
     печати, скринридера и спора о конкретном месяце нужна именно таблица.
+
+    Две последние колонки отвечают на вопросы, которых у графика план/факт нет.
+    «Год к году» — тот же месяц годом раньше: сезонность видна только так, и
+    провал в июле перестаёт выглядеть провалом, если он был и год назад. «С
+    начала года» — изменение к 31 декабря: получатели это остаток, а не поток,
+    поэтому накопленный итог для них считается разницей, а не суммой месяцев.
+    Обе колонки пусты, если месяца-пары в витрине нет.
     """
     if not rows:
         return ""
+
+    def signed(v, pct=None):
+        """Изменение со знаком и цветом; прочерк, если сравнивать не с чем."""
+        if v is None:
+            return "—"
+        col = "var(--good)" if v >= 0 else "var(--bad)"
+        # минус — типографский, запятая вместо точки: отчёт русский
+        pc = f"{pct:+.1f}".replace("-", "−").replace(".", ",") if pct is not None else ""
+        tail = (f' <span style="color:var(--text-2)">({pc}%)</span>'
+                if pct is not None else "")
+        return (f'<b style="color:{col}">{"+" if v >= 0 else "−"}'
+                f'{fmt_num(abs(v))}</b>{tail}')
+
     body, no_plan_n = [], 0
     for r in rows:
         if r.get("no_plan"):
             no_plan_n += 1
             body.append([esc(r["label"]), fmt_num(r["fact"]),
                          '<span style="color:var(--text-2)">план не '
-                         'устанавливался</span>', "—", "—"])
+                         'устанавливался</span>', "—", "—",
+                         signed(r.get("yoy"), r.get("yoy_pct")),
+                         signed(r.get("ytd"))])
             continue
         dv = r["fact"] - r["plan"]
         ex = (r["fact"] / r["plan"]) if r["plan"] else None
@@ -512,7 +585,9 @@ def trend_table(rows: list[dict]) -> str:
         body.append([esc(r["label"]), fmt_num(r["fact"]), fmt_num(r["plan"]),
                      f'<b style="color:{col}">{"+" if dv >= 0 else "−"}'
                      f'{fmt_num(abs(dv))}</b>',
-                     f'{ex * 100:.0f}%' if ex is not None else "—"])
+                     f'{ex * 100:.0f}%' if ex is not None else "—",
+                     signed(r.get("yoy"), r.get("yoy_pct")),
+                     signed(r.get("ytd"))])
     note = ('<p class="ch-note" style="margin:6px 0 0">План по текущей методике '
             f'(баланс и закрепление) есть не во всех месяцах: в {no_plan_n} '
             'из них выполнение считалось только по балансу и план приравнивался '
@@ -520,7 +595,8 @@ def trend_table(rows: list[dict]) -> str:
             if no_plan_n else "")
     return ('<details class="ch-tbl"><summary>Показать в табличном виде</summary>'
             + table(["месяц", "факт, чел", "план, чел", "отклонение, чел",
-                     "выполнение"], body, num_cols=[1, 2, 3, 4])
+                     "выполнение", "год к году, чел", "с начала года, чел"],
+                    body, num_cols=[1, 2, 3, 4, 5, 6])
             + note + '</details>')
 
 

@@ -28,7 +28,7 @@ import pandas as pd
 
 from ... import progress
 from . import forecast, prompts, queries as Q, segments, text_rules
-from .bank import Bank, month_index, next_month
+from .bank import Bank, TREND_MONTHS, month_index, next_month
 
 RUB_TO_MLN = 1e6
 LLM_BATCH_DEFAULT = 12      # пар (ГОСБ, ИНН) в одном запросе к LLM (один глубокий проход)
@@ -126,6 +126,8 @@ class Analysis:
     cell_top: dict = field(default_factory=dict)
     ranks: dict = field(default_factory=dict)        # единица -> (ранг, всего ТБ)
     wow: dict = field(default_factory=dict)          # динамика к прошлой сборке
+    structure: dict = field(default_factory=dict)    # состав портфеля, см. _structure
+    trend_seg: dict = field(default_factory=dict)    # сегмент × месяц, год к году
     # ИНН откуда -> куда ушли его люди за последнюю пару закрытых месяцев
     moves: dict = field(default_factory=dict)
     # Рабочие кадры уровня. Живут в объекте, потому что уровень собирается в два
@@ -239,6 +241,11 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
     # единой зафиксированной причины
     a.insights = _insights_by_tb(per_tb, b.tb_of)
     a.trend = _trend_rows(b.trend, "sb")
+    # на уровне банка среза detail нет (в _assemble он пустой) — состав портфеля
+    # считаем по всему кадру организаций, он и есть портфель сети
+    a.structure = _structure(b.orgs)
+    a.trend_seg = _trend_seg_matrix(b.trend_seg, "sb")
+    a.structure["people"] = _people(b, None)
     # Ранги ТБ — в матрицу выполнения: место банка в сети живёт в витрине рядом с
     # планом и фактом (окно rank() в METRICS_VERDICT) и считается по ЗАКРЫТОМУ
     # месяцу. Своего ранга у ГОСБ нет, поэтому на уровне ТБ колонки ранга тоже нет.
@@ -258,6 +265,7 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
                                  fc_stats["conv_by_gosb"], d,
                                  unit_src="tb_id", unit_label="ТБ",
                                  funnel_months=b.fmonths, trend=b.trend)
+    _attach_seg_matrix(a.gosb_detail, b.trend_seg, "tb")
     a.outflow = _outflow_top(a, b.fmonths, b.promises, b.tb_of,
                              seg_by_inn=b.seg_by_inn, moves=a.moves)
     _log_outflow_section(a)
@@ -330,6 +338,7 @@ def finish(ctx, b: Bank, a: Analysis, text_df) -> Analysis:
                                  a.fc_stats.get("conv", {}),
                                  a.fc_stats.get("conv_by_gosb", {}), d,
                                  funnel_months=fmonths, trend=b.trend)
+    _attach_seg_matrix(a.gosb_detail, b.trend_seg, "gosb")
     a.outflow = _outflow_top(a, fmonths, b.promises, b.tb_of,
                              seg_by_inn=b.seg_by_inn, moves=a.moves)
     _log_outflow_section(a)
@@ -411,6 +420,12 @@ def _assemble(b: Bank, tb_short: str, tb_id: int, tb_full: str, ref_date: str,
         level=level, unit_label=unit_label, unit_src=unit_src,
     )
     a.orgs, a.orgs_fc, a.detail, a.seg_gaps = orgs, orgs_fc, detail, seg_gaps
+    # состав портфеля — по ПОЛНОМУ срезу уровня, а не по отобранным кандидатам:
+    # структура описывает портфель целиком, включая тех, с кем работать не нужно
+    a.structure = _structure(detail)
+    a.trend_seg = _trend_seg_matrix(b.trend_seg, "tb", tb_id)
+    a.structure["people"] = _people(b, tb_id)
+    a.structure["cube"] = _structure_cube(detail)
     moves = _moves_by_inn(b, None if level == "sb" else tb_id)
     a.moves = moves
     a.cell_top = _cell_top(detail, unit_src, b.seg_by_inn, moves=moves)
@@ -870,6 +885,292 @@ def _verdict(v: pd.DataFrame, level: str, end_dt, level_id: int | None = None
     return out, ref
 
 
+# Границы глубины проникновения — доля штата клиента, которую обслуживаем мы.
+DEPTH_BINS = ((0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.01))
+# Как называется строка организаций, которым отрасль в витрине не проставлена.
+IND_UNKNOWN = "Отрасль не указана"
+
+
+def _structure(orgs: pd.DataFrame) -> dict:
+    """Из чего состоит портфель: отрасли, глубина проникновения, сегменты.
+
+    ЧЕГО ЗДЕСЬ НЕТ НАМЕРЕННО. Это не план и не потери — на них отвечают матрица,
+    отток и переток. И это не список к работе: «Потенциал организаций» называет
+    поимённо, кого брать, а здесь нет ни одного имени. Вопрос другой — чем
+    клиенты занимаются, насколько глубоко мы в них сидим и как портфель разложен
+    по сегментам.
+
+    СЧИТАЕТСЯ ПО ОРГАНИЗАЦИЯМ, А НЕ ПО СТРОКАМ. В кадре грейн (подразделение,
+    организация): клиент, который обслуживается в нескольких ГОСБ, пришёл бы
+    несколькими строками и посчитался бы несколько раз. Поэтому первым делом
+    свёртка по номеру организации.
+
+    В СОСТАВ ИДУТ ТОЛЬКО ДЕЙСТВУЮЩИЕ: организации с нулём получателей не
+    участвуют. Они остаются в витрине (у них есть штат и потенциал), но
+    «структура портфеля» — это про тех, кто в портфеле есть.
+    """
+    if orgs is None or orgs.empty or "current_fl_qty" not in orgs:
+        return {}
+    cols = {"current_fl_qty": "sum", "total_emp_qty": "sum",
+            "current_fot_amt": "sum"}
+    cols = {c: f for c, f in cols.items() if c in orgs}
+    extra = {c: "first" for c in ("seg_name", "industry_name") if c in orgs}
+    g = orgs.groupby("inn", as_index=False).agg(
+        {**cols, **({"in_ref": "max"} if "in_ref" in orgs else {}), **extra})
+    g = g.rename(columns={"current_fl_qty": "fl", "total_emp_qty": "emp",
+                          "current_fot_amt": "fot"})
+    g = g[g["fl"] >= 1]
+    if g.empty:
+        return {}
+    tot_fl = float(g["fl"].sum())
+    tot_emp = float(g.get("emp", pd.Series(dtype=float)).sum() or 0)
+    n_org = int(len(g))
+
+    # --- отрасли, по всем сегментам и по каждому отдельно -----------------------
+    if "industry_name" in g:
+        g["ind"] = g["industry_name"].replace("", IND_UNKNOWN).fillna(IND_UNKNOWN)
+    else:
+        g["ind"] = IND_UNKNOWN
+    inds = _ind_rows(g, tot_fl)
+    inds_seg = {}
+    if "seg_name" in g:
+        for sg, sub in g.groupby("seg_name"):
+            rows = _ind_rows(sub, float(sub["fl"].sum()))
+            if rows:
+                inds_seg[str(sg)] = rows
+    ind_known = float((g["ind"] != IND_UNKNOWN).sum()) / n_org
+
+    # --- глубина проникновения -------------------------------------------------
+    depth, not_ours = [], 0.0
+    if "emp" in g and tot_emp:
+        d = g[g["emp"] > 0].copy()
+        # доля штата, которую обслуживаем мы; больше единицы не бывает по смыслу,
+        # а в витрине встречается — там штат меньше числа получателей
+        d["k"] = (d["fl"] / d["emp"]).clip(upper=1.0)
+        not_ours = float((d["emp"] - d["fl"]).clip(lower=0).sum())
+        for lo, hi in DEPTH_BINS:
+            sub = d[(d["k"] >= lo) & (d["k"] < hi)] if hi < 1.0 else d[d["k"] >= lo]
+            if sub.empty:
+                continue
+            depth.append({"name": ("до 25%" if lo == 0 else
+                                   f"{lo * 100:.0f}–{hi * 100:.0f}%" if hi <= 1.0
+                                   else f"от {lo * 100:.0f}%"),
+                          "n": int(len(sub)), "fl": float(sub["fl"].sum()),
+                          "emp": float(sub["emp"].sum()),
+                          "rest": float((sub["emp"] - sub["fl"]).clip(lower=0).sum())})
+
+    # --- состав по сегментам ---------------------------------------------------
+    segs = []
+    if "seg_name" in g:
+        for sg, sub in g.groupby("seg_name"):
+            fl = float(sub["fl"].sum())
+            segs.append({"seg": str(sg), "n": int(len(sub)), "fl": fl,
+                         "share": fl / tot_fl if tot_fl else 0.0,
+                         "avg": fl / len(sub),
+                         "ref": (float(sub["in_ref"].mean())
+                                 if "in_ref" in sub else None)})
+        segs.sort(key=lambda x: -x["fl"])
+
+    return {"n_org": n_org, "fl": tot_fl, "emp": tot_emp, "not_ours": not_ours,
+            "inds": inds, "inds_seg": inds_seg, "ind_known": ind_known,
+            "depth": depth, "segs": segs}
+
+
+# Подписи размерных групп зачисления — те же границы, что в PAYROLL_SIZE.
+PAY_BUCKETS = ("до 30 тыс ₽", "30–60 тыс ₽", "60–100 тыс ₽",
+               "100–200 тыс ₽", "свыше 200 тыс ₽")
+# Сколько видов зачислений показывать поимённо; остальные сворачиваются.
+KIND_TOP_N = 8
+# Подписи групп давности — те же границы, что в PAYROLL_TENURE.
+TENURE_BUCKETS = ("меньше года", "1–3 года", "3–5 лет", "5–10 лет",
+                  "больше 10 лет")
+
+
+def _people(b: Bank, tb_id: int | None) -> dict:
+    """Разрезы по физлицам: размер зачисления, совместители, виды зачислений.
+
+    ОТКУДА. Всё за ПОСЛЕДНИЙ ЗАКРЫТЫЙ МЕСЯЦ и всё из ведомостей — единственной
+    витрины, которая знает людей, а не организации. Окно здесь месяц, а не три,
+    как у оттока: ведомости дают состав потока помесячно, и смешивать месяцы в
+    одно распределение значило бы посчитать одного человека трижды.
+
+    ЧЕГО ЗДЕСЬ НЕТ. Ни одного человека поимённо и ни одного номера — только
+    распределения. Отчёт отвечает на «как устроен портфель», а не «кто именно».
+    """
+    src = (getattr(b, "flow", None).attrs.get("people")
+           if getattr(b, "flow", None) is not None else None) or {}
+    if not src:
+        return {}
+
+    def cut(df):
+        if df is None or getattr(df, "empty", True):
+            return None
+        return df if tb_id is None else df[df["tb_id"] == tb_id]
+
+    out: dict = {}
+    size = cut(src.get("size"))
+    if size is not None and not size.empty:
+        g = size.groupby("bucket", as_index=False)[["fl", "amt"]].sum()
+        tot = float(g["fl"].sum())
+        rows = []
+        for i, name in enumerate(PAY_BUCKETS):
+            r = g[g["bucket"] == i]
+            fl = float(r["fl"].sum()) if not r.empty else 0.0
+            amt = float(r["amt"].sum()) if not r.empty else 0.0
+            rows.append({"name": name, "fl": fl,
+                         "share": fl / tot if tot else 0.0,
+                         "amt": amt, "avg": (amt / fl) if fl else 0.0})
+        out["size"] = rows
+        out["size_tot"] = tot
+
+    multi = cut(src.get("multi"))
+    if multi is not None and not multi.empty:
+        one = float(multi["one_org"].sum())
+        two = float(multi["two_org"].sum())
+        many = float(multi["many_org"].sum())
+        tot = one + two + many
+        out["multi"] = {"one": one, "two": two, "many": many, "tot": tot,
+                        "share": ((two + many) / tot) if tot else 0.0}
+
+    ten = cut(src.get("tenure"))
+    if ten is not None and not ten.empty:
+        g = ten.groupby("bucket", as_index=False)[["fl", "amt"]].sum()
+        # группа −1 — счета без даты открытия: это пробел в данных, и
+        # раскидывать их по срокам нельзя, они идут отдельной строкой
+        known = g[g["bucket"] >= 0]
+        tot = float(known["fl"].sum())
+        rows = []
+        for i, name in enumerate(TENURE_BUCKETS):
+            r = known[known["bucket"] == i]
+            fl = float(r["fl"].sum()) if not r.empty else 0.0
+            amt = float(r["amt"].sum()) if not r.empty else 0.0
+            rows.append({"name": name, "fl": fl,
+                         "share": fl / tot if tot else 0.0,
+                         "avg": (amt / fl) if fl else 0.0})
+        unknown = float(g[g["bucket"] < 0]["fl"].sum())
+        out["tenure"] = rows
+        out["tenure_tot"] = tot
+        out["tenure_unknown"] = unknown
+
+    kinds = cut(src.get("kinds"))
+    if kinds is not None and not kinds.empty:
+        g = kinds.groupby("name", as_index=False)[["n", "amt"]].sum()
+        g = g.sort_values("amt", ascending=False, kind="stable")
+        tot_amt = float(g["amt"].sum())
+        tot_n = float(g["n"].sum())
+        rows, rest_n, rest_amt = [], 0.0, 0.0
+        for i, r in enumerate(g.itertuples()):
+            if i < KIND_TOP_N:
+                rows.append({"name": str(r.name or "—"), "n": float(r.n),
+                             "amt": float(r.amt),
+                             "share": float(r.amt) / tot_amt if tot_amt else 0.0})
+            else:
+                rest_n += float(r.n)
+                rest_amt += float(r.amt)
+        if rest_amt:
+            rows.append({"name": "остальные виды", "n": rest_n, "amt": rest_amt,
+                         "share": rest_amt / tot_amt if tot_amt else 0.0,
+                         "rest": True})
+        out["kinds"] = rows
+        out["kinds_tot"] = {"n": tot_n, "amt": tot_amt}
+
+    out["month"] = str((getattr(b, "flow", None).attrs or {}).get("m_cur", ""))
+    return out
+
+
+def _structure_cube(detail: pd.DataFrame) -> dict:
+    """Числа структуры по подразделениям — для фильтра в разделе.
+
+    ЗАЧЕМ КУБ, А НЕ ГОТОВЫЕ ТАБЛИЦЫ. У разреза по отраслям уже есть фильтр по
+    сегменту. Если хранить готовую разметку на каждую пару «подразделение ×
+    сегмент», получится семь десятков вариантов на уровень и под три мегабайта
+    на документ. Здесь хранятся только числа на грейне (подразделение, сегмент,
+    отрасль), а таблицы собирает скрипт — это те же разрезы, но примерно
+    в восемь раз легче.
+
+    СВЁРТКИ ПО ОРГАНИЗАЦИИ ЗДЕСЬ НЕТ, и это правильно: куб используется только
+    при выборе КОНКРЕТНОГО подразделения, а внутри одного подразделения
+    организация и так одна строка. Свод по уровню считается отдельно, с
+    дедупликацией по номеру организации (см. `_structure`), потому что клиент,
+    обслуживаемый в нескольких подразделениях, в своде должен считаться один раз.
+    """
+    if detail is None or detail.empty or "new_gosb_id" not in detail:
+        return {}
+    d = detail[detail["current_fl_qty"] >= 1].copy()
+    if d.empty or "gosb_name" not in d:
+        return {}
+    d["ind"] = (d["industry_name"].replace("", IND_UNKNOWN).fillna(IND_UNKNOWN)
+                if "industry_name" in d else IND_UNKNOWN)
+    d["seg"] = d["seg_name"] if "seg_name" in d else "—"
+    d["emp"] = d["total_emp_qty"] if "total_emp_qty" in d else 0.0
+    d["rest"] = (d["emp"] - d["current_fl_qty"]).clip(lower=0)
+
+    gosb = sorted({str(x) for x in d["gosb_name"]}, key=_ru_key)
+    segs = [x for x in segments.ORDER if x in set(d["seg"])]
+    segs += [x for x in sorted({str(x) for x in d["seg"]}) if x not in segs]
+    inds = [x for x in sorted({str(x) for x in d["ind"]}) if x != IND_UNKNOWN]
+    inds.append(IND_UNKNOWN)
+    gi = {v: i for i, v in enumerate(gosb)}
+    si = {v: i for i, v in enumerate(segs)}
+    ii = {v: i for i, v in enumerate(inds)}
+
+    d["ref"] = (d["in_ref"].astype(int) if "in_ref" in d else 0)
+
+    def pack(df, keys, idx):
+        agg = df.groupby(keys, as_index=False).agg(
+            n=("inn", "size"), fl=("current_fl_qty", "sum"),
+            emp=("emp", "sum"), rest=("rest", "sum"), ref=("ref", "sum"))
+        return [[*(idx[k][r[k]] for k in keys),
+                 int(r["n"]), round(float(r["fl"])),
+                 round(float(r["emp"])), round(float(r["rest"])),
+                 int(r["ref"])]
+                for _, r in agg.iterrows()]
+
+    # глубина проникновения — свой разрез: из (подразделение, сегмент, отрасль)
+    # её не получить, доля штата считается по каждой организации отдельно
+    dd = d[d["emp"] > 0].copy()
+    if not dd.empty:
+        k = (dd["current_fl_qty"] / dd["emp"]).clip(upper=1.0)
+        dd["bkt"] = sum((k >= lo).astype(int) for lo, _hi in DEPTH_BINS) - 1
+        dd["bkt"] = dd["bkt"].clip(lower=0, upper=len(DEPTH_BINS) - 1)
+    bnames = ["до 25%", "25–50%", "50–75%", "от 75%"]
+    return {
+        "g": gosb, "s": segs, "i": inds, "b": bnames,
+        "r": pack(d, ["gosb_name", "seg", "ind"],
+                  {"gosb_name": gi, "seg": si, "ind": ii}),
+        "d": ([[gi[str(r["gosb_name"])], si[str(r["seg"])], int(r["bkt"]),
+                int(r["n"]), round(float(r["fl"])), round(float(r["emp"])),
+                round(float(r["rest"]))]
+               for _, r in dd.groupby(["gosb_name", "seg", "bkt"], as_index=False)
+               .agg(n=("inn", "size"), fl=("current_fl_qty", "sum"),
+                    emp=("emp", "sum"), rest=("rest", "sum")).iterrows()]
+              if not dd.empty else []),
+    }
+
+
+def _ind_rows(g: pd.DataFrame, tot_fl: float) -> list:
+    """Строки разреза по отраслям для одного набора организаций.
+
+    «Отрасль не указана» всегда идёт ПОСЛЕДНЕЙ, даже если она крупнее всех
+    остальных: это не отрасль, а пробел в данных, и ставить его первым значило бы
+    выдавать отсутствие признака за самую большую группу портфеля.
+    """
+    if g is None or g.empty:
+        return []
+    out = []
+    for name, sub in g.groupby("ind"):
+        fl = float(sub["fl"].sum())
+        emp = float(sub["emp"].sum()) if "emp" in sub else 0.0
+        out.append({"name": str(name), "n": int(len(sub)), "fl": fl,
+                    "share": fl / tot_fl if tot_fl else 0.0,
+                    "emp": emp,
+                    "rest": (float((sub["emp"] - sub["fl"]).clip(lower=0).sum())
+                             if "emp" in sub else 0.0),
+                    "avg": fl / len(sub)})
+    out.sort(key=lambda x: (x["name"] == IND_UNKNOWN, -x["fl"]))
+    return out
+
+
 def _trend_rows(trend: pd.DataFrame, level: str, unit_id: int | None = None) -> list:
     """Помесячный план/факт одной единицы → строки графика, по возрастанию месяца.
 
@@ -892,7 +1193,7 @@ def _trend_rows(trend: pd.DataFrame, level: str, unit_id: int | None = None) -> 
     if sub.empty:
         return []
     sub = sub.sort_values("end_dt")
-    return [{"dt": r.end_dt,
+    rows = [{"dt": r.end_dt,
              "label": f"{pd.Timestamp(r.end_dt).month:02d}.{pd.Timestamp(r.end_dt).year}",
              "short": f"{pd.Timestamp(r.end_dt).month:02d}.{pd.Timestamp(r.end_dt).year % 100:02d}",
              "plan": float(r.plan_amt or 0), "fact": float(r.fact_amt or 0),
@@ -910,6 +1211,118 @@ def _trend_rows(trend: pd.DataFrame, level: str, unit_id: int | None = None) -> 
              # сравнивают с планом только месяцы новой методики.
              "no_plan": str(pd.Timestamp(r.end_dt).date()) < Q.METRIC_SWITCH_DT}
             for r in sub.itertuples()]
+    return _trend_compare(rows)
+
+
+def _attach_seg_matrix(details: dict, trend_seg, level: str) -> None:
+    """Дописать каждой карточке её матрицу «сегмент × месяц».
+
+    Считается тем же `_trend_seg_matrix`, что и у уровня, — просто с ключом
+    единицы. Отдельной функцией, а не внутри `_unit_detail`: туда пришлось бы
+    тащить ещё один кадр через семь параметров, а нужен он ровно одной строке.
+    """
+    if not details or trend_seg is None or getattr(trend_seg, "empty", True):
+        return
+    for nid, det in details.items():
+        det["seg_matrix"] = _trend_seg_matrix(trend_seg, level, int(nid))
+
+
+def _trend_seg_matrix(trend_seg, level: str, unit_id: int | None = None) -> dict:
+    """Матрица «сегмент × месяц»: изменение портфеля сегмента год к году.
+
+    ЗАЧЕМ ОТДЕЛЬНО ОТ ГРАФИКА. График динамики показывает портфель уровня
+    целиком, и в нём не видно, какой сегмент тянет вниз, а какой вверх. Матрица
+    отвечает на это по каждому месяцу сразу: строка — сегмент, столбец — месяц,
+    в клетке изменение к тому же месяцу прошлого года.
+
+    ГОД К ГОДУ, А НЕ МЕСЯЦ К МЕСЯЦУ: сезонность в зарплатных портфелях сильная
+    (бюджетники в сентябре, стройка летом), и разница с прошлым месяцем говорит
+    больше о календаре, чем о работе.
+
+    Считается из того же окна в 24 месяца, что и график: у каждого показанного
+    месяца должен быть свой месяц-пара годом раньше.
+    """
+    if trend_seg is None or getattr(trend_seg, "empty", True):
+        return {}
+    sub = trend_seg[trend_seg["level_name"] == level]
+    if unit_id is not None:
+        sub = sub[sub["unit_id"] == unit_id]
+    if sub.empty:
+        return {}
+    sub = sub.copy()
+    sub["p"] = sub["end_dt"].map(lambda x: pd.Timestamp(x).to_period("M"))
+    all_p = sorted(sub["p"].unique())
+    show = all_p[-TREND_MONTHS:]
+    if not show:
+        return {}
+    fact = {(int(r.seg_code), r.p): float(r.fact_amt or 0) for r in sub.itertuples()}
+    codes = sorted({int(c) for c, _ in fact})
+    order = {s: i for i, s in enumerate(segments.ORDER)}
+    codes.sort(key=lambda c: order.get(segments.short(c), 99))
+    rows = []
+    for code in codes:
+        cells = []
+        for pm in show:
+            now = fact.get((code, pm))
+            was = fact.get((code, pm - 12))
+            if now is None or was is None:
+                cells.append(None)
+                continue
+            d = now - was
+            cells.append({"yoy": d, "fact": now, "prev": was,
+                          "pct": (d / was * 100) if was else None})
+        got = [c for c in cells if c]
+        if got:
+            # СРЕДНЕЕ, А НЕ СУММА. Получатели — это остаток на конец месяца, а
+            # не поток за месяц: двенадцать разниц год к году — двенадцать
+            # независимых замеров одного и того же разрыва, и складывать их
+            # нельзя, сумма не значила бы ничего. Среднее отвечает на вопрос
+            # «каким этот разрыв был типично за год».
+            rows.append({"seg": segments.short(code), "cells": cells,
+                         "avg": sum(c["yoy"] for c in got) / len(got)})
+    if not rows:
+        return {}
+    months = [{"label": f"{m.month:02d}.{m.year}",
+               "short": f"{m.month:02d}.{m.year % 100:02d}"} for m in show]
+    # масштаб раскраски — по наибольшему отклонению в матрице: цвет должен
+    # сравнивать клетки между собой, а не с абсолютной шкалой, своей у каждого ТБ
+    mx = max((abs(c["yoy"]) for r in rows for c in r["cells"] if c), default=0.0)
+    return {"months": months, "rows": rows, "max": mx}
+
+
+def _trend_compare(rows: list) -> list:
+    """Дописать к помесячному ряду год к году и изменение с начала года.
+
+    СЧИТАЕТСЯ ИЗ САМОГО РЯДА, а не отдельным запросом: витрина хранит помесячные
+    строки, и «тот же месяц год назад» — это строка на двенадцать позиций раньше.
+    Ради этого окно загрузки вдвое шире окна показа (см. bank.TREND_LOAD_MONTHS),
+    а наружу уходят только последние TREND_MONTHS месяцев.
+
+    «С НАЧАЛА ГОДА» — РАЗНИЦА С ДЕКАБРЁМ, А НЕ СУММА МЕСЯЦЕВ. Получатели это
+    ОСТАТОК на конец месяца, а не поток за месяц: складывать такие числа
+    нарастающим итогом бессмысленно — получилась бы величина, не значащая ничего.
+    Накопленный итог для остатка — это насколько он изменился с последней отчётной
+    точки прошлого года, то есть с 31 декабря.
+
+    Месяца-пары может не быть (история короче, дырка в витрине) — тогда в строке
+    стоит None, и ни график, ни таблица это сравнение не рисуют.
+    """
+    if not rows:
+        return rows
+    by_p = {pd.Timestamp(r["dt"]).to_period("M"): r for r in rows}
+    for r in rows:
+        pm = pd.Timestamp(r["dt"]).to_period("M")
+        prev = by_p.get(pm - 12)
+        r["prev"] = float(prev["fact"]) if prev else None
+        r["yoy"] = (r["fact"] - prev["fact"]) if prev else None
+        r["yoy_pct"] = ((r["yoy"] / prev["fact"] * 100)
+                        if prev and prev["fact"] else None)
+        dec = by_p.get(pd.Period(year=pm.year - 1, month=12, freq="M"))
+        r["ytd_base"] = float(dec["fact"]) if dec else None
+        r["ytd"] = (r["fact"] - dec["fact"]) if dec else None
+        r["ytd_pct"] = ((r["ytd"] / dec["fact"] * 100)
+                        if dec and dec["fact"] else None)
+    return rows[-TREND_MONTHS:]
 
 
 def _yoy(prev: dict, closed: dict, d: dict, area: str = "Год к году") -> dict:
@@ -2461,6 +2874,13 @@ def _unit_detail(orgs_fc: pd.DataFrame, detail: pd.DataFrame, insights: dict,
             # история единицы: у ГОСБ — свой уровень витрины, у ТБ — уровень 'tb'
             "trend": _trend_rows(trend, "gosb" if unit_src == "new_gosb_id" else "tb",
                                  nid),
+            # СОСТАВ ПОРТФЕЛЯ ЭТОЙ ЖЕ ЕДИНИЦЫ — тем же расчётом, что и у уровня.
+            # Разрезы по людям сюда не идут: ведомости считаются на уровень, и
+            # резать их ещё и по подразделениям значило бы гонять 29 млн строк
+            # ради карточки. Поэтому в карточке только то, что считается по
+            # организациям, — отрасли, глубина проникновения и сегменты.
+            "structure": _structure(detail[detail[unit_src] == nid]
+                                    if unit_src in detail else None),
         }
     if skipped_no_base:
         fl = sum(x[1] for x in skipped_no_base)

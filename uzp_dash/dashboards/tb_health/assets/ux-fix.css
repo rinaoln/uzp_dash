@@ -1168,3 +1168,101 @@ body.pdf-measure #print-root {
 }
 #print-root .es-go { color: var(--text-2); border-bottom: none; font-weight: 400; }
 #print-root .es-go i { display: none; }
+
+/* ============================================================
+   Сравнения над графиком динамики
+   ============================================================
+   График отвечает «как менялось», но не отвечает «много это или мало». Оба
+   ответа дают сравнения: тот же месяц год назад снимает сезонность, изменение
+   с 31 декабря — это то, с чем идут к году. Стоят НАД графиком: их читают
+   первыми, а кривую — уже с ними в голове. */
+.tr-cmp { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 0 0 12px;
+          font-size: 15px; font-variant-numeric: tabular-nums; }
+.tr-cmp > span { display: inline-flex; align-items: baseline; gap: 6px; }
+.tr-cmp i { font-style: normal; font-size: 13px; color: var(--text-2); }
+
+/* ============================================================
+   Переток внутри банка — в блоке «Отток»
+   ============================================================
+   Стоит сразу под воронкой оттока: вопрос «сколько потеряли» и вопрос «а
+   потеряли ли» должны читаться подряд. Нейтральный акцент, не красный: переток
+   не потеря банка. Оговорка про разные окна — отдельной строкой и тише: она
+   обязательна, но это сноска, а не новость. */
+.of-mv {
+  margin: 10px 0 0; padding: 12px 14px; font-size: 15px; line-height: 1.5;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.of-mv i { display: block; margin-top: 6px; font-style: normal;
+           font-size: 13px; color: var(--text-2); }
+
+/* ============================================================
+   Структура портфеля: доли полоской и кривая концентрации
+   ============================================================
+   В таблице из пяти-шести колонок проценты глазами не сравниваются: 10,7% и
+   3,7% отличаются втрое, а читаются одинаково. Полоска даёт длину, число
+   остаётся точным — одно другое не заменяет. */
+.sbar { display: inline-flex; align-items: center; gap: 7px;
+        min-width: 112px; justify-content: flex-end; }
+.sbar i { flex: none; height: 7px; min-width: 2px; border-radius: 999px;
+          background: var(--accent); opacity: .85; }
+.sbar b { font-weight: 650; font-variant-numeric: tabular-nums; }
+/* полоска растёт влево от числа — колонка числовая, числа выровнены по краю */
+.sbar { flex-direction: row-reverse; }
+.sbar.dim i { background: var(--text-2); opacity: .45; }
+.sbar.warn i { background: var(--warn); opacity: .8; }
+
+/* Кривая концентрации — вспомогательная картинка к таблице, поэтому уже её и
+   прижата влево: она объясняет границы групп, а не живёт сама по себе. */
+.cc-wrap { margin: 2px 0 14px; max-width: 560px; }
+.cc { width: 100%; height: auto; display: block; }
+.cc-note { margin-top: 2px; font-size: 13px; line-height: 1.45;
+           color: var(--text-2); }
+@media print { .cc-wrap { max-width: 100%; } }
+
+/* --- Разрез по отраслям: переключатель сегмента --- */
+.ind-flt { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+           margin: 8px 0 10px; font-size: 14px; }
+.ind-flt label { color: var(--text-2); }
+.ind-flt select { font: inherit; padding: 5px 9px; border-radius: 9px;
+                  border: 1px solid var(--separator);
+                  background: var(--surface-solid); color: var(--text); }
+.ind-note { color: var(--text-2); font-size: 13px; }
+/* строка «Отрасль не указана» — это пробел в данных, а не отрасль: она всегда
+   последняя и набрана тише остальных, чтобы не читалась как крупнейшая группа */
+tr.ind-none td { color: var(--text-2); }
+@media print { .ind-flt select { border: none; padding: 0; } }
+
+/* --- Матрица «сегмент × месяц» год к году --- */
+.sm-tbl td, .sm-tbl th { white-space: nowrap; }
+.sm-tbl .sm-seg { font-weight: 650; }
+.sm-tbl .sm-c { text-align: right; font-variant-numeric: tabular-nums;
+                transition: opacity .12s ease; }
+.sm-tbl .sm-tot { border-left: 1px solid var(--separator); }
+/* выбранный месяц не прячет остальные, а приглушает их: месяц читают в
+   сравнении с соседними, и убрать их значило бы отнять контекст */
+.sm-tbl .sm-off { opacity: .28; }
+@media print { .sm-tbl .sm-off { opacity: 1; } }
+
+/* --- Портфель со стороны людей --- */
+.no-xls h5 { margin: 16px 0 6px; font-size: 15px; font-weight: 650; }
+.pe-line { font-size: 15px; line-height: 1.5; }
+.pe-line i { display: block; margin-top: 6px; font-style: normal;
+             font-size: 13px; color: var(--text-2); }
+
+/* Раскраска клеток матрицы «сегмент × месяц» — КЛАССАМИ, а не инлайн-стилем.
+   Матриц в документе больше сотни по 72 клетки; инлайн-стиль с color-mix в
+   каждой клетке весил полтора мегабайта на одно оформление. Четыре ступени
+   насыщенности сравнивают клетки между собой: шаг берётся от наибольшего
+   отклонения в той же матрице. */
+.sm-c.sm-p1 { background: color-mix(in srgb, var(--good)  7%, transparent); }
+.sm-c.sm-p2 { background: color-mix(in srgb, var(--good) 14%, transparent); }
+.sm-c.sm-p3 { background: color-mix(in srgb, var(--good) 21%, transparent); }
+.sm-c.sm-p4 { background: color-mix(in srgb, var(--good) 28%, transparent); }
+.sm-c.sm-n1 { background: color-mix(in srgb, var(--bad)   7%, transparent); }
+.sm-c.sm-n2 { background: color-mix(in srgb, var(--bad)  14%, transparent); }
+.sm-c.sm-n3 { background: color-mix(in srgb, var(--bad)  21%, transparent); }
+.sm-c.sm-n4 { background: color-mix(in srgb, var(--bad)  28%, transparent); }
+/* знак величины — цветом текста; у итоговой колонки фона нет, только цвет */
+.sm-tbl td.sm-c[class*="sm-p"], .sm-tbl td.sm-p0 { color: var(--good); font-weight: 650; }
+.sm-tbl td.sm-c[class*="sm-n"], .sm-tbl td.sm-n0 { color: var(--bad);  font-weight: 650; }

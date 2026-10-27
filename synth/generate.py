@@ -1079,6 +1079,14 @@ def _payroll(orgs: pd.DataFrame, liquidated: set):
     epk_person = 1_126_000_000_000_000_000 + pairs_person.astype(np.int64)
     acc_num = np.array([f"40817810{int(g) % 10000:04d}{i:08d}"
                         for g, i in zip(pair_gosb, np.arange(n_pairs))])
+    # ДАТА ОТКРЫТИЯ СЧЁТА — на пару, один раз на весь прогон: по ней отчёт
+    # строит разрез «как долго человек получает зарплату». Распределение
+    # скошено к недавним годам: зарплатный проект растёт, и свежих пар всегда
+    # больше, чем десятилетних. Без этого поля разрез проверить было бы негде —
+    # на проме колонка заполнена, у нас была пустой.
+    _acc_age_days = (RNG.beta(1.6, 3.0, n_pairs) * 5500 + 20).astype(np.int64)
+    acc_open = (np.datetime64(MAX_MONTH_END.date(), "D")
+                - _acc_age_days.astype("timedelta64[D]"))
 
     inn_txt = tab["inn_txt"].to_numpy()[org_of_pair]
     # у пар-приёмников реорганизации ИНН СВОЙ, отличный от исходного
@@ -1164,6 +1172,7 @@ def _payroll(orgs: pd.DataFrame, liquidated: set):
                                 PAYROLL_CODES_IN[0] if part == 0 else PAYROLL_CODES_IN[2])
                 rows.append(pd.DataFrame({
                     "acc_num": acc_num[idx][take],
+                    "acc_open_dt": acc_open[idx][take],
                     "amt": (amt[take] * share[take]).round(2),
                     "company_name": name_arr[idx][take],
                     "enrollment_type": code.astype("int16"),
@@ -1186,6 +1195,7 @@ def _payroll(orgs: pd.DataFrame, liquidated: set):
             if len(take_s):
                 rows.append(pd.DataFrame({
                     "acc_num": acc_num[idx][take_s],
+                    "acc_open_dt": acc_open[idx][take_s],
                     "amt": (amt[take_s] * 0.25).round(2),
                     "company_name": name_arr[idx][take_s],
                     "enrollment_type": np.int16(PAYROLL_STIPEND_CODE),

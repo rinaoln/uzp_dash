@@ -243,6 +243,56 @@ WHERE mm.rn=1 AND mm.level_name='gosb'
 GROUP BY g.new_gosb_id, mm.end_dt
 """
 
+# Помесячный ФАКТ ПО СЕГМЕНТАМ — для матрицы «сегмент × месяц» год к году.
+#
+# Тот же запрос, что MONTHLY_TREND, но разрезанный по `extended_dim_1` и без
+# плана: матрица показывает изменение портфеля сегмента к тому же месяцу
+# прошлого года, а план к этому вопросу отношения не имеет.
+#
+# Итоговая строка сегмента (`extended_dim_1 = 1` — «Все») ИСКЛЮЧЕНА: она уже
+# приходит обычным трендом, и в матрице сегментов была бы строкой-дублем,
+# равной сумме остальных.
+#
+# Уровни только sb и tb: матрица строится на уровне отчёта, а у ГОСБ своя
+# карточка, и сегментный разрез в ней уже есть.
+MONTHLY_TREND_SEG = """
+WITH gmap AS (""" + _GMAP + """),
+tb AS (SELECT DISTINCT tb_id FROM {schema}.uzp_dim_gosb
+            WHERE tb_short_name IS NOT NULL AND """ + _NO_CA + """),
+mm AS (
+  SELECT m.level_name, m.level_id, m.end_dt,
+         m.extended_dim_1 AS seg_code, m.fact_amt,
+         row_number() OVER (PARTITION BY m.level_name, m.level_id, m.end_dt,
+                                         m.extended_dim_1
+                            ORDER BY m.fact_amt DESC) AS rn
+  FROM {schema}.uzp_dwh_metrics m
+  WHERE m.period_type='m'
+    AND ((m.end_dt >= CAST(:metric_switch AS date) AND m.metric_id = :m_rcp)
+      OR (m.end_dt <  CAST(:metric_switch AS date) AND m.metric_id = :m_rcp_h1))
+    AND m.extended_dim_1 IS NOT NULL AND m.extended_dim_1 <> 1
+    AND m.level_name IN ('sb','tb','gosb')
+    AND m.end_dt >= CAST(:trend_from AS date) AND m.end_dt <= CAST(:ref_closed AS date)
+)
+SELECT 'sb' AS level_name, mm.level_id AS unit_id, mm.end_dt,
+       mm.seg_code, mm.fact_amt
+FROM mm WHERE mm.rn=1 AND mm.level_name='sb'
+UNION ALL
+SELECT 'tb' AS level_name, mm.level_id AS unit_id, mm.end_dt,
+       mm.seg_code, mm.fact_amt
+FROM mm JOIN tb ON tb.tb_id = mm.level_id
+WHERE mm.rn=1 AND mm.level_name='tb'
+UNION ALL
+-- ГОСБ: сумма законна — несколько старых ГОСБ склеиваются в один новый, ровно
+-- как в MONTHLY_TREND. Нужен карточке подразделения: там та же матрица
+-- «сегмент × месяц», только по одному ГОСБ.
+SELECT 'gosb' AS level_name, g.new_gosb_id AS unit_id, mm.end_dt,
+       mm.seg_code, sum(mm.fact_amt) AS fact_amt
+FROM mm JOIN gmap g ON g.old_gosb_id = mm.level_id
+WHERE mm.rn=1 AND mm.level_name='gosb'
+GROUP BY g.new_gosb_id, mm.end_dt, mm.seg_code
+"""
+
+
 # Организации ПО ВСЕМУ БАНКУ на грейне (ГОСБ, ИНН): витринные метрики, сегмент,
 # средняя ЗП, годовой тренд и признак «закреплена в эталонной базе».
 #
@@ -295,6 +345,52 @@ WHERE c.level_name = 'gosb'
   AND c.org_type = 'inn'   -- только организации по ИНН (не holding/head_holding)
 GROUP BY g.new_gosb_id, g.gosb_name, g.tb_id, c.org_id
 """
+
+# ОТРАСЛЬ ОРГАНИЗАЦИИ — из витрины атрибутов ЕПК.
+#
+# Поля отрасли в витрине организаций нет, а здесь оно есть: 21 категория —
+# «Торговля», «Строительство», «Машиностроение», «Здравоохранение, образование»
+# и так далее. ЗАПОЛНЕНО ДАЛЕКО НЕ ВЕЗДЕ: по профилю прома — у 9,7% строк
+# витрины ЕПК. Поэтому отрасль нигде ничего не заменяет: она идёт отдельным
+# разрезом, а организации без неё остаются видимой строкой «Отрасль не указана»,
+# и доля покрытия печатается в лог сборки.
+#
+# Два запроса, а не один с OR в условии соединения: соединение по двум ключам
+# через OR планировщик разворачивает в перебор, и на витрине ЕПК это очень
+# дорого. По epk_id связь точная (это ключ витрины), по ИНН — запасная, ею
+# добираются организации, чей epk_id в витрине не нашёлся.
+INDUSTRY_BY_EPK = """
+SELECT dc.inn               AS inn,
+       min(e.industry_name) AS industry_name
+FROM {schema}.uzp_dim_company dc
+JOIN {schema}.uzp_data_epk_consolidation e ON e.epk_id = dc.epk_id
+WHERE e.industry_name IS NOT NULL
+GROUP BY dc.inn
+"""
+
+INDUSTRY_BY_INN = """
+SELECT e.inn                AS inn,
+       min(e.industry_name) AS industry_name
+FROM {schema}.uzp_data_epk_consolidation e
+WHERE e.industry_name IS NOT NULL
+  AND e.inn IS NOT NULL
+GROUP BY e.inn
+"""
+
+
+# Какие месяцы ЕСТЬ в витрине организаций. Запускается только тогда, когда
+# ORGS_ALL вернул пусто: витрина заполняется не каждый месяц (в профиле прома из
+# двенадцати месяцев года в ней десять — нет августа, января и апреля), и запрос
+# за отсутствующий месяц отдаёт ноль строк молча. Без этого списка «блок пустой»
+# неотличимо от «плана никто не завалил».
+ORGS_MONTHS = """
+SELECT DISTINCT report_dt
+FROM {schema}.uzp_dwh_company_holding_metric
+WHERE level_name = 'gosb' AND org_type = 'inn'
+ORDER BY report_dt DESC
+LIMIT 24
+"""
+
 
 # Организации на грейне (ТБ, ИНН) — строки того же справочника уровнем выше.
 #
@@ -802,7 +898,11 @@ CREATE TEMP TABLE uzp_flow_pairs AS
 SELECT report_dt, epk_id, inn,
        min(sys_gosb_id)                                          AS old_gosb_id,
        sum(CASE WHEN enrollment_type IN :salary_codes
-                THEN amt ELSE 0 END)                             AS sal_amt
+                THEN amt ELSE 0 END)                             AS sal_amt,
+       -- дата открытия счёта: по ней считается, как долго человек получает
+       -- зарплату. Берётся ТЕМ ЖЕ проходом — отдельный скан витрины ради одной
+       -- колонки стоил бы столько же, сколько весь разбор перетока
+       min(acc_open_dt)                                          AS acc_dt
 FROM {schema}.uzp_data_payroll_m
 WHERE false
 GROUP BY report_dt, epk_id, inn
@@ -814,7 +914,8 @@ INSERT INTO uzp_flow_pairs
 SELECT report_dt, epk_id, inn,
        min(sys_gosb_id)                                          AS old_gosb_id,
        sum(CASE WHEN enrollment_type IN :salary_codes
-                THEN amt ELSE 0 END)                             AS sal_amt
+                THEN amt ELSE 0 END)                             AS sal_amt,
+       min(acc_open_dt)                                          AS acc_dt
 FROM {schema}.uzp_data_payroll_m
 WHERE report_dt IN :months
   AND mod(abs(epk_id), :parts) = :part
@@ -892,6 +993,111 @@ GROUP BY g.new_gosb_id, g.tb_id, d.inn_from, d.inn_to
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# РАЗРЕЗЫ ПО ФИЗИЧЕСКИМ ЛИЦАМ. Первые два читаются из уже построенной temp-таблицы
+# `uzp_flow_pairs` (см. PAYROLL_FLOW_TMP) — она лежит на грейне «человек ×
+# организация × месяц» и уже содержит зарплатную сумму. Это значит НОЛЬ
+# дополнительных сканов 29-миллионной витрины: тяжёлый проход уже сделан ради
+# перетока, и мы просто берём из него ещё два ответа.
+# ---------------------------------------------------------------------------
+
+# Распределение получателей по размеру зачисления за месяц.
+#
+# Порог тот же, что у получателя (:amt_min): ниже него человек в портфель месяца
+# не входит, и смешивать его с теми, кто входит, нельзя.
+PAYROLL_SIZE = """
+WITH gmap AS (""" + _GMAP + """)
+SELECT g.tb_id                       AS tb_id,
+       CASE WHEN p.sal_amt <  30000 THEN 0
+            WHEN p.sal_amt <  60000 THEN 1
+            WHEN p.sal_amt < 100000 THEN 2
+            WHEN p.sal_amt < 200000 THEN 3
+            ELSE 4 END               AS bucket,
+       count(*)                      AS fl,
+       sum(p.sal_amt)                AS amt
+FROM uzp_flow_pairs p
+JOIN gmap g ON g.old_gosb_id = p.old_gosb_id
+WHERE p.report_dt = CAST(:m_cur AS date) AND p.sal_amt > :amt_min
+GROUP BY 1, 2
+"""
+
+# Совместители: человек, который получает зарплату больше чем в одной организации.
+#
+# ТБ человеку приписывается по МИНИМАЛЬНОМУ из его подразделений: совместитель
+# может числиться в разных ТБ, и отнести его сразу к обоим значило бы посчитать
+# одного человека дважды. Для числа «сколько людей совмещают» это точно, для
+# разреза по ТБ — приближение, и в отчёте оно подписано.
+PAYROLL_MULTI = """
+WITH gmap AS (""" + _GMAP + """),
+per AS (
+  SELECT p.epk_id              AS epk_id,
+         min(g.tb_id)          AS tb_id,
+         count(DISTINCT p.inn) AS n_org
+  FROM uzp_flow_pairs p
+  JOIN gmap g ON g.old_gosb_id = p.old_gosb_id
+  WHERE p.report_dt = CAST(:m_cur AS date) AND p.sal_amt > :amt_min
+  GROUP BY p.epk_id
+)
+SELECT tb_id,
+       count(*) FILTER (WHERE n_org = 1) AS one_org,
+       count(*) FILTER (WHERE n_org = 2) AS two_org,
+       count(*) FILTER (WHERE n_org > 2) AS many_org
+FROM per
+GROUP BY tb_id
+"""
+
+# Как долго человек получает зарплату — распределение по давности счёта.
+#
+# Читается из той же temp-таблицы: дата открытия счёта попала в неё тем же
+# проходом, что и зарплатная сумма (см. PAYROLL_FLOW_TMP). Отдельного скана
+# витрины здесь нет.
+#
+# ЭТО ДАВНОСТЬ СЧЁТА, А НЕ СТАЖ У РАБОТОДАТЕЛЯ. Счёт мог быть открыт раньше,
+# чем человек пришёл в эту организацию, поэтому группа отвечает на вопрос
+# «как давно человек получает у нас зарплату вообще», а не «сколько он работает
+# в этой компании». В отчёте это подписано.
+PAYROLL_TENURE = """
+WITH gmap AS (""" + _GMAP + """)
+SELECT g.tb_id AS tb_id,
+       CASE WHEN p.acc_dt IS NULL THEN -1
+            WHEN p.acc_dt >  CAST(:m_cur AS date) - INTERVAL '1 year'  THEN 0
+            WHEN p.acc_dt >  CAST(:m_cur AS date) - INTERVAL '3 year'  THEN 1
+            WHEN p.acc_dt >  CAST(:m_cur AS date) - INTERVAL '5 year'  THEN 2
+            WHEN p.acc_dt >  CAST(:m_cur AS date) - INTERVAL '10 year' THEN 3
+            ELSE 4 END AS bucket,
+       count(*)       AS fl,
+       sum(p.sal_amt) AS amt
+FROM uzp_flow_pairs p
+JOIN gmap g ON g.old_gosb_id = p.old_gosb_id
+WHERE p.report_dt = CAST(:m_cur AS date) AND p.sal_amt > :amt_min
+GROUP BY 1, 2
+"""
+
+
+# Состав зачислений по видам за месяц.
+#
+# ЕДИНСТВЕННЫЙ ИЗ ТРЁХ, КОТОРЫЙ ТРЕБУЕТ СВОЕГО ПРОХОДА по витрине: вид зачисления
+# в temp-таблицу не попадает, там он уже свёрнут в зарплатную сумму. Проход
+# дешёвый — чистая агрегация без DISTINCT и без соединений с крупными
+# справочниками, результат в несколько десятков строк на ТБ.
+#
+# Считаются ЗАЧИСЛЕНИЯ И СУММЫ, а не люди: `count(DISTINCT epk_id)` по этой
+# витрине стоит дорого, а на вопрос «из чего состоит поток» отвечают и эти два
+# числа.
+PAYROLL_KINDS = """
+WITH gmap AS (""" + _GMAP + """)
+SELECT g.tb_id                            AS tb_id,
+       p.enrollment_type                  AS code,
+       min(p.enrollment_transcription)    AS name,
+       count(*)                           AS n,
+       sum(p.amt)                         AS amt
+FROM {schema}.uzp_data_payroll_m p
+JOIN gmap g ON g.old_gosb_id = p.sys_gosb_id
+WHERE p.report_dt = CAST(:m_cur AS date)
+GROUP BY g.tb_id, p.enrollment_type
+"""
 
 
 # Почему раздела «Переток ФЛ» не получилось. Запускается ТОЛЬКО когда основной

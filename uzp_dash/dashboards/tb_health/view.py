@@ -259,7 +259,7 @@ def build(ctx: Context) -> str:
         body=(_BOOT_JS + _tabs([a for a, _ in levels]) + _help_bar() + bodies
               + _cell_dialog() + _tb_portfolio_dialog(sb, preps, b)
               + _HID.script() + _help_data() + _HELP_JS
-              + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _OFD_JS
+              + _IND_JS + _SEGM_JS + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _OFD_JS
               + _MX_JS + _TBDYN_JS + _FLOW_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
         css=_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css"),
@@ -332,9 +332,13 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     # Поимённый список живёт только на уровне ТБ: на уровне банка работают с ТБ,
     # а имена — один переход вниз (и это сотни тысяч строк, которые никто не
     # листает). Но ОБЪЁМ потенциала нужен и сети: там он сводом по банкам.
+    # «Структура» стоит ПЕРЕД потенциалом: сначала видно, из чего портфель
+    # состоит и где внутри клиентов ещё есть люди, и только потом — поимённый
+    # список, кого из них брать в работу.
+    secs.append(("struct", _structure_section(a, idx)))
     secs.append(("orgs", _orgs(a, story.get("orgs"), idx) if a.level != "sb"
                  else _potential_sb(a, story.get("orgs"))))
-    secs.append(("trend", _trend_section(a)))
+    secs.append(("trend", _trend_section(a, idx)))
     secs = [(key, html) for key, html in secs if html]
     return (
         _lvl_head(a, idx)
@@ -434,6 +438,21 @@ def _hub_facts(a: analyze.Analysis) -> dict:
         out["trend"] = (
             "Портфель месяц за месяцем: куда он движется и в каких месяцах "
             "план не выполнялся.", nums)
+
+    st = a.structure or {}
+    if st.get("segs") or st.get("inds"):
+        nums = []
+        inds = [x for x in (st.get("inds") or [])
+                if x["name"] != analyze.IND_UNKNOWN]
+        if inds:
+            nums.append((f'{inds[0]["share"] * 100:.0f}%',
+                         f'портфеля — {inds[0]["name"].lower()}', ""))
+        if st.get("not_ours"):
+            nums.append((C.fmt_num(st["not_ours"]),
+                         "человек у наших клиентов получают зарплату не у нас", ""))
+        out["struct"] = (
+            "Из чего состоит портфель: чем занимаются клиенты, насколько глубоко "
+            "мы в них и сколько людей у них ещё не наши.", nums)
 
     if not a.matrix.empty:
         n_units = a.matrix["unit_id"].nunique()
@@ -1232,7 +1251,587 @@ def _method_note() -> str:
             f'за год влияют обе части.</p>')
 
 
-def _trend_section(a: analyze.Analysis) -> str:
+def _seg_month_matrix(m: dict | None, sid: str = "sm0",
+                      full: bool = True) -> str:
+    """Матрица «сегмент × месяц»: изменение год к году, с выбором месяца.
+
+    График динамики показывает портфель уровня целиком — по нему не видно, какой
+    сегмент тянет вниз, а какой вверх. Матрица отвечает на это сразу по всем
+    месяцам окна.
+
+    ЦВЕТ СРАВНИВАЕТ КЛЕТКИ МЕЖДУ СОБОЙ, а не с абсолютной шкалой: насыщенность
+    берётся от наибольшего отклонения в этой же матрице. Абсолютная шкала
+    покрасила бы небольшой банк в бледное при любых его результатах.
+
+    ВЫБОР МЕСЯЦА НЕ ПРЯЧЕТ СТОЛБЦЫ, а приглушает остальные: матрицу читают,
+    сравнивая месяц с соседними, и спрятать их значило бы отнять контекст. Без
+    скрипта видны все месяцы — это и есть вид по умолчанию.
+
+    `full=False` — вариант для карточки подразделения: без выбора месяца и без
+    подсказок в клетках. Матриц в документе больше сотни, и подсказка с выбором
+    весят вчетверо больше самих чисел; в карточке нужна картина целиком, а
+    перебор месяцев остаётся в разделе уровня.
+    """
+    m = m or {}
+    rows, months = m.get("rows") or [], m.get("months") or []
+    if not rows or not months:
+        return ""
+    mx = float(m.get("max") or 0) or 1.0
+
+    def cell(c, i):
+        # НАСЫЩЕННОСТЬ — КЛАССОМ, а не инлайн-стилем. На клетку это экономит под
+        # сотню символов, а матриц в документе больше сотни: инлайн-стили давали
+        # полтора мегабайта на одно только оформление.
+        mi = f' data-m="{i}"' if full else ""
+        if not c:
+            return f'<td class="sm-c"{mi}>—</td>'
+        v = float(c["yoy"])
+        k = min(1.0, abs(v) / mx)
+        step = 0 if k <= 0.04 else min(4, int(k * 4) + 1)
+        cls = f' sm-{"p" if v >= 0 else "n"}{step}' if step else ""
+        tip = ""
+        if full:
+            pct = (f' ({c["pct"]:+.1f}%)'.replace("-", "−").replace(".", ",")
+                   if c.get("pct") is not None else "")
+            tip = (f' title="факт {C.fmt_num(c["fact"])} · год назад '
+                   f'{C.fmt_num(c["prev"])}{C.esc(pct)}"')
+        return (f'<td class="sm-c{cls}"{mi}{tip}>'
+                f'{"+" if v >= 0 else "−"}{C.fmt_num(abs(v))}</td>')
+
+    head = "".join(f'<th class="num sm-c"'
+                   + (f' data-m="{i}"' if full else "")
+                   + f'>{C.esc(x["short"])}</th>'
+                   for i, x in enumerate(months))
+    body = []
+    for r in rows:
+        tot = float(r["avg"])
+        body.append(
+            f'<tr><td class="sm-seg">{C.esc(r["seg"])}</td>'
+            + "".join(cell(c, i) for i, c in enumerate(r["cells"]))
+            + f'<td class="num sm-tot sm-{"p" if tot >= 0 else "n"}0">'
+              f'{"+" if tot >= 0 else "−"}{C.fmt_num(abs(tot))}</td></tr>')
+    sel = ""
+    opts = '<option value="all">все месяцы</option>' + "".join(
+        f'<option value="{i}">{C.esc(x["label"])}</option>'
+        for i, x in enumerate(months))
+    if full:
+        sel = (f'<div class="ind-flt"><label for="{sid}-s">Месяц</label>'
+               f'<select id="{sid}-s" onchange="segMonth(\'{sid}\')">{opts}</select>'
+               f'<span class="ind-note" id="{sid}-n">показаны все месяцы</span></div>')
+    return (
+        '<h4>Изменение по сегментам год к году</h4>'
+        + ('<div class="gd-note">В клетке — насколько портфель сегмента '
+           'отличается от того же месяца прошлого года. Год к году, а не к '
+           'прошлому месяцу: сезонность в зарплатных портфелях сильная, и '
+           'разница с соседним месяцем говорит больше о календаре, чем о '
+           'работе.</div>' if full else "")
+        + sel
+        + f'<div class="tbl-scroll"><table class="sm-tbl" id="{sid}-t">'
+          f'<thead><tr><th>сегмент</th>{head}'
+          f'<th class="num" title="Среднее изменение год к году за показанные '
+          f'месяцы. Не сумма: получатели — остаток на конец месяца, и двенадцать '
+          f'разниц год к году складывать нельзя">в среднем</th></tr></thead>'
+          f'<tbody>{"".join(body)}</tbody></table></div>')
+
+
+_SEGM_JS = """
+<script>
+/* Выбор месяца в матрице «сегмент × месяц»: остальные столбцы приглушаются, а
+   не прячутся — месяц читают в сравнении с соседними. */
+function segMonth(sid){
+  var sel = document.getElementById(sid + '-s');
+  var tbl = document.getElementById(sid + '-t');
+  var note = document.getElementById(sid + '-n');
+  if(!sel || !tbl) return;
+  var v = sel.value;
+  Array.prototype.forEach.call(tbl.querySelectorAll('.sm-c'), function(c){
+    c.classList.toggle('sm-off', v !== 'all' && c.getAttribute('data-m') !== v);
+  });
+  if(note){
+    note.textContent = (v === 'all') ? 'показаны все месяцы'
+      : 'выделен ' + sel.options[sel.selectedIndex].textContent;
+  }
+}
+</script>
+"""
+
+
+def _trend_compare_line(rows: list) -> str:
+    """Строка сравнений над графиком: год к году и с начала года.
+
+    График отвечает на «как менялось», но не отвечает на «много это или мало».
+    Оба ответа дают сравнения: тот же месяц годом раньше снимает сезонность, а
+    изменение с 31 декабря — это то, с чем идут к году.
+
+    Числа берутся из последнего месяца окна (см. analyze._trend_compare) и
+    ничего заново не считают. Нет пары в витрине — строки нет вовсе: пустые
+    прочерки на видном месте читаются как поломка.
+    """
+    if not rows:
+        return ""
+    last = rows[-1]
+    parts = []
+    if last.get("yoy") is not None:
+        pc = (f" ({last['yoy_pct']:+.1f}%)".replace("-", "−").replace(".", ",")
+              if last.get("yoy_pct") is not None else "")
+        parts.append(f'<span>Год к году: {_wow_num(last["yoy"], "чел")}{pc} '
+                     f'<i>к тому же месяцу прошлого года</i></span>')
+    if last.get("ytd") is not None:
+        parts.append(f'<span>С начала года: {_wow_num(last["ytd"], "чел")} '
+                     f'<i>к {C.fmt_num(last["ytd_base"])} чел на 31 декабря</i>'
+                     f'</span>')  # остаток, а не сумма месяцев — см. _trend_compare
+    if not parts:
+        return ""
+    return f'<div class="tr-cmp">{"".join(parts)}</div>'
+
+
+def _share_bar(share: float, kind: str = "") -> str:
+    """Доля числом и полоской в одной ячейке.
+
+    В таблице из пяти колонок проценты сравниваются глазами плохо: 10,7% и 3,7%
+    отличаются втрое, а читаются одинаково. Полоска даёт длину, число остаётся
+    точным — одно не заменяет другое.
+    """
+    v = max(0.0, min(1.0, float(share or 0)))
+    txt = f"{v * 100:.1f}%".replace(".", ",") if v < 0.1 else f"{v * 100:.0f}%"
+    cls = f" {kind}" if kind else ""
+    return (f'<span class="sbar{cls}"><i style="width:{v * 100:.1f}%"></i>'
+            f'<b>{txt}</b></span>')
+
+
+_IND_COLS = ["отрасль", "организаций", "получателей, чел", "доля портфеля",
+             "в среднем на организацию", "всего сотрудников, чел"]
+
+
+def _tbl_id(cols: list, rows: list, tid: str) -> str:
+    """Таблица со своим id у tbody — чтобы фильтр подменял только строки.
+
+    `C.table` идентификаторов не даёт, а строить всю таблицу в скрипте значило бы
+    держать её шапку в двух местах сразу. Здесь шапка остаётся в разметке и
+    печатается как обычно, а скрипт трогает только содержимое.
+    """
+    head = "".join(f'<th{" class=\"num\"" if i else ""}>{C.esc(c)}</th>'
+                   for i, c in enumerate(cols))
+    body = "".join("<tr>" + "".join(
+        f'<td{" class=\"num\"" if i else ""}>{v}</td>'
+        for i, v in enumerate(r)) + "</tr>" for r in rows)
+    return (f'<div class="tbl-scroll"><table id="{tid}-t">'
+            f'<thead><tr>{head}</tr></thead>'
+            f'<tbody id="{tid}-b">{body}</tbody></table></div>')
+
+
+def _ind_tbody(rows: list) -> str:
+    """Строки таблицы отраслей. Отдельно от разметки — их подменяет фильтр."""
+    out = []
+    for r in rows:
+        dim = ' class="ind-none"' if r["name"] == analyze.IND_UNKNOWN else ""
+        out.append(
+            f'<tr{dim}><td>{C.esc(r["name"])}</td>'
+            f'<td class="num">{C.fmt_num(r["n"])}</td>'
+            f'<td class="num">{C.fmt_num(r["fl"])}</td>'
+            f'<td class="num">{_share_bar(r["share"])}</td>'
+            f'<td class="num">{C.fmt_num(r["avg"])}</td>'
+            f'<td class="num">{C.fmt_num(r["emp"]) if r.get("emp") else "—"}</td>'
+            f'</tr>')
+    return "".join(out)
+
+
+def _ind_block(st: dict, idx: int) -> str:
+    """Портфель по отраслям с переключателем сегмента.
+
+    ПОЧЕМУ ПЕРЕКЛЮЧАТЕЛЬ, А НЕ ВТОРОЕ ИЗМЕРЕНИЕ В ТАБЛИЦЕ. Отраслей два десятка,
+    сегментов шесть: таблица «отрасль × сегмент» — это сто двадцать клеток, их
+    не читают. Переключатель отвечает на тот же вопрос по одному срезу за раз, и
+    это тот же приём, что уже стоит в «Оттоке» и в перетоке.
+
+    Срезы по каждому сегменту посчитаны ПРИ СБОРКЕ, а не отфильтрованы на
+    экране: доля отрасли внутри сегмента — это доля от портфеля сегмента, и
+    пересчитать её из общей таблицы нельзя.
+
+    Строки «все сегменты» лежат прямо в разметке: это вид по умолчанию, и он
+    должен быть виден, даже если переключатель не сработает.
+    """
+    rows_all = st.get("inds") or []
+    if not rows_all:
+        return ""
+    by_seg = st.get("inds_seg") or {}
+    segs = [x for x in SEG_ORDER if x in by_seg]
+    segs += [x for x in sorted(by_seg) if x not in segs]
+    tid = f"ind{idx}"
+    sel = ""
+    if segs:
+        opts = '<option value="all">все сегменты</option>' + "".join(
+            f'<option value="{C.esc(x)}">{C.esc(x)}</option>' for x in segs)
+        sel = (f'<label for="{tid}-s">Сегмент</label>'
+               f'<select id="{tid}-s" onchange="indSeg({idx})">{opts}</select>')
+    cube = st.get("cube") or {}
+    gsel = ""
+    if cube.get("g"):
+        gopts = '<option value="all">все подразделения</option>' + "".join(
+            f'<option value="{i}">{C.esc(x)}</option>'
+            for i, x in enumerate(cube["g"]))
+        gsel = (f'<label for="{tid}-g">Подразделение</label>'
+                f'<select id="{tid}-g" onchange="indSeg({idx})">{gopts}</select>')
+    if sel or gsel:
+        sel = (f'<div class="ind-flt">{gsel}{sel}'
+               f'<span class="ind-note" id="{tid}-n">показаны все '
+               f'подразделения и сегменты</span></div>')
+    known = float(st.get("ind_known") or 0)
+    cover = (f'<div class="gd-note">Отрасль известна у {known * 100:.0f}% '
+             f'организаций портфеля. Остальные стоят отдельной строкой — по '
+             f'отраслям они не раскидываются.</div>')
+    head = "".join(f'<th{" class=\"num\"" if i else ""}>{C.esc(c)}</th>'
+                   for i, c in enumerate(_IND_COLS))
+    tbl = (f'<div class="tbl-scroll"><table id="{tid}-t">'
+           f'<thead><tr>{head}</tr></thead>'
+           f'<tbody id="{tid}-b">{_ind_tbody(rows_all)}</tbody></table></div>')
+    # СВОД ПО УРОВНЮ — готовой разметкой, разрезы по подразделениям — числами.
+    # В своде организация, обслуживаемая в нескольких подразделениях, посчитана
+    # один раз (см. analyze._structure); внутри подразделения такой свёртки быть
+    # не может, поэтому его разрез собирается скриптом из куба чисел.
+    data = {"all": _ind_tbody(rows_all)}
+    for sg in segs:
+        data[sg] = _ind_tbody(by_seg[sg])
+    if cube:
+        data["cube"] = cube
+    holder, expr = veil.hide(data, f"d-ind-{idx}")
+    script = (f'{holder}<script>window.__IND=window.__IND||{{}};'
+              f'window.__IND["{idx}"]={expr};</script>')
+    return (f'<h4>Портфель по отраслям</h4>{cover}{sel}{tbl}{script}')
+
+
+_IND_JS = """
+<script>
+/* Фильтры разреза «Структура портфеля»: подразделение и сегмент.
+ *
+ * СВОД ПО УРОВНЮ берётся готовой разметкой: в нём организация, обслуживаемая в
+ * нескольких подразделениях, посчитана ОДИН РАЗ, и пересчитать это на экране
+ * нельзя — в числах подразделений такой свёртки нет по построению.
+ *
+ * РАЗРЕЗ ПО ПОДРАЗДЕЛЕНИЮ собирается здесь, из куба чисел на грейне
+ * (подразделение, сегмент, отрасль). Готовая разметка на каждую пару дала бы
+ * семь десятков вариантов на уровень и под три мегабайта на документ.
+ */
+(function(){
+  function fmt(v){
+    return Math.round(v).toLocaleString('ru-RU').replace(/\u00a0/g, '\u2009');
+  }
+  function pct(v){
+    var x = Math.max(0, Math.min(1, v || 0)) * 100;
+    return (x < 10 ? x.toFixed(1).replace('.', ',') : Math.round(x)) + '%';
+  }
+  function bar(v, kind){
+    var w = Math.max(0, Math.min(1, v || 0)) * 100;
+    return '<span class="sbar' + (kind ? ' ' + kind : '') + '">'
+         + '<i style="width:' + w.toFixed(1) + '%"></i><b>' + pct(v) + '</b></span>';
+  }
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  }
+  function row(cells){
+    return '<tr>' + cells.map(function(v, i){
+      return '<td' + (i ? ' class="num"' : '') + '>' + v + '</td>';
+    }).join('') + '</tr>';
+  }
+  /* сложение по ключу: [организаций, получателей, штат, не наши, в базе] */
+  function add(map, key, r, from){
+    var a = map[key] || (map[key] = [0, 0, 0, 0, 0]);
+    for(var i = 0; i < 5; i++){ a[i] += (r[from + i] || 0); }
+  }
+
+  window.indSeg = function(idx){
+    var P = (window.__IND || {})[String(idx)];
+    if(!P) return;
+    var t = 'ind' + idx;
+    var gs = document.getElementById(t + '-g');
+    var ss = document.getElementById(t + '-s');
+    var ib = document.getElementById(t + '-b');
+    var db = document.getElementById('st' + idx + '-d-b');
+    var sb = document.getElementById('st' + idx + '-s-b');
+    var note = document.getElementById(t + '-n');
+    if(!ib) return;
+    /* строки свода запоминаем при первом переключении: вернуться к ним можно
+       без второго экземпляра разметки в файле */
+    if(!P._orig){
+      P._orig = {d: db ? db.innerHTML : '', s: sb ? sb.innerHTML : ''};
+    }
+    var g = gs ? gs.value : 'all';
+    var seg = ss ? ss.value : 'all';
+    var cube = P.cube;
+
+    if(g === 'all' || !cube){
+      var html = P[seg];
+      ib.innerHTML = (html == null)
+        ? '<tr><td colspan="6">В этом сегменте организаций нет</td></tr>'
+        : html;
+      if(db) db.innerHTML = P._orig.d;
+      if(sb) sb.innerHTML = P._orig.s;
+      if(note){
+        note.textContent = (seg === 'all')
+          ? 'показаны все подразделения и сегменты'
+          : 'все подразделения, сегмент ' + seg;
+      }
+      return;
+    }
+
+    var gi = +g, last = cube.i.length - 1;
+    /* --- отрасли --- */
+    var am = {}, tot = 0;
+    cube.r.forEach(function(r){
+      if(r[0] !== gi) return;
+      if(seg !== 'all' && cube.s[r[1]] !== seg) return;
+      add(am, r[2], r, 3);
+      tot += r[4];
+    });
+    var keys = Object.keys(am).map(Number).sort(function(x, y){
+      if((x === last) !== (y === last)) return x === last ? 1 : -1;
+      return am[y][1] - am[x][1];
+    });
+    ib.innerHTML = keys.length ? keys.map(function(k){
+      var a = am[k];
+      return '<tr' + (k === last ? ' class="ind-none"' : '') + '>'
+        + '<td>' + esc(cube.i[k]) + '</td>'
+        + '<td class="num">' + fmt(a[0]) + '</td>'
+        + '<td class="num">' + fmt(a[1]) + '</td>'
+        + '<td class="num">' + bar(tot ? a[1] / tot : 0) + '</td>'
+        + '<td class="num">' + fmt(a[0] ? a[1] / a[0] : 0) + '</td>'
+        + '<td class="num">' + (a[2] ? fmt(a[2]) : '—') + '</td></tr>';
+    }).join('') : '<tr><td colspan="6">организаций нет</td></tr>';
+
+    /* --- глубина проникновения --- */
+    if(db){
+      var dm = {};
+      (cube.d || []).forEach(function(r){
+        if(r[0] !== gi) return;
+        if(seg !== 'all' && cube.s[r[1]] !== seg) return;
+        add(dm, r[2], r, 3);
+      });
+      var dk = Object.keys(dm).map(Number).sort(function(x, y){ return x - y; });
+      db.innerHTML = dk.length ? dk.map(function(k){
+        var a = dm[k];
+        return row([esc(cube.b[k]), fmt(a[0]), fmt(a[1]), fmt(a[2]),
+                    fmt(a[3]) + ' ' + bar(a[2] ? a[3] / a[2] : 0, 'warn')]);
+      }).join('') : '<tr><td colspan="5">организаций нет</td></tr>';
+    }
+
+    /* --- состав по сегментам: фильтр сегмента к нему не применяется, он и есть
+           разрез по сегментам --- */
+    if(sb){
+      var sm = {}, stot = 0;
+      cube.r.forEach(function(r){
+        if(r[0] !== gi) return;
+        add(sm, r[1], r, 3);
+        stot += r[4];
+      });
+      var sk = Object.keys(sm).map(Number).sort(function(x, y){
+        return sm[y][1] - sm[x][1];
+      });
+      sb.innerHTML = sk.length ? sk.map(function(k){
+        var a = sm[k];
+        return row([esc(cube.s[k]), fmt(a[0]), fmt(a[1]),
+                    bar(stot ? a[1] / stot : 0),
+                    fmt(a[0] ? a[1] / a[0] : 0),
+                    bar(a[0] ? a[4] / a[0] : 0, 'dim')]);
+      }).join('') : '<tr><td colspan="6">организаций нет</td></tr>';
+    }
+
+    if(note){
+      note.textContent = cube.g[gi]
+        + (seg === 'all' ? ', все сегменты' : ', сегмент ' + seg);
+    }
+  };
+})();
+</script>
+"""
+
+
+def _people_block(st: dict) -> str:
+    """Портфель со стороны людей: размер зачисления, совместители, виды выплат.
+
+    Остальной раздел описывает портфель со стороны ОРГАНИЗАЦИЙ. Эти три среза
+    описывают его со стороны ЛЮДЕЙ, и вопросы у них свои: отчёт знает ФОТ
+    целиком, но не знает, как он распределён по получателям; знает число
+    получателей, но не знает, сколько за ними людей; знает порог зарплатного
+    зачисления, но нигде не показывает, что остаётся за этим порогом.
+
+    ВСЁ ЗА ОДИН МЕСЯЦ — последний закрытый. Ведомости дают состав потока
+    помесячно, и смешивать месяцы в одно распределение значило бы посчитать
+    одного человека несколько раз.
+    """
+    pe = (st or {}).get("people") or {}
+    if not pe:
+        return ""
+    mon = C.month_ru(pe.get("month", "")) if pe.get("month") else ""
+    when = f' за {C.esc(mon)}' if mon else ""
+    out = [f'<h4>Портфель со стороны людей{when}</h4>']
+
+    size = pe.get("size") or []
+    if size:
+        tot = float(pe.get("size_tot") or 0)
+        rows = [[C.esc(x["name"]), C.fmt_num(x["fl"]), _share_bar(x["share"]),
+                 C.fmt_num(x["amt"] / 1e6, digits=1), C.fmt_num(x["avg"] / 1000, digits=1)]
+                for x in size]
+        out.append(
+            '<h5>Сколько получают</h5>'
+            + C.table(["зачисление за месяц", "получателей, чел", "доля портфеля",
+                       "сумма, млн ₽", "в среднем, тыс ₽"], rows,
+                      num_cols=[1, 2, 3, 4])
+            + f'<div class="gd-note">Считается по зарплатным зачислениям за '
+              f'месяц, порог получателя тот же, что во всём отчёте — '
+              f'{C.fmt_num(queries.SALARY_AMT_MIN)} ₽. Всего в распределении '
+              f'{C.fmt_num(tot)} получателей.</div>')
+
+    mu = pe.get("multi") or {}
+    if mu.get("tot"):
+        # процент форматируется ОТДЕЛЬНО: замена точки на запятую во всей фразе
+        # съедала точку в конце предложения, а не разделитель дроби
+        pc = f'{mu["share"] * 100:.1f}'.replace(".", ",")
+        out.append(
+            f'<h5>Сколько за получателями людей</h5>'
+            f'<div class="pe-line">Зарплату получают <b>{C.fmt_num(mu["tot"])}</b> '
+            f'человек. Из них <b>{C.fmt_num(mu["two"] + mu["many"])}</b> '
+            f'({pc}%) получают её больше чем в одной '
+            f'организации: в двух — {C.fmt_num(mu["two"])}, в трёх и более — '
+            f'{C.fmt_num(mu["many"])}.' 
+            + '<i>Получатель в отчёте — это пара «человек и организация», '
+              'поэтому совместитель считается в портфеле столько раз, в скольких '
+              'организациях он числится. Здесь показано, сколько за этими парами '
+              'стоит людей. В разрезе по банкам совместитель отнесён к одному из '
+              'своих — иначе один человек попал бы в итог дважды.</i></div>')
+
+    ten = pe.get("tenure") or []
+    if ten:
+        tot = float(pe.get("tenure_tot") or 0)
+        unknown = float(pe.get("tenure_unknown") or 0)
+        rows = [[C.esc(x["name"]), C.fmt_num(x["fl"]), _share_bar(x["share"]),
+                 C.fmt_num(x["avg"] / 1000, digits=1)] for x in ten]
+        note = ('<b>Это давность счёта, а не стаж у работодателя.</b> Счёт мог '
+                'быть открыт раньше, чем человек пришёл в эту организацию, '
+                'поэтому строка отвечает на вопрос «как давно человек получает '
+                'зарплату у нас вообще», а не «сколько он работает здесь».')
+        if unknown:
+            note += (f' У {C.fmt_num(unknown)} получателей даты открытия счёта '
+                     f'в витрине нет — они в распределение не входят.')
+        out.append(
+            '<h5>Как долго получают зарплату у нас</h5>'
+            + C.table(["получает зарплату", "получателей, чел", "доля портфеля",
+                       "в среднем, тыс ₽"], rows, num_cols=[1, 2, 3])
+            + f'<div class="gd-note">{note} Всего в распределении '
+              f'{C.fmt_num(tot)} получателей.</div>')
+
+    kinds = pe.get("kinds") or []
+    if kinds:
+        tot = pe.get("kinds_tot") or {}
+        rows = [[C.esc(x["name"]), C.fmt_num(x["n"]), _share_bar(x["share"]),
+                 C.fmt_num(x["amt"] / 1e6, digits=1)] for x in kinds]
+        out.append(
+            '<h5>Из чего состоит поток зачислений</h5>'
+            + C.table(["вид зачисления", "зачислений", "доля суммы",
+                       "сумма, млн ₽"], rows, num_cols=[1, 2, 3])
+            + '<div class="gd-note">Все зачисления на счета клиентов за месяц, '
+              'а не только зарплатные: получателем человек становится по '
+              'закрытому списку видов и сумме выше порога, и здесь видно, что '
+              'остаётся за этой границей — пенсии, пособия, прочие выплаты. '
+              'Считаются зачисления и суммы, а не люди: одно и то же лицо '
+              'встречается в нескольких видах.</div>')
+    return "".join(out)
+
+
+def _structure_section(a: analyze.Analysis, idx: int = 0) -> str:
+    """Раздел «Структура портфеля»: из чего портфель состоит сегодня.
+
+    ЧЕМ ОН ОТЛИЧАЕТСЯ ОТ ОСТАЛЬНЫХ. Матрица отвечает «выполняем ли план», отток
+    и переток — «что потеряли и куда делись», потенциал — «кого брать в работу»,
+    динамика — «как к этому пришли». Ни один из них не отвечает на вопрос «а что
+    у нас вообще есть»: чем клиенты занимаются, насколько глубоко мы в них сидим
+    и как портфель разложен по сегментам. Это и есть структура.
+
+    ИМЁН ЗДЕСЬ НЕТ НИ ОДНОГО — намеренно. Поимённо работают в «Потенциале
+    организаций» и в «Оттоке»; раздел структуры отвечает распределениями, и
+    список организаций в нём был бы повтором соседнего раздела.
+    """
+    st = a.structure or {}
+    if not st.get("segs") and not st.get("inds") and not st.get("people"):
+        return ""
+    unit = "организаций"
+    not_ours = float(st.get("not_ours") or 0)
+    emp = float(st.get("emp") or 0)
+    known = float(st.get("ind_known") or 0)
+    lead = (
+        f'<p class="sub" style="font-size:15px;margin:-4px 0 12px">'
+        f'Портфель собран из <b>{C.fmt_num(st["n_org"])}</b> '
+        f'{_plural(st["n_org"], "организации", "организаций", "организаций")} и '
+        f'<b>{C.fmt_num(st["fl"])}</b> получателей. '
+        + (f'В этих организациях работает <b>{C.fmt_num(emp)}</b> человек — '
+           f'значит <b>{C.fmt_num(not_ours)}</b> из них получают зарплату не у '
+           f'нас. Это не план продаж: сколько из них витрина считает '
+           f'достижимыми, сказано в разделе «Потенциал организаций».'
+           if emp and not_ours else "")
+        + '</p>')
+
+    inds = _ind_block(st, idx)
+
+    depth_rows = [[C.esc(x["name"]), C.fmt_num(x["n"]), C.fmt_num(x["fl"]),
+                   C.fmt_num(x["emp"]),
+                   C.fmt_num(x["rest"]) + " "
+                   + _share_bar((x["rest"] / x["emp"]) if x["emp"] else 0, "warn")]
+                  for x in st.get("depth") or []]
+    depth = (f'<h4>Насколько глубоко мы в клиентах</h4>'
+             + _tbl_id(["обслуживаем штата", unit, "наших получателей, чел",
+                        "всего сотрудников, чел", "из них не наши, чел"],
+                       depth_rows, f"st{idx}-d")
+             + '<div class="gd-note">Доля штата клиента, которую обслуживаем мы. '
+               'Нижние группы — это не слабая работа, а место, где люди у клиента '
+               'ещё есть; верхние — где брать уже почти нечего и речь про '
+               'удержание.</div>'
+             if depth_rows else "")
+
+    seg_rows = [[C.esc(x["seg"]), C.fmt_num(x["n"]), C.fmt_num(x["fl"]),
+                 _share_bar(x["share"]), C.fmt_num(x["avg"]),
+                 (_share_bar(x["ref"], "dim") if x.get("ref") is not None else "—")]
+                for x in st.get("segs") or []]
+    segs = (f'<h4>Состав по сегментам</h4>'
+            + _tbl_id(["сегмент", unit, "получателей, чел", "доля портфеля",
+                       "в среднем на организацию", "закреплено в эталонной базе"],
+                      seg_rows, f"st{idx}-s")
+            if seg_rows else "")
+
+    help_html = _gd_help(
+        '<b>Что это за раздел.</b> Состав портфеля на сегодня: сколько '
+        'организаций, какого они размера, на ком держится основная масса '
+        'получателей и какую часть штата клиентов мы обслуживаем. Про выполнение '
+        'плана — матрица, про потери — «Отток», про то, кого брать в работу, — '
+        '«Потенциал организаций».',
+        '<b>Считается по организациям, а не по строкам витрины.</b> Клиент, '
+        'который обслуживается в нескольких подразделениях, — одна организация, '
+        'а не несколько: иначе он попал бы в состав по разу на каждое '
+        'подразделение и доли по отраслям поехали бы.',
+        '<b>Откуда берётся отрасль.</b> Из витрины атрибутов ЕПК: это '
+        'записанный признак, а не вывод по наименованию. Заполнен он не у всех '
+        'организаций, и те, у кого его нет, не раскидываются по отраслям, а '
+        'остаются отдельной строкой «Отрасль не указана» — её доля подписана над '
+        'таблицей. Приписать их к крупнейшей отрасли значило бы завысить её на '
+        'неизвестную величину.',
+        '<b>Организации без получателей в состав не входят.</b> У них есть штат '
+        'и потенциал, но в портфеле их нет, а раздел — про портфель.',
+        '<b>Доля штата.</b> Наши получатели, делённые на общее число сотрудников '
+        'организации из витрины. Там, где в витрине сотрудников оказалось меньше, '
+        'чем получателей, доля считается как 100%.',
+        title="Как читать раздел")
+
+    return C.section(
+        "Структура портфеля",
+        C.card(f'<div class="no-xls">'
+               f'{lead + inds + depth + segs + _people_block(st) + help_html}'
+               f'</div>'),
+        eyebrow="Из чего состоит портфель",
+        desc="Чем занимаются наши клиенты, насколько глубоко мы в них сидим и "
+             "сколько людей у наших же клиентов ещё не наши.")
+
+
+def _trend_section(a: analyze.Analysis, idx: int = 0) -> str:
     """Раздел «Динамика за 12 месяцев» — по области уровня целиком.
 
     Стоит сразу после управления портфелем: там сказано, что с портфелем сейчас,
@@ -1257,7 +1856,9 @@ def _trend_section(a: analyze.Analysis) -> str:
             "устойчивой тенденции.")
     return C.section(
         "Динамика за 12 месяцев",
-        _trend_verdict(a) + note + C.card(_trend_block(a.trend, "")),
+        _trend_verdict(a) + note
+        + C.card(_trend_compare_line(a.trend) + _trend_block(a.trend, "")
+                 + _seg_month_matrix(a.trend_seg, f"sm{idx}")),
         eyebrow="Ретроспектива портфеля", desc=desc)
 
 
@@ -1746,8 +2347,87 @@ def _gd_verdict(c: dict, det: dict, d: dict, flow: dict | None,
     return C.card('<div class="ai-head">Вывод</div>' + body, cls="ai gd-sum")
 
 
+def _gd_structure(det: dict) -> str:
+    """Структура портфеля подразделения — компактно, в его карточке.
+
+    Тот же расчёт, что у раздела уровня, но показаны только два среза: отрасли
+    (крупнейшие плюс строка «не указана») и глубина проникновения. Состав по
+    сегментам в карточке уже есть отдельным блоком, а разрезы по людям сюда не
+    идут вовсе — ведомости считаются на уровень, и резать их ещё и по
+    подразделениям значило бы гонять 29 млн строк ради одной карточки.
+
+    Отраслей показано пять: карточка — не раздел, и полный перечень из двух
+    десятков строк в ней читать никто не станет. Полный разрез — в «Структуре
+    портфеля» своего уровня.
+    """
+    st = (det or {}).get("structure") or {}
+    inds = st.get("inds") or []
+    depth = st.get("depth") or []
+    if not inds and not depth:
+        return ""
+    out = ['<div class="gd-block"><h4>Структура портфеля</h4>']
+    if inds:
+        named = [x for x in inds if x["name"] != analyze.IND_UNKNOWN][:5]
+        unknown = [x for x in inds if x["name"] == analyze.IND_UNKNOWN]
+        rows = [[C.esc(x["name"]), C.fmt_num(x["n"]), C.fmt_num(x["fl"]),
+                 _share_bar(x["share"])] for x in named + unknown]
+        out.append(C.table(["отрасль", "организаций", "получателей, чел",
+                            "доля портфеля"], rows, num_cols=[1, 2, 3]))
+        if len(inds) > len(named) + len(unknown):
+            out.append(f'<div class="gd-note">Показаны пять крупнейших отраслей '
+                       f'из {C.fmt_num(len(inds))}; полный разрез — в разделе '
+                       f'«Структура портфеля» этого уровня.</div>')
+    if depth:
+        rows = [[C.esc(x["name"]), C.fmt_num(x["n"]), C.fmt_num(x["fl"]),
+                 C.fmt_num(x["rest"])] for x in depth]
+        out.append('<h5>Насколько глубоко мы в клиентах</h5>'
+                   + C.table(["обслуживаем штата", "организаций",
+                              "наших получателей, чел", "из них не наши, чел"],
+                             rows, num_cols=[1, 2, 3]))
+    out.append('</div>')
+    return "".join(out)
+
+
+def _gd_potential(c: dict, idx: int, unit_label: str) -> str:
+    """Потенциал организаций подразделения: числа здесь, список — в разделе.
+
+    ПОЧЕМУ СПИСОК НЕ ДУБЛИРУЕТСЯ В КАРТОЧКУ. Поимённый список организаций живёт
+    в разделе уровня, и у его таблицы уже есть фильтр по подразделению. Копия
+    списка в каждую из восьмидесяти с лишним карточек умножила бы файл на то же
+    число, не добавив ни одной новой строки: это те же организации, только
+    нарезанные иначе. Поэтому в карточке стоят числа отбора, а ссылка открывает
+    раздел уровня с уже выставленным фильтром на это подразделение.
+
+    Ссылка только там, где список есть: на уровне банка в этом разделе свод по
+    территориальным банкам, а поимённый список — уровнем ниже.
+    """
+    if not c.get("n_need"):
+        return ""
+    cover = (c["fl_need"] / c["gap_seg"]) if c.get("gap_seg") else None
+    nw = int(c.get("not_worked") or 0)
+    go = ""
+    if unit_label == "ГОСБ":
+        go = (f'<a class="es-go gd-go" href="#sec-{idx}-orgs" '
+              f'data-sec="sec-{idx}-orgs" data-filter="work{idx}-g" '
+              f'data-value="{C.esc(str(c["gosb_name"])[:28])}">'
+              f'Смотреть организации этого подразделения<i>&nbsp;→</i></a>')
+    return (
+        '<div class="gd-block"><h4>Потенциал организаций</h4>'
+        f'<div class="pe-line">Под план отобрано <b>{C.fmt_num(c["n_need"])}</b> '
+        f'{_plural(c["n_need"], "организация", "организации", "организаций")} '
+        f'на <b>+{C.fmt_num(c["fl_need"])}</b> чел — привлечь '
+        f'{C.fmt_num(c["n_attract"])}, вернуть {C.fmt_num(c["n_return"])}. '
+        f'ФОТ отобранных — около {C.fmt_num(c["fot_need"])} млн ₽.'
+        + (f' Отобранное закрывает {cover * 100:.0f}% отклонения в сегментах с '
+           f'невыполнением плана.' if cover is not None else "")
+        + (f' По <b>{C.fmt_num(nw)}</b> из отобранных организаций активностей за '
+           f'три закрытых месяца не было.' if nw else "")
+        + '</div>' + go + '</div>')
+
+
 def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГОСБ",
-                 wow: str = "", flow: dict | None = None, unit_id: int = 0) -> str:
+                 wow: str = "", flow: dict | None = None, unit_id: int = 0,
+                 idx: int = 0) -> str:
     """Оверлей «почему прогноз такой» по одному ГОСБ.
 
     Порядок блоков: портфель → отток по группам → тренд портфеля →
@@ -1803,6 +2483,12 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
 
         + f'<div class="gd-block"><h4>Портфель, потери и приход</h4>{wf_html}</div>'
 
+        # Матрица выполнения этого подразделения. У уровня она «единица ×
+        # сегмент»; в карточке единица одна, поэтому от матрицы остаются
+        # сегменты — это те же план, прогноз и выполнение в тех же порогах.
+        + f'<div class="gd-block"><h4>Матрица выполнения по сегментам</h4>'
+          f'{_gosb_table(c)}</div>'
+
         f'<div class="gd-block"><h4>Отток по причинам — всего '
         f'{C.fmt_num(det["out_tot"])} чел, {C.fmt_num(n_out)} орг</h4>'
         + _gd_help(
@@ -1844,12 +2530,18 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
             'в строку «хвост».')
         + yoy_html + '</div>'
 
+        + _gd_flow(flow, unit_id, unit_label)
+        + _gd_potential(c, idx, unit_label)
+
         + f'<div class="gd-block">'
         + _trend_block(det.get("trend") or [], "Динамика за 12 месяцев")
+        # та же матрица «сегмент × месяц», что в разделе динамики уровня, только
+        # по одному подразделению; идентификаторы свои, иначе выбор месяца в
+        # карточке управлял бы матрицей уровня
+        + _seg_month_matrix(det.get("seg_matrix"), f"smc-{uid}", full=False)
         + '</div>'
 
-        + f'<div class="gd-block"><h4>Разбор по сегментам</h4>{_gosb_table(c)}</div>'
-        + _gd_flow(flow, unit_id, unit_label)
+        + _gd_structure(det)
         + f'</div></dialog>'
     )
 
@@ -1969,7 +2661,7 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         if det:
             dialogs.append(_gosb_dialog(c, det, d, uid, unit,
                                         _wow_unit(a, gid, "gd-wow"),
-                                        a.flow, gid))
+                                        a.flow, gid, idx))
     # По умолчанию — ХУДШИЕ СВЕРХУ. Алфавит ставил подразделение с наибольшим
     # отклонением в конец списка (ЮЗБ — последний в сети), и управляющий видел
     # его, только долистав до низа. Алфавитный порядок остался переключателем:
@@ -2484,6 +3176,34 @@ _HUB_JS = """
      прокруткой к разделу. В режиме плашек прокручивать не к чему: раздел скрыт,
      поэтому сначала открываем его, а прокрутка чужого обработчика уже попадает
      в видимый блок. Слушаем на перехвате — до обработчика самой кнопки. */
+  /* Ссылка из карточки подразделения в раздел уровня с уже выставленным
+     фильтром. Слушаем на документе, а не на уровне: скрипт дизайна переносит
+     оверлеи карточек в body, и внутри уровня их уже нет.
+
+     Зачем так, а не копией списка в карточку: поимённый список живёт в разделе,
+     и у его таблицы фильтр по подразделению уже есть. Копия в каждую из
+     восьмидесяти карточек умножила бы файл, не добавив ни одной новой строки. */
+  document.addEventListener('click', function(e){
+    var go = e.target.closest ? e.target.closest('.gd-go') : null;
+    if(!go) return;
+    e.preventDefault();
+    var sec = document.getElementById(go.getAttribute('data-sec') || '');
+    var lvl = sec && sec.closest ? sec.closest('[id^="lvl-"]') : null;
+    if(!sec || !lvl) return;
+    var dlg = go.closest ? go.closest('dialog') : null;
+    if(dlg && dlg.close) dlg.close();
+    hubOpen(lvl, sec);
+    var fid = go.getAttribute('data-filter');
+    if(fid){
+      var f = document.getElementById(fid);
+      if(f){
+        f.value = go.getAttribute('data-value') || '';
+        /* таблица слушает 'input' у всех своих фильтров — см. orgs_explorer */
+        f.dispatchEvent(new Event('input', {bubbles: true}));
+      }
+    }
+  });
+
   document.addEventListener('click', function(e){
     var pill = e.target.closest ? e.target.closest('.qn-pill') : null;
     if(!pill) return;
@@ -3528,6 +4248,9 @@ _XLS_JS = """
   function addButtons(){
     Array.prototype.forEach.call(document.querySelectorAll('table'), function(t){
       if(t.dataset.xlsReady === '1') return;
+      /* раздел, помеченный .no-xls, кнопок не получает: там распределения, а
+         не списки — выгружать из них в Excel нечего */
+      if(t.closest && t.closest('.no-xls')){ t.dataset.xlsReady = '1'; return; }
       t.dataset.xlsReady = '1';
       /* кнопку ставим вплотную к таблице: если таблица завёрнута в контейнер
          прокрутки (и он больше ничего не держит) — перед контейнером, иначе
@@ -3647,6 +4370,34 @@ def _goals_line(a: analyze.Analysis) -> str:
             'шапке таблицы: ' + " · ".join(parts) + '.</p>')
 
 
+def _no_orgs_note(a: analyze.Analysis) -> str:
+    """Почему в разделе нет организаций — вместо пустого места.
+
+    Пустой раздел читается как поломка отчёта, а причин у него три, и две из них
+    — нормальная работа. Отличить их по готовому файлу нельзя, поэтому раздел не
+    исчезает, а называет причину.
+
+    Первая причина — данных нет: витрина организаций заполняется не каждый
+    месяц, и за отсутствующий месяц она отдаёт ноль строк молча (см.
+    `bank._check_orgs_month`). Вторая — отбирать нечего: ни один сегмент не
+    отстаёт от плана. Третья — кандидаты есть, но эффект каждого меньше
+    человека.
+    """
+    if bank.ORGS_EMPTY:
+        # строчная первая буква: сообщение встаёт в середину фразы «Причина: …»
+        msg = bank.ORGS_EMPTY[0]
+        why = C.esc(msg[:1].lower() + msg[1:])
+    elif not getattr(a, "seg_gaps", None):
+        why = ("ни один сегмент подразделений не отстаёт от плана — закрывать "
+               "нечего, и отбор пуст по существу, а не из-за данных")
+    else:
+        why = ("среди организаций витрины не нашлось ни одной с эффектом от "
+               "одного человека: потенциал привлечения пуст, а фактический "
+               "отток за три закрытых месяца либо вернулся, либо уже отработан")
+    return (f'<div class="gd-note" style="margin:8px 0">'
+            f'Организаций в разделе нет. Причина: {why}.</div>')
+
+
 def _potential_sb(a: analyze.Analysis, ai: str | None = None) -> str:
     """Потенциал по всей сети — сводом по ТБ, без имён организаций.
 
@@ -3661,7 +4412,12 @@ def _potential_sb(a: analyze.Analysis, ai: str | None = None) -> str:
     """
     cards = [c for c in (a.gosb_cards or []) if c.get("n_need")]
     if not cards:
-        return ""
+        # раздел остаётся на месте и называет причину — см. _no_orgs_note
+        return C.section("Потенциал организаций", _no_orgs_note(a),
+                         eyebrow="Чем закрывать отклонение",
+                         desc="Сколько организаций отобрано под план в каждом "
+                              "банке, что они дают и какую часть отклонения "
+                              "закрывают.")
     # тот же порядок, что у карточек: худшее выполнение плана сверху
     cards = sorted(cards, key=lambda c: (float(c["exec"] or 0),
                                          -(c["plan"] - c["forecast"])))
@@ -3828,7 +4584,11 @@ def _orgs(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
             f'<p class="sub" style="font-size:14px;margin:-4px 0 10px">'
             f'Организации, за счёт которых закрывается отклонение от плана. '
             f'{cand}.</p>' + _goals_line(a) + help_html)
-    return C.section("Потенциал организаций", _ai(ai) + C.card(head + explorer),
+    # Пустая таблица без объяснения читается как поломка — причину называем
+    # той же строкой, что и на уровне банка (см. _no_orgs_note)
+    note = _no_orgs_note(a) if not rows else ""
+    return C.section("Потенциал организаций",
+                     _ai(ai) + C.card(head + note + explorer),
                      eyebrow="Потенциал организаций")
 
 
@@ -4673,6 +5433,49 @@ def _outflow_funnel(o: dict) -> str:
     return f'<div class="of-kpis">{cells}</div>'
 
 
+def _outflow_moves(a: analyze.Analysis) -> str:
+    """Сколько из потерь — переток внутри банка, а не уход клиента.
+
+    Блок «Отток» говорит, сколько людей потеряли. Но «перестал получать зарплату
+    здесь» и «перестал получать зарплату у нас» — разные события, и разговор с
+    клиентом по ним разный: в первом случае человек остался клиентом банка,
+    просто платит ему другая организация. До сих пор это было видно только в
+    отдельном разделе «Переток ФЛ» и редкой меткой в строке; здесь — числом,
+    рядом с самими потерями.
+
+    ОКНА РАЗНЫЕ, И ЭТО НАЗВАНО ВСЛУХ. Отток считается за три закрытых месяца, а
+    переток — за последнюю пару: ведомости дают пару «откуда → куда» только для
+    соседних месяцев. Поэтому число перетока меньше оттока по построению, и
+    вычитать одно из другого нельзя. Без этой оговорки строка читалась бы как
+    «остальное — безвозвратные потери», что неправда.
+    """
+    f = a.flow or {}
+    left = float(f.get("left") or 0)
+    if not left:
+        return ""
+    moved = float(f.get("moved") or 0)
+    gone = float(f.get("gone") or 0)
+    if not moved and not gone:
+        return ""
+    n_org = len(a.moves or {})
+    share = (moved / left * 100) if left else 0.0
+    org_txt = (f' Организаций, от которых люди ушли в другие организации, — '
+               f'{C.fmt_num(n_org)}; полный список с номерами организаций и '
+               f'направлением ухода — в выгрузке.' if n_org else "")
+    return (
+        f'<div class="of-mv">'
+        f'<b>Переток внутри банка.</b> За {C.esc(C.month_ru(f.get("m_cur", "")))} '
+        f'зарплату здесь перестали получать {C.fmt_num(left)} человек. Из них '
+        f'<b style="color:var(--accent)">{C.fmt_num(moved)}</b> '
+        f'({share:.0f}%) стали получать её в другой организации — клиентами '
+        f'банка они остались, и это не потеря портфеля банка, хотя для '
+        f'подразделения и сегмента это настоящий минус. Не получают зарплату '
+        f'нигде — <b style="color:var(--bad)">{C.fmt_num(gone)}</b>.{org_txt}'
+        f'<i>Переток считается за последнюю пару закрытых месяцев, а отток выше — '
+        f'за три: числа из разных окон, и вычитать одно из другого нельзя.</i>'
+        f'</div>')
+
+
 def _outflow_section(a: analyze.Analysis, ai: str | None = None,
                      idx: int = 0) -> str:
     """Раздел «Отток»: два списка по результату отработки.
@@ -4702,6 +5505,7 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None,
         f'{C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%). Безвозвратные потери: '
         f'<b>{C.fmt_num(o["tot_kept"])}</b> чел.</p>'
         + _outflow_funnel(o)
+        + _outflow_moves(a)
         + _gd_help(
             '<b>Что за списки.</b> Все — про один и тот же отток за три закрытых '
             'месяца, но отвечают на разные вопросы. «Вернулись» — кого вернули: '
@@ -5147,7 +5951,28 @@ def _ai(text: str | None) -> str:
     if not text or not str(text).strip():
         return ""
     return C.card('<div class="ai-head">Вывод</div>'
-                  + C.narrative_html(str(text)), cls="ai")
+                  + _hide_org_nums(C.narrative_html(str(text))), cls="ai")
+
+
+# «Орг. 1001471770» в готовой разметке вывода. Шесть знаков и больше, чтобы под
+# правило не попали «Орг. 1» из служебных формулировок и годы.
+_ORG_NUM = re.compile(r"Орг\.\s?(\d{6,})")
+
+
+def _hide_org_nums(html: str) -> str:
+    """Убрать номера организаций из текста вывода в закодированный массив.
+
+    Вывод пишет модель, и организации она называет так, как они названы в
+    отчёте. Там, где имя человека заменено номером (ИП, КФХ — см.
+    `anonymize.org_label`), в прозу попадает номер клиента, и он оказывается в
+    разметке открытым текстом — мимо `veil.Hidden`, которым закрыты списки и
+    таблицы.
+
+    Подменяется ТОЛЬКО сам номер, остальной текст вывода остаётся в разметке:
+    прятать абзац целиком незачем, а без скрипта из фразы пропадёт одно число,
+    а не весь вывод.
+    """
+    return _ORG_NUM.sub(lambda m: _HID.text(f"Орг. {m.group(1)}"), html)
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
