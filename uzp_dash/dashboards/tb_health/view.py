@@ -350,14 +350,20 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
         ("trend", _trend_section(a, idx)),
     ]
     secs = [(key, html) for key, html in secs if html]
+    titles = {k: _sec_title(h) for k, h in secs}
     return (
         _lvl_head(a, idx)
-        + _hero(a, idx, {k: _sec_title(h) for k, h in secs})
-        + _kpis(a)
+        + _hero(a, idx, titles)
         # Легенда цвета стоит там, где цвет впервые работает, — сразу под
         # плашкой прогноза и сводкой. Внизу страницы её читали уже после того,
         # как красное и зелёное пришлось расшифровывать самому.
         + _LEGEND
+        # Управленческий слой: чем обеспечено выполнение плана и куда ведёт
+        # отклонение. Стоит сразу за плашкой прогноза — это и есть первый
+        # экран, ради которого отчёт открывают.
+        + _health_block(a, idx, titles)
+        + _chain_block(a, idx, titles)
+        + _kpis(a)
         + _portfolio_block(a, story.get("forecast"))
         + _hub(a, idx, secs)
         + "".join(_with_id(html, f"sec-{idx}-{key}") for key, html in secs)
@@ -740,6 +746,353 @@ def _asks(a: analyze.Analysis, conc: dict | None, idx: int,
                      f'отклонение от плана не закрывается.'
                    + _go(idx, "orgs", titles))
     return out[:3]
+
+
+# ── УПРАВЛЕНЧЕСКИЙ СЛОЙ: ЗДОРОВЬЕ ПОРТФЕЛЯ И ЦЕПОЧКА РЕШЕНИЯ ──────────────────
+#
+# Отчёт отвечал на вопрос «выполняем ли план». Руководителю этого мало: план
+# можно выполнять, теряя портфель, и не выполнять, уверенно его наращивая.
+# Поэтому на первом экране стоит ещё один слой — пять сторон состояния портфеля
+# и цепочка «разрыв → где → чем закрывать → что остаётся».
+#
+# НОВЫХ ДАННЫХ ЗДЕСЬ НЕТ. Каждое число уже посчитано для своего раздела: план —
+# из вердикта, динамика — из год к году и помесячного ряда, удержание — из
+# «Оттока», риски — из матрицы, резерв — из отбора организаций. Слой только
+# сводит их вместе и называет порогами, одинаковыми на всех уровнях. Считать то
+# же самое вторым способом нельзя: расхождение первого экрана с разделом хуже,
+# чем его отсутствие.
+#
+# ПОРОГИ — УПРАВЛЕНЧЕСКОЕ СОГЛАШЕНИЕ, А НЕ МОДЕЛЬ. Они названы прямо в блоке
+# («как читаем») и повторены в памятке: читатель должен видеть правило, по
+# которому показателю присвоен цвет, иначе цвет превращается в оценку без
+# основания.
+
+# Пороги каждой стороны: (хорошо, внимание). Ниже второго — риск.
+HEALTH_LIMITS = {
+    # выполнение прогноза к плану — та же легенда, что у всего отчёта
+    "plan": (1.0, 0.95),
+    # год к году: рост — хорошо, снижение до 1% — внимание, глубже — риск
+    "dyn": (0.0, -0.01),
+    # безвозвратные потери за три закрытых месяца к портфелю закрытого месяца
+    "keep": (0.01, 0.03),
+    # доля подразделений уровня, где прогноз ниже 95% плана
+    "risk": (0.0, 0.25),
+    # отобранный потенциал к отклонению в сегментах с невыполнением плана
+    "res": (1.0, 0.6),
+}
+
+
+def _hstat(val: float | None, key: str, higher_better: bool = True) -> str:
+    """Цвет стороны по её порогам. Нет числа — нет и оценки."""
+    if val is None:
+        return ""
+    good, warn = HEALTH_LIMITS[key]
+    if higher_better:
+        return "good" if val >= good else ("warn" if val >= warn else "bad")
+    return "good" if val <= good else ("warn" if val <= warn else "bad")
+
+
+def _health(a: analyze.Analysis) -> dict:
+    """Пять сторон состояния портфеля уровня — из чисел, уже посчитанных разделами."""
+    items = []
+    r = a.verdict["rcp"]
+
+    # 1. ПЛАН. Главное число отчёта стоит в этом слое первым: здоровье портфеля
+    #    не отменяет плана, а показывает, чем выполнение обеспечено.
+    ex = r.get("exec")
+    gap = max(0.0, float(r["plan"]) - float(r["fact"]))
+    items.append({
+        "key": "plan", "sec": "matrix", "label": "Выполнение плана",
+        "val": _pct(ex), "st": _hstat(ex, "plan"),
+        "sub": (f'не хватает {C.fmt_num(gap)} чел до плана' if gap >= 1
+                else f'прогноз выше плана на {C.fmt_num(abs(float(r["fact"]) - float(r["plan"])))} чел'),
+    })
+
+    # 2. ДИНАМИКА. Год к году, а не к прошлому месяцу: сезонность зарплатных
+    #    портфелей сильнее месячных колебаний работы.
+    y = (a.yoy or {}).get("rcp") or {}
+    pct = y.get("pct")
+    rows = a.trend or []
+    grew = sum(1 for i, x in enumerate(rows[1:], 1) if x["fact"] >= rows[i - 1]["fact"])
+    sub = (f'{grew} из {len(rows) - 1} месяцев портфель рос' if len(rows) > 1 else "")
+    items.append({
+        "key": "dyn", "sec": "trend", "label": "Динамика год к году",
+        "val": (f'{"+" if (pct or 0) >= 0 else "−"}{abs(pct) * 100:.1f}%'
+                if pct is not None else "—"),
+        "st": _hstat(pct, "dyn"), "sub": sub,
+    })
+
+    # 3. УДЕРЖАНИЕ. Безвозвратные потери за три закрытых месяца к портфелю:
+    #    абсолютное число потерь несравнимо между сетью и небольшим банком.
+    o = a.outflow or {}
+    base = float(((a.closed or {}).get("rcp") or {}).get("fact") or 0) or float(r["fact"] or 0)
+    kept = float(o.get("tot_kept") or 0)
+    share = (kept / base) if base else None
+    ret = float(o.get("ret_returned") or 0)
+    items.append({
+        "key": "keep", "sec": "outflow", "label": "Удержание портфеля",
+        "val": (f'{share * 100:.1f}%' if share is not None else "—"),
+        "st": _hstat(share, "keep", higher_better=False),
+        "sub": (f'{C.fmt_num(kept)} чел потеряли за 3 месяца, вернули '
+                f'{C.fmt_num(ret)}' if kept else "безвозвратных потерь нет"),
+    })
+
+    # 4. РИСКИ. Доля подразделений ниже 95% плана — та же легенда, что в матрице
+    #    и на плашках разделов. Концентрация называется подписью: она меняет не
+    #    масштаб проблемы, а адрес работы.
+    n_red, n_warn = _fail_split(a.matrix)
+    n_units = int(a.matrix["unit_id"].nunique()) if not a.matrix.empty else 0
+    rshare = (n_red / n_units) if n_units else None
+    conc = _concentration(a)
+    unit = a.unit_label
+    items.append({
+        "key": "risk", "sec": "gosb", "label": f'{unit} ниже 95% плана',
+        "val": (f'{n_red} из {n_units}' if n_units else "—"),
+        "st": _hstat(rshare, "risk", higher_better=False),
+        # Подпись обязана соглашаться со своим числом: при тринадцати из
+        # тринадцати «подразделений с невыполнением плана нет» читалось как
+        # ошибка расчёта, а не как подпись к другому вопросу.
+        "sub": (f'отклонение сосредоточено в {conc["name"]}' if conc
+                else (f'отклонение распределено по подразделениям' if n_red
+                      else (f'ещё {n_warn} в зоне 95–100%' if n_warn
+                            else "подразделений ниже 95% плана нет"))),
+    })
+
+    # 5. РЕЗЕРВ. Хватает ли отобранного под план потенциала на отклонение тех
+    #    сегментов, где план не выполняется (знаменатель тот же, что в разделе).
+    #    Покрытие считается ПО КАРТОЧКАМ подразделений — тем же отношением,
+    #    что стоит в сценарии каждого из них: отобранный потенциал к недобору
+    #    сегментов с невыполнением плана. Тогда плитка, цепочка и сводная
+    #    таблица сценариев складываются друг в друга, и читатель может их
+    #    сверить. Итог отбора в `sim` считается на уровне СБ по другому
+    #    основанию, и два разных процента на одном экране были бы хуже любого
+    #    из них.
+    u = _units_roll(a)
+    cov = u["cover"]
+    items.append({
+        "key": "res", "sec": "orgs", "label": "Резерв под план",
+        "val": (f'{cov * 100:.0f}%' if cov is not None else "разрыва нет"),
+        "st": ("good" if cov is None else _hstat(cov, "res")),
+        "sub": (f'{C.fmt_num(u["nw"])} '
+                + _plural(u["nw"], "отобранная организация",
+                          "отобранные организации", "отобранных организаций")
+                + f' без активностей — +{C.fmt_num(u["fl_nw"])} чел' if u["nw"] else
+                (f'отобрано {C.fmt_num(u["k"])} организаций на '
+                 f'+{C.fmt_num(u["fl_need"])} чел' if u["k"]
+                 else "отбор под план не требуется")),
+    })
+
+    bad = [x for x in items if x["st"] == "bad"]
+    warn = [x for x in items if x["st"] == "warn"]
+    if bad:
+        verdict, vst = "Портфель под риском", "bad"
+    elif warn:
+        verdict, vst = "Портфель требует внимания", "warn"
+    else:
+        verdict, vst = "Портфель устойчив", "good"
+    return {"items": items, "verdict": verdict, "vst": vst,
+            "bad": [x["label"] for x in bad], "warn": [x["label"] for x in warn]}
+
+
+def _hgo(idx: int, key: str, titles: dict, text: str, cls: str = "hx-go") -> str:
+    """Короткая ссылка в раздел — тем же способом, что «Необходимые действия»."""
+    if not (titles.get(key) or "").strip():
+        return ""
+    return (f'<a class="es-go {cls}" href="#sec-{idx}-{key}">'
+            f'{C.esc(text)}<i>&nbsp;→</i></a>')
+
+
+def _health_block(a: analyze.Analysis, idx: int, titles: dict) -> str:
+    """Здоровье портфеля: пять сторон состояния на первом экране."""
+    h = _health(a)
+    tiles = []
+    for x in h["items"]:
+        tiles.append(
+            f'<div class="hx-i {x["st"]}">'
+            f'<span class="hx-l">{C.esc(x["label"])}</span>'
+            f'<span class="hx-v">{x["val"]}</span>'
+            f'<span class="hx-s">{C.esc(x["sub"])}</span>'
+            + _hgo(idx, x["sec"], titles, "смотреть раздел")
+            + '</div>')
+    names = ""
+    if h["bad"]:
+        names = "Под риском: " + ", ".join(x.lower() for x in h["bad"]) + "."
+    elif h["warn"]:
+        names = "Требуют внимания: " + ", ".join(x.lower() for x in h["warn"]) + "."
+    note = (
+        '<details class="hx-how"><summary>Как читаем эти пять сторон</summary>'
+        '<p>Это не новый расчёт: каждое число уже стоит в своём разделе, слой '
+        'только сводит их вместе. Пороги — управленческое соглашение, одно на '
+        'все уровни отчёта.</p>'
+        '<p><b>Выполнение плана</b> — прогноз к плану текущего месяца: от 100% '
+        'зелёный, 95–100% жёлтый, ниже красный. Та же легенда, что у матрицы и '
+        'карточек.<br>'
+        '<b>Динамика год к году</b> — портфель закрытого месяца против того же '
+        'месяца прошлого года: рост зелёный, снижение до 1% жёлтый, глубже '
+        'красный. Год к году, а не к прошлому месяцу: сезонность сильнее '
+        'месячных колебаний работы.<br>'
+        '<b>Удержание портфеля</b> — безвозвратные потери за три закрытых '
+        'месяца к портфелю закрытого месяца: до 1% зелёный, 1–3% жёлтый, выше '
+        'красный. В людях потери сети и небольшого банка несравнимы, в доле — '
+        'сравнимы.<br>'
+        f'<b>{C.esc(a.unit_label)} ниже 95% плана</b> — доля подразделений '
+        'уровня с прогнозом ниже 95%: ни одного зелёный, до четверти жёлтый, '
+        'больше четверти красный.<br>'
+        '<b>Резерв под план</b> — отобранный потенциал к отклонению в тех '
+        'сегментах, где план не выполняется: от 100% зелёный, 60–100% жёлтый, '
+        'ниже красный.</p>'
+        '<p>Общий вердикт собирается по худшей стороне: хотя бы одна красная — '
+        '«под риском», хотя бы одна жёлтая — «требует внимания», все зелёные — '
+        '«устойчив». Среднего балла у портфеля нет намеренно: усреднение '
+        'спрятало бы ровно ту сторону, ради которой слой и нужен.</p>'
+        '</details>')
+    return (
+        f'<div class="hx-wrap">'
+        f'<div class="hx-top"><span class="hx-eyebrow">Здоровье портфеля</span>'
+        f'<span class="hx-verdict {h["vst"]}">{C.esc(h["verdict"])}</span>'
+        + (f'<span class="hx-names">{C.esc(names)}</span>' if names else "")
+        + f'</div><div class="hx">{"".join(tiles)}</div>{note}</div>')
+
+
+def _units_roll(a: analyze.Analysis) -> dict:
+    """Свод по карточкам подразделений — основа и плитки резерва, и цепочки.
+
+    Складываются ровно те числа, что стоят в сценарии каждого подразделения и в
+    сводной таблице сценариев. Это и есть гарантия, что первый экран и разделы
+    не разойдутся: они не считают одно и то же разными способами, а показывают
+    одно и то же на разном уровне свёртки.
+    """
+    cards = a.gosb_cards or []
+    gap_seg = sum(float(c.get("gap_seg") or 0) for c in cards)
+    fl_need = sum(float(c.get("fl_need") or 0) for c in cards)
+    # ОСТАТОК СУММИРУЕТСЯ ПО ПОДРАЗДЕЛЕНИЯМ, А НЕ ВЫЧИТАЕТСЯ НА УРОВНЕ.
+    # Избыток отобранного в одном подразделении не закрывает недобор в другом:
+    # это разные ГОСБ, разные сегменты и разные организации. Разность на уровне
+    # давала по сети 5 570 чел там, где по подразделениям не закрывается 9 352,
+    # и расходилась со сводной таблицей сценариев — то есть обещала больше, чем
+    # отбор может дать. Поэтому и покрытие считается от закрытой части, а не от
+    # суммы эффекта: закрыть больше собственного недобора подразделение не может.
+    rest = sum(max(0.0, float(c.get("gap_seg") or 0) - float(c.get("fl_need") or 0))
+               for c in cards)
+    covered = gap_seg - rest
+    return {
+        "gap_seg": gap_seg, "fl_need": fl_need, "covered": covered,
+        "cover": (covered / gap_seg) if gap_seg > 0 else None,
+        "rest": rest,
+        "k": sum(int(c.get("n_need") or 0) for c in cards),
+        "attract": sum(float(c.get("fl_attract") or 0) for c in cards),
+        "retention": sum(float(c.get("fl_return") or 0) for c in cards),
+        "nw": sum(int(c.get("not_worked") or 0) for c in cards),
+        "fl_nw": sum(float(c.get("fl_not_worked") or 0) for c in cards),
+        "n_short": sum(1 for c in cards
+                       if float(c.get("gap_seg") or 0) - float(c.get("fl_need") or 0) >= 1),
+    }
+
+
+def _chain(a: analyze.Analysis) -> dict:
+    """Числа цепочки «разрыв → где → чем закрывать → что остаётся»."""
+    r = a.verdict["rcp"]
+    u = _units_roll(a)
+    segs_bad = {s["seg"] for c in (a.gosb_cards or []) for s in (c.get("segs_bad") or [])}
+    n_red, _n_warn = _fail_split(a.matrix)
+    out = dict(u)
+    out.update({"gap": max(0.0, float(r["plan"]) - float(r["fact"])),
+                "n_red": n_red, "n_segs": len(segs_bad), "conc": _concentration(a)})
+    return out
+
+
+def _chain_block(a: analyze.Analysis, idx: int, titles: dict) -> str:
+    """Цепочка принятия решения: от отклонения до остатка, который им не закрывается.
+
+    Все три числа и раньше были в отчёте, но в разных разделах и с разными
+    знаменателями, и связать их читатель должен был сам. Цепочка ставит их в
+    один ряд и честно показывает последнее звено — сколько разрыва отобранными
+    организациями НЕ закрывается.
+    """
+    ch = _chain(a)
+    if not ch["gap_seg"] and not ch["gap"]:
+        return ""
+    unit = a.unit_label
+    steps = []
+
+    # 1. Разрыв. Общий разрыв уровня и сегментный — разные числа: план области
+    #    может выполняться, пока отдельные сегменты недобирают.
+    if ch["gap"] >= 1:
+        v, sub = f'−{C.fmt_num(ch["gap"])} чел', "столько не хватает до плана уровня"
+        st = "bad"
+    else:
+        v, sub, st = "план выполняется", "по уровню в целом", "good"
+    if ch["gap_seg"] > 0:
+        sub += (f'; в сегментах с невыполнением плана недобор '
+                f'{C.fmt_num(ch["gap_seg"])} чел')
+    steps.append(("Отклонение", v, sub, st, "matrix", "матрица выполнения"))
+
+    # 2. Где именно.
+    if ch["conc"]:
+        v = ch["conc"]["name"]
+        # та же формулировка, что в сводке: «100% отклонения» читается как
+        # случайно совпавший процент, «всё отклонение» — как факт
+        part = ('всё отклонение уровня' if ch["conc"]["share"] >= 0.995
+                else f'{ch["conc"]["share"] * 100:.0f}% всего отклонения уровня')
+        sub = f'{part}, {_pct(ch["conc"]["exec"])} плана'
+    else:
+        v = f'{ch["n_red"]} {unit}'
+        sub = (f'ниже 95% плана; сегментов с невыполнением — {ch["n_segs"]}'
+               if ch["n_segs"] else "ниже 95% плана")
+    steps.append(("Где", v, sub, "bad" if (ch["n_red"] or ch["conc"]) else "good",
+                  "gosb", f'детализация по {unit}'))
+
+    # 3. Чем закрывать.
+    if ch["k"]:
+        v = f'+{C.fmt_num(ch["fl_need"])} чел'
+        sub = (f'{C.fmt_num(ch["k"])} '
+               + _plural(ch["k"], "отобранная организация", "отобранные организации",
+                         "отобранных организаций")
+               + f': привлечь {C.fmt_num(ch["attract"])} чел, '
+                 f'вернуть {C.fmt_num(ch["retention"])}')
+        st = "good"
+    else:
+        v, sub, st = "отбора нет", "под план организации не отбирались", ""
+    steps.append(("Чем закрывать", v, sub, st, "orgs", "потенциал организаций"))
+
+    # 4. Что остаётся. Самое важное звено: без него цепочка обещает, что план
+    #    закрывается отобранными, даже когда их заведомо не хватает.
+    if ch["cover"] is None:
+        v, sub, st = "—", "отклонения в сегментах нет", "good"
+    elif ch["rest"] >= 1:
+        v = f'{C.fmt_num(ch["rest"])} чел'
+        sub = (f'не закрывается отобранными — покрытие '
+               f'{ch["cover"] * 100:.0f}%, нужны новые кандидаты'
+               + (f'. Остаток сложен по {C.fmt_num(ch["n_short"])} '
+                  + _plural(ch["n_short"], "подразделению", "подразделениям",
+                            "подразделениям")
+                  + ': избыток отобранного в одном не закрывает недобор в другом'
+                  if ch["n_short"] else ""))
+        st = "bad"
+    else:
+        v = "закрывается полностью"
+        sub = f'покрытие {ch["cover"] * 100:.0f}% отклонения в сегментах'
+        st = "good"
+    if ch["nw"]:
+        sub += ('. Первым эффект дают ' + C.fmt_num(ch["nw"]) + ' '
+                + _plural(ch["nw"], "отобранная организация",
+                          "отобранные организации", "отобранных организаций")
+                + f' без активностей: +{C.fmt_num(ch["fl_nw"])} чел')
+    steps.append(("Что остаётся", v, sub, st, "orgs", "потенциал организаций"))
+
+    html = []
+    for n, (t, v, sub, st, sec, link) in enumerate(steps, start=1):
+        html.append(
+            f'<div class="chn-i">'
+            f'<span class="chn-t"><b>{n}</b>{C.esc(t)}</span>'
+            f'<span class="chn-v {st}">{v}</span>'
+            f'<span class="chn-s">{sub}</span>'
+            + _hgo(idx, sec, titles, link, "chn-go") + '</div>')
+    return (f'<div class="chn-wrap">'
+            f'<div class="hx-top"><span class="hx-eyebrow">Цепочка решения</span>'
+            f'<span class="chn-lead">От отклонения — к организациям, которыми оно '
+            f'закрывается, и к остатку, который ими не закрывается</span></div>'
+            f'<div class="chn">{"".join(html)}</div></div>')
 
 
 def _exec_summary(a: analyze.Analysis, idx: int, titles: dict) -> str:
@@ -2398,41 +2751,166 @@ def _gd_structure(det: dict) -> str:
     return "".join(out)
 
 
-def _gd_potential(c: dict, idx: int, unit_label: str) -> str:
-    """Потенциал организаций подразделения: числа здесь, список — в разделе.
+def _pace(det: dict | None) -> tuple[float | None, int]:
+    """Темп подразделения: средний прирост портфеля за последние месяцы ряда.
 
-    ПОЧЕМУ СПИСОК НЕ ДУБЛИРУЕТСЯ В КАРТОЧКУ. Поимённый список организаций живёт
-    в разделе уровня, и у его таблицы уже есть фильтр по подразделению. Копия
-    списка в каждую из восьмидесяти с лишним карточек умножила бы файл на то же
-    число, не добавив ни одной новой строки: это те же организации, только
-    нарезанные иначе. Поэтому в карточке стоят числа отбора, а ссылка открывает
-    раздел уровня с уже выставленным фильтром на это подразделение.
-
-    Ссылка только там, где список есть: на уровне банка в этом разделе свод по
-    территориальным банкам, а поимённый список — уровнем ниже.
+    Берём три последних месяца, а не весь год: сценарий отвечает на вопрос «при
+    том, как идут дела СЕЙЧАС», и темп двенадцатимесячной давности на него не
+    влияет. Если истории меньше четырёх точек, темпа нет — и строки о нём тоже.
     """
-    if not c.get("n_need"):
-        return ""
-    cover = (c["fl_need"] / c["gap_seg"]) if c.get("gap_seg") else None
+    rows = (det or {}).get("trend") or []
+    if len(rows) < 4:
+        return None, 0
+    n = 3
+    return (float(rows[-1]["fact"]) - float(rows[-1 - n]["fact"])) / n, n
+
+
+def _scenario(c: dict, det: dict | None) -> dict:
+    """Сценарий достижения плана по одной единице — из чисел её же карточки.
+
+    Это не прогноз и не модель: отчёт складывает то, что уже отобрано, с тем,
+    что уже потеряно, и честно называет остаток, который ничем из отобранного
+    не закрывается. Сценарий для подразделения, выполняющего план, — не пустой:
+    там вопрос не «чем закрыть», а «хватит ли запаса, если потери повторятся».
+    """
+    gap = max(0.0, float(c.get("plan") or 0) - float(c.get("forecast") or 0))
+    gap_seg = float(c.get("gap_seg") or 0)
+    fl_need = float(c.get("fl_need") or 0)
+    cover = (fl_need / gap_seg) if gap_seg > 0 else None
+    pace, pace_n = _pace(det)
+    out_tot = float((det or {}).get("out_tot") or 0)
+    buf = float(c.get("forecast") or 0) - float(c.get("plan") or 0)
+    # сегменты, где отобранных кандидатов не хватает на их же отклонение
+    lack = []
+    for sg in (c.get("segs_bad") or []):
+        if not sg.get("n_avail"):
+            lack.append((sg["seg"], None))
+        elif sg.get("coverage") is not None and sg["coverage"] < 0.999:
+            lack.append((sg["seg"], sg["coverage"]))
+    return {
+        "gap": gap, "gap_seg": gap_seg, "fl_need": fl_need, "cover": cover,
+        "rest": max(0.0, gap_seg - fl_need), "lack": lack,
+        "pace": pace, "pace_n": pace_n, "out_tot": out_tot, "buf": buf,
+        "months": (gap / pace) if (pace and pace > 0 and gap > 0) else None,
+    }
+
+
+def _gd_scenario(c: dict, det: dict | None, idx: int, unit_label: str) -> str:
+    """Блок «Сценарий достижения плана» в карточке подразделения.
+
+    Карточка показывала отдельно отклонение, отдельно отобранные организации и
+    отдельно потери — связать их в один ответ «что сделать, чтобы выйти на
+    план» читатель должен был сам. Сценарий ставит те же числа шагами: разрыв →
+    чем закрываем → с чего начать → что не закрывается → успеваем ли по темпу.
+
+    ПОИМЁННЫЙ СПИСОК НЕ ДУБЛИРУЕТСЯ. Организации живут в разделе уровня, и у его
+    таблицы есть фильтр по подразделению: ссылка открывает раздел с уже
+    выставленным фильтром. Копия списка в каждую из восьмидесяти карточек не
+    добавила бы ни одной новой строки.
+    """
+    sc = _scenario(c, det)
+    steps = []
+
+    # 1. Разрыв — то же число, что в заголовке карточки.
+    if sc["gap"] >= 1:
+        txt = (f'Не хватает <b>{C.fmt_num(sc["gap"])}</b> чел до плана '
+               f'({C.fmt_num(c["forecast"])} из {C.fmt_num(c["plan"])}).')
+        if sc["gap_seg"] > sc["gap"] + 1:
+            txt += (f' В сегментах с невыполнением плана недобор больше — '
+                    f'{C.fmt_num(sc["gap_seg"])} чел: часть сегментов перевыполняет.')
+    elif sc["gap_seg"] > 0:
+        txt = (f'План подразделения выполняется (+{C.fmt_num(sc["buf"])} чел к плану), '
+               f'но в отдельных сегментах недобор {C.fmt_num(sc["gap_seg"])} чел.')
+    else:
+        txt = (f'План выполняется во всех сегментах, запас к плану '
+               f'<b>+{C.fmt_num(sc["buf"])}</b> чел.')
+    steps.append(("Разрыв", txt))
+
+    # 2. Чем закрываем.
+    if c.get("n_need"):
+        txt = (f'Отобрано <b>{C.fmt_num(c["n_need"])}</b> '
+               + _plural(int(c["n_need"]), "организация", "организации", "организаций")
+               + f' на <b>+{C.fmt_num(sc["fl_need"])}</b> чел: привлечь '
+                 f'{C.fmt_num(c["n_attract"])} орг (+{C.fmt_num(c["fl_attract"])} чел), '
+                 f'вернуть {C.fmt_num(c["n_return"])} орг (+{C.fmt_num(c["fl_return"])} чел). '
+                 f'ФОТ отобранных — около {C.fmt_num(c["fot_need"])} млн ₽.')
+        if sc["cover"] is not None:
+            txt += (f' Это <b>{sc["cover"] * 100:.0f}%</b> отклонения в сегментах '
+                    f'с невыполнением плана.')
+        steps.append(("Чем закрываем", txt))
+
+    # 3. С чего начать — первое действие, которое даёт эффект без новой воронки.
     nw = int(c.get("not_worked") or 0)
+    act = c.get("act") or {}
+    if nw:
+        steps.append(("С чего начать",
+                      f'Первыми эффект дают <b>{C.fmt_num(nw)}</b> из отобранных '
+                      f'организаций, по которым активностей за три закрытых месяца '
+                      f'не было: <b>+{C.fmt_num(c.get("fl_not_worked") or 0)}</b> чел. '
+                      f'Это уже отобранный потенциал, новых кандидатов он не требует.'))
+    elif act.get("act_n"):
+        steps.append(("С чего начать",
+                      f'По отобранным организациям работа идёт: {C.fmt_num(act["act_n"])} '
+                      f'активностей по {C.fmt_num(act["worked_orgs"])} организациям, '
+                      f'результативных — {act["success"] * 100:.0f}%.'))
+
+    # 4. Что не закрывается — звено, без которого сценарий обещает невозможное.
+    if sc["rest"] >= 1:
+        names = ", ".join(
+            (f'{sg} (хватает на {cov * 100:.0f}%)' if cov is not None
+             else f'{sg} (отобранных организаций нет)') for sg, cov in sc["lack"][:3])
+        steps.append(("Что не закрывается",
+                      f'<b>{C.fmt_num(sc["rest"])}</b> чел отобранными организациями '
+                      f'не закрываются'
+                      + (f': {C.esc(names)}' if names else "")
+                      + '. Под эту часть нужны новые кандидаты в воронку.'))
+    elif sc["cover"] is not None:
+        steps.append(("Что не закрывается",
+                      'Отобранного потенциала хватает на всё отклонение в сегментах '
+                      'с невыполнением плана.'))
+
+    # 5. Темп и удержание — успеваем ли при том, как идут дела сейчас.
+    if sc["pace"] is not None:
+        sign = "+" if sc["pace"] >= 0 else "−"
+        pace_txt = (f'Последние {sc["pace_n"]} месяца портфель менялся на '
+                    f'<b>{sign}{C.fmt_num(abs(sc["pace"]))}</b> чел в месяц. ')
+        if sc["months"]:
+            pace_txt += (f'При таком темпе разрыв закрывается примерно за '
+                         f'<b>{sc["months"]:.1f}</b> мес — за счёт одной динамики, '
+                         f'без дополнительной работы по организациям.')
+        elif sc["gap"] >= 1:
+            pace_txt += 'При таком темпе разрыв сам не закрывается.'
+        elif sc["pace"] < 0:
+            # план выполняется, но портфель убывает: запас к плану конечен, и
+            # сказать «темпом поддерживается» здесь было бы прямой неправдой
+            left = (sc["buf"] / abs(sc["pace"])) if sc["buf"] > 0 else 0
+            pace_txt += (f'Портфель убывает: при таком темпе запас к плану '
+                         f'исчерпается примерно за <b>{left:.1f}</b> мес.'
+                         if left >= 0.1 else
+                         'Портфель убывает — запас к плану уже на исходе.')
+        else:
+            pace_txt += 'Запас к плану этим темпом поддерживается.'
+        steps.append(("Темп", pace_txt))
+    if sc["gap"] < 1 and sc["out_tot"]:
+        warn = (' — это больше запаса к плану, и при повторении потерь план уходит '
+                'в невыполнение' if sc["out_tot"] > max(0.0, sc["buf"]) else
+                ' — запас к плану это перекрывает')
+        steps.append(("Удержание",
+                      f'Потери за три закрытых месяца — <b>{C.fmt_num(sc["out_tot"])}</b> '
+                      f'чел{warn}.'))
+
+    if not steps:
+        return ""
     go = ""
-    if unit_label == "ГОСБ":
+    if unit_label == "ГОСБ" and c.get("n_need"):
         go = (f'<a class="es-go gd-go" href="#sec-{idx}-orgs" '
               f'data-sec="sec-{idx}-orgs" data-filter="work{idx}-g" '
               f'data-value="{C.esc(str(c["gosb_name"])[:28])}">'
               f'Смотреть организации этого подразделения<i>&nbsp;→</i></a>')
-    return (
-        '<div class="gd-block"><h4>Потенциал организаций</h4>'
-        f'<div class="pe-line">Под план отобрано <b>{C.fmt_num(c["n_need"])}</b> '
-        f'{_plural(c["n_need"], "организация", "организации", "организаций")} '
-        f'на <b>+{C.fmt_num(c["fl_need"])}</b> чел — привлечь '
-        f'{C.fmt_num(c["n_attract"])}, вернуть {C.fmt_num(c["n_return"])}. '
-        f'ФОТ отобранных — около {C.fmt_num(c["fot_need"])} млн ₽.'
-        + (f' Отобранное закрывает {cover * 100:.0f}% отклонения в сегментах с '
-           f'невыполнением плана.' if cover is not None else "")
-        + (f' По <b>{C.fmt_num(nw)}</b> из отобранных организаций активностей за '
-           f'три закрытых месяца не было.' if nw else "")
-        + '</div>' + go + '</div>')
+    body = "".join(f'<li><span class="sc-t">{C.esc(t)}</span>'
+                   f'<span class="sc-b">{txt}</span></li>' for t, txt in steps)
+    return ('<div class="gd-block"><h4>Сценарий достижения плана</h4>'
+            f'<ol class="scen">{body}</ol>{go}</div>')
 
 
 def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГОСБ",
@@ -2499,11 +2977,11 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
         + f'<div class="gd-block"><h4>Матрица выполнения по сегментам</h4>'
           f'{_gosb_table(c)}</div>'
 
-        # Потенциал стоит сразу за матрицей — тем же порядком, что разделы
-        # уровня: сначала «где план не выполняется», сразу за ним «чем
-        # закрывать». Отток, год к году и переток идут ниже: они объясняют,
-        # откуда разрыв взялся, а не что с ним делать.
-        + _gd_potential(c, idx, unit_label)
+        # Сценарий стоит сразу за матрицей — тем же порядком, что разделы
+        # уровня: сначала «где план не выполняется», сразу за ним «что с этим
+        # делать». Отток, год к году и переток идут ниже: они объясняют,
+        # откуда разрыв взялся, а не чем его закрывать.
+        + _gd_scenario(c, det, idx, unit_label)
 
         + f'<div class="gd-block"><h4>Отток по причинам — всего '
         f'{C.fmt_num(det["out_tot"])} чел, {C.fmt_num(n_out)} орг</h4>'
@@ -2684,6 +3162,42 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
     # когда ищут конкретное подразделение, в голове алфавит, а не рейтинг.
     by_gap = sorted(cards, key=lambda x: (x[0], x[1], x[2]))
     html = "".join(x[3] for x in by_gap)
+    # Сценарии рядом: карточка отвечает по одному подразделению, а руководителю
+    # уровня нужно сравнить их между собой — где разрыв больше, где отобранного
+    # не хватает, где отобранное лежит без работы. Те же числа, что в карточках,
+    # поэтому таблица свёрнута: она для сравнения, а не для чтения подряд.
+    srows, n_short, n_idle = [], 0, 0
+    for c in a.gosb_cards:
+        sc = _scenario(c, (a.gosb_detail or {}).get(c["gosb_id"]))
+        if sc["rest"] >= 1:
+            n_short += 1
+        if int(c.get("not_worked") or 0):
+            n_idle += 1
+        srows.append([
+            C.esc(c["gosb_name"]),
+            f'<b style="color:{_col(c["exec"])}">{_pct(c["exec"])}</b>',
+            C.fmt_num(sc["gap"]) if sc["gap"] >= 1 else "—",
+            C.fmt_num(sc["gap_seg"]) if sc["gap_seg"] > 0 else "—",
+            C.fmt_num(c.get("n_need") or 0) if c.get("n_need") else "—",
+            f'+{C.fmt_num(sc["fl_need"])}' if c.get("n_need") else "—",
+            (f'{sc["cover"] * 100:.0f}%' if sc["cover"] is not None else "—"),
+            (f'<b class="bad">{C.fmt_num(sc["rest"])}</b>' if sc["rest"] >= 1 else "—"),
+            C.fmt_num(c.get("not_worked") or 0) if c.get("not_worked") else "—",
+        ])
+    scen_tbl = (
+        f'<details class="scn-wrap"><summary>Сценарии по всем {C.esc(unit)}: '
+        f'разрыв, чем закрывается и что остаётся</summary>'
+        f'<p class="scn-lead">Те же числа, что в карточках, одной таблицей — '
+        f'чтобы сравнить подразделения между собой. Колонка «не закрывается» '
+        f'в сумме и есть остаток из цепочки решения на первом экране: избыток '
+        f'отобранного в одном подразделении не закрывает недобор в другом. '
+        f'{"Отобранного потенциала не хватает на весь недобор в " + C.fmt_num(n_short) + " " + _plural(n_short, "подразделении", "подразделениях", "подразделениях") + ". " if n_short else ""}'
+        f'{"Отобранные организации без активностей за три месяца есть в " + C.fmt_num(n_idle) + " " + _plural(n_idle, "подразделении", "подразделениях", "подразделениях") + "." if n_idle else ""}</p>'
+        + C.table([C.esc(unit), "выполнение", "разрыв, чел",
+                   "недобор в сегментах, чел", "отобрано, орг", "эффект, чел",
+                   "покрытие", "не закрывается, чел", "без активностей, орг"],
+                  srows, num_cols=[1, 2, 3, 4, 5, 6, 7, 8])
+        + '</details>')
     sort_ui = (
         f'<div class="gc-sort" data-grid="gcards-{idx}">'
         f'<span>Порядок карточек:</span>'
@@ -2692,7 +3206,7 @@ def _problem_gosb(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> s
         f'по выполнению плана</button>'
         f'<button type="button" class="gc-sort-b" data-mode="abc">'
         f'по алфавиту</button></div>')
-    grid = (f'{sort_ui}<div class="gcards" id="gcards-{idx}">{html}</div>'
+    grid = (f'{scen_tbl}{sort_ui}<div class="gcards" id="gcards-{idx}">{html}</div>'
             f'{"".join(dialogs)}')
     return C.section(f"Детализация по {unit}", _ai(ai) + grid,
                      eyebrow=f"Детализация по {unit} · клик открывает разбор до организаций")

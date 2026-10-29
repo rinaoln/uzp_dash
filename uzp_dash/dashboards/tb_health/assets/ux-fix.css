@@ -386,8 +386,8 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
 
   /* 1. Любая сетка на бумаге — обычный столбик. Это главная причина
         наложений: Chrome не переносит элементы grid через разрыв страницы. */
-  .gcards, .grid, .hub, .kpis { display: block !important; }
-  .gcards > *, .grid > * { margin: 0 0 12px !important; }
+  .gcards, .grid, .hub, .kpis, .hx, .chn { display: block !important; }
+  .gcards > *, .grid > *, .hx > *, .chn > * { margin: 0 0 12px !important; }
 
   /* 2. Ничего не липнет и не плавает: липкие панели на бумаге наезжают на текст */
   .lvls, .hub-back, .xls-bar, .read-progress { position: static !important; }
@@ -603,6 +603,10 @@ dialog.gd { max-width: 1080px; width: 94vw; max-height: 92vh; }
 .lvl[data-hub-view="sec"] > .hub-wrap,
 .lvl[data-hub-view="sec"] > .forecast-panel,
 .lvl[data-hub-view="sec"] > .card.hero,
+/* управленческий слой — часть первого экрана: при открытом разделе он уходит
+   вместе с плашкой прогноза, иначе раздел читался бы под чужой сводкой */
+.lvl[data-hub-view="sec"] > .hx-wrap,
+.lvl[data-hub-view="sec"] > .chn-wrap,
 .lvl[data-hub-view="sec"] > .grid.cols-2 { display: none; }
 .lvl[data-hub-view="sec"] > section:not(.hub-on) { display: none; }
 /* у открытого раздела заголовок и так стоит в строке возврата — подсказка
@@ -1306,3 +1310,151 @@ tr.ind-none td { color: var(--text-2); }
 /* знак величины — цветом текста; у итоговой колонки фона нет, только цвет */
 .sm-tbl td.sm-c[class*="sm-p"], .sm-tbl td.sm-p0 { color: var(--good); font-weight: 650; }
 .sm-tbl td.sm-c[class*="sm-n"], .sm-tbl td.sm-n0 { color: var(--bad);  font-weight: 650; }
+
+/* ============================================================
+   Здоровье портфеля и цепочка решения
+   ============================================================
+   Управленческий слой первого экрана. Пять сторон состояния портфеля стоят
+   плитками в один ряд, под ними — цепочка «отклонение → где → чем закрывать →
+   что остаётся». Числа считает view (_health / _chain), стиль здесь.
+
+   ЦВЕТ. Плитка окрашивается по порогу СВОЕЙ стороны, а не по выполнению плана:
+   удержание или динамика краснеют по собственному правилу. Поэтому цвет
+   вынесен в узкую полосу слева и в само число, а не в заливку всей плитки —
+   залитый красным прямоугольник рядом с зелёной плашкой прогноза читался бы
+   как противоречие. Правило каждой стороны раскрывается тут же, в «как
+   читаем»: цвет без названного порога — оценка без основания. */
+.hx-wrap, .chn-wrap { margin: 0 0 18px; }
+.hx-top {
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px;
+  margin: 0 2px 10px;
+}
+.hx-eyebrow {
+  font-size: 12px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-2);
+}
+.hx-verdict {
+  font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
+  padding: 2px 11px; border-radius: 999px;
+  background: color-mix(in srgb, var(--text-2) 12%, transparent);
+}
+.hx-verdict.good { color: var(--good); background: color-mix(in srgb, var(--good) 13%, transparent); }
+.hx-verdict.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.hx-verdict.bad  { color: var(--bad);  background: color-mix(in srgb, var(--bad)  13%, transparent); }
+.hx-names, .chn-lead { font-size: 13px; color: var(--text-2); line-height: 1.4; }
+.hx { display: grid; gap: 12px; grid-template-columns: repeat(5, minmax(0, 1fr)); }
+.hx-i {
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--surface-solid); border: 1px solid var(--separator);
+  border-left: 3px solid var(--separator);
+  border-radius: var(--radius); padding: 13px 14px 12px;
+}
+.hx-i.good { border-left-color: var(--good); }
+.hx-i.warn { border-left-color: var(--warn); }
+.hx-i.bad  { border-left-color: var(--bad); }
+.hx-l { font-size: 12.5px; font-weight: 650; color: var(--text-2); line-height: 1.25; }
+.hx-v {
+  font-size: 25px; font-weight: 750; letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums; line-height: 1.1;
+}
+.hx-i.good .hx-v { color: var(--good); }
+.hx-i.warn .hx-v { color: var(--warn); }
+.hx-i.bad  .hx-v { color: var(--bad); }
+.hx-s { font-size: 12.5px; line-height: 1.35; color: var(--text-2); }
+.hx-go, .chn-go { margin-top: auto; padding-top: 6px; font-size: 12.5px; }
+.hx-how { margin: 10px 2px 0; }
+.hx-how > summary {
+  cursor: pointer; font-size: 13px; font-weight: 600; color: var(--accent);
+  list-style: none;
+}
+.hx-how > summary::-webkit-details-marker { display: none; }
+.hx-how > summary::before { content: "▸ "; }
+.hx-how[open] > summary::before { content: "▾ "; }
+.hx-how p {
+  font-size: 13px; line-height: 1.5; color: var(--text-2);
+  margin: 8px 0 0; max-width: 95ch;
+}
+
+/* Цепочка: четыре шага подряд, между ними стрелка — порядок звеньев и есть
+   содержание блока. Стрелка рисуется псевдоэлементом и пропадает вместе с
+   однорядной раскладкой: в столбик она указывала бы вбок. */
+.chn { display: grid; gap: 12px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.chn-i {
+  position: relative; display: flex; flex-direction: column; gap: 4px;
+  background: var(--surface-solid); border: 1px solid var(--separator);
+  border-radius: var(--radius); padding: 13px 14px 12px;
+}
+.chn-i + .chn-i::before {
+  content: "→"; position: absolute; left: -11px; top: 50%;
+  transform: translateY(-50%); color: var(--text-2); font-size: 13px;
+}
+.chn-t { display: flex; align-items: center; gap: 7px; font-size: 12.5px;
+         font-weight: 650; color: var(--text-2); }
+.chn-t b {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent); font-size: 11px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.chn-v {
+  font-size: 19px; font-weight: 750; letter-spacing: -0.02em; line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.chn-v.good { color: var(--good); }
+.chn-v.warn { color: var(--warn); }
+.chn-v.bad  { color: var(--bad); }
+.chn-s { font-size: 12.5px; line-height: 1.4; color: var(--text-2); }
+
+@media (max-width: 1080px) {
+  .hx { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hx-i:last-child { grid-column: 1 / -1; }
+  .chn { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chn-i + .chn-i::before { display: none; }
+}
+@media (max-width: 720px) {
+  .hx, .chn { grid-template-columns: 1fr; }
+  .hx-i:last-child { grid-column: auto; }
+}
+
+/* ============================================================
+   Сценарий достижения плана
+   ============================================================
+   В карточке подразделения — шаги «разрыв → чем закрываем → с чего начать →
+   что не закрывается → темп». Название шага слева узкой колонкой: шагов до
+   шести, и при чтении по диагонали нужен не номер, а вопрос, на который шаг
+   отвечает. */
+.scen { list-style: none; margin: 0; padding: 0; counter-reset: sc; }
+.scen > li {
+  display: grid; grid-template-columns: 158px 1fr; gap: 4px 14px;
+  padding: 9px 0; border-top: 1px solid var(--separator);
+}
+.scen > li:first-child { border-top: none; padding-top: 2px; }
+.sc-t {
+  position: relative; font-size: 13px; font-weight: 700; color: var(--text);
+  counter-increment: sc; padding-left: 22px;
+}
+.sc-t::before {
+  content: counter(sc); position: absolute; left: 0; top: 1px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent); font-size: 10.5px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.sc-b { font-size: 13.5px; line-height: 1.5; color: var(--text-2); }
+.sc-b b { color: var(--text); }
+@media (max-width: 720px) {
+  .scen > li { grid-template-columns: 1fr; }
+}
+
+/* Сводная таблица сценариев в разделе детализации */
+.scn-wrap { margin: 0 0 14px; }
+.scn-wrap > summary {
+  cursor: pointer; font-size: 14px; font-weight: 650; color: var(--accent);
+  list-style: none;
+}
+.scn-wrap > summary::-webkit-details-marker { display: none; }
+.scn-wrap > summary::before { content: "▸ "; }
+.scn-wrap[open] > summary::before { content: "▾ "; }
+.scn-lead { font-size: 13px; line-height: 1.5; color: var(--text-2); margin: 8px 0 10px; }
+.scn-wrap table { font-size: 13px; }
+.scn-wrap td b.bad { color: var(--bad); }
