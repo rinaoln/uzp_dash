@@ -645,14 +645,32 @@ def _pack(rows: list[dict], slot: str) -> tuple[str, str]:
         return "", "[]"
     dicts = {c: [] for c in _PACK_DICT}
     idx = {c: {} for c in _PACK_DICT}
+    # Подписи — только строки. Пустое значение из pandas приходит как NaN, а
+    # `NaN or ""` даёт NaN, а не "": NaN в Python истинен. Такой ключ попал бы в
+    # словарь числом и сломал бы разбор всей таблицы в браузере.
+    def _txt(v):
+        return v if isinstance(v, str) else ""
+
     for c in _PACK_DICT:
         for r in rows:
-            v = r.get(c) or ""
+            v = _txt(r.get(c))
+            r[c] = v
             if v not in idx[c]:
                 idx[c][v] = len(dicts[c])
                 dicts[c].append(v)
     ks = sorted({float(r.get("needk") or 0.0) for r in rows})
     kidx = {v: i for i, v in enumerate(ks)}
+    # Числа — только конечные: одно пустое число в одной строке делает весь
+    # массив недопустимым для JSON.parse, и браузер не показывает таблицу целиком.
+    def _n(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return 0
+        return v if math.isfinite(f) else 0
+
+    for r in rows:
+        r["fl"], r["fot"] = _n(r.get("fl")), _n(r.get("fot"))
     packed = [[r["inn"], r.get("company") or "", idx["lever"][r.get("lever") or ""],
                idx["gosb"][r.get("gosb") or ""], idx["seg"][r.get("seg") or ""],
                r["fl"], r["fot"], idx["reason"][r.get("reason") or ""],

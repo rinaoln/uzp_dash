@@ -1487,6 +1487,20 @@ def _company_holding(orgs: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     df.loc[last, "fot_outflow_amt"] = o["fot_outflow_amt"].to_numpy()
     df.loc[last, "current_fot_amt"] = o["current_fot_amt"].to_numpy()
 
+    # ОРГАНИЗАЦИИ, УШЕДШИЕ ЦЕЛИКОМ. На проме они есть в каждом ТБ (сотни строк
+    # рычага «Вернуть»), а в синтетике не было ни одной: у них в закрытом месяце
+    # ноль текущих получателей, витрина отдаёт пустую среднюю зарплату, и именно
+    # это на проме ломало таблицу потенциала — локально ошибка не ловилась.
+    # Берём небольшую долю организаций с устойчивым оттоком и обнуляем им
+    # закрытый месяц. Свой генератор случайных чисел — чтобы не сдвинуть все
+    # остальные ряды синтетики.
+    rng_gone = np.random.default_rng(20261029)
+    gone = np.where((kind == "persistent") & (target_out >= 1))[0]
+    if len(gone):
+        gone = gone[rng_gone.random(len(gone)) < 0.05]
+        df.loc[last[gone], "current_fl_qty"] = 0
+        df.loc[last[gone], "current_fot_amt"] = 0.0
+
     # Штат ≥ получателей; проникновение = получатели/штат.
     #
     # Форма штата ВО ВРЕМЕНИ и есть признак причины оттока — на ней держится

@@ -128,6 +128,7 @@ class Analysis:
     wow: dict = field(default_factory=dict)          # динамика к прошлой сборке
     structure: dict = field(default_factory=dict)    # состав портфеля, см. _structure
     trend_seg: dict = field(default_factory=dict)    # сегмент × месяц, год к году
+    ref_stats: dict = field(default_factory=dict)    # пары до/после фильтра эталонной базы
     # ИНН откуда -> куда ушли его люди за последнюю пару закрытых месяцев
     moves: dict = field(default_factory=dict)
     # Рабочие кадры уровня. Живут в объекте, потому что уровень собирается в два
@@ -163,6 +164,17 @@ def prepare(b: Bank, tb_id: int, tb_short: str, tb_full: str) -> Analysis:
     # организации вне базы, и без них блок не сойдётся с итогом единицы.
     detail = b.orgs[b.orgs["tb_id"] == tb_id]
     orgs = detail[detail["in_ref"]].reset_index(drop=True)
+    # Фильтр эталонной базы режет ТОЛЬКО потенциал: матрица, отток и структура
+    # считаются по полному срезу. Поэтому, если в базе не нашлась ни одна пара,
+    # отчёт выглядит целым, а пустым остаётся один раздел, — и причину надо
+    # назвать, иначе раздел сваливает её на «нет кандидатов с эффектом».
+    ref_stats = {"n_detail": int(len(detail)), "n_ref": int(len(orgs))}
+    if ref_stats["n_detail"] and not ref_stats["n_ref"]:
+        progress.warn(f"{tb_short}: ни одна из {ref_stats['n_detail']} пар (ГОСБ, "
+                      f"организация) витрины не нашлась в эталонной базе "
+                      f"uzp_dim_mzp_reference_base — потенциал организаций будет "
+                      f"пустым. Проверьте, в каких id подразделений хранится "
+                      f"gosb_id базы: отчёт сравнивает его с new_gosb_id")
     orgs_fc = b.orgs_fc[b.orgs_fc["tb_id"] == tb_id]
     fc_stats = dict(b.fc_stats)
     fc_stats.update({"conv_tb": b.conv["by_tb"].get(tb_id, b.conv["sb"]),
@@ -179,6 +191,7 @@ def prepare(b: Bank, tb_id: int, tb_short: str, tb_full: str) -> Analysis:
                                       b.act_brk[b.act_brk.tb_id == tb_id]))
 
     a.trend = _trend_rows(b.trend, "tb", tb_id)
+    a.ref_stats = ref_stats
 
     # --- Классификация по агрегатам (все активности) ---
     progress.step(f"{tb_short}: классификация (ГОСБ,ИНН) — работать / нет смысла")
@@ -236,6 +249,8 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
     a.no_point = _cat([x.no_point for x in per_tb])
     a.gosb_plan = {x.tb_id: _tb_plan_row(x) for x in per_tb}
     a.sim = _sum_sim(per_tb, a.gap_rcp, a.verdict["rcp"]["fact"], a.verdict["rcp"]["plan"])
+    a.ref_stats = {k: sum(int((x.ref_stats or {}).get(k, 0)) for x in per_tb)
+                   for k in ("n_detail", "n_ref")}
     # причины с уровня ТБ ключуются по (ГОСБ, ИНН), а строки этого уровня — по
     # (ТБ, ИНН): перекладываем, иначе блок годового тренда банка остался бы без
     # единой зафиксированной причины
@@ -1512,6 +1527,30 @@ def _candidates(orgs: pd.DataFrame, days_left: int = 0,
     cand["impact_fl"] = two.max(axis=1)
     cand["lever"] = two.idxmax(axis=1).map(
         {"impact_attract": "Привлечь", "impact_return": "Вернуть"})
+    # СРЕДНЯЯ ЗАРПЛАТА ДЛЯ ФОТ ВОЗВРАТА. Обычно — средняя по организации: ФОТ
+    # текущих получателей на их число. Но у организации, которая ушла ЦЕЛИКОМ,
+    # текущих получателей нет, делить не на что, и витрина отдаёт NULL. Раньше
+    # он доходил до таблицы как NaN — `avg_salary or 0` его не ловит, NaN в
+    # Python истинен, — и браузер не открывал таблицу потенциала вовсе: на проме
+    # так было во всех одиннадцати ТБ, по сотне-четыреста строк «Вернуть» в
+    # каждом. Для таких организаций берём среднюю зарплату УШЕДШИХ из той же
+    # витрины (ФОТ оттока на численность оттока): это и есть зарплата тех, кого
+    # возвращаем. Нет и её — ФОТ возврата ноль, и это говорится в логе.
+    cur_avg = forecast.num(cand, "avg_salary")
+    fl_out = forecast.num(cand, "fl_outflow_qty")
+    out_avg = (forecast.num(cand, "fot_outflow_amt")
+               / fl_out.where(fl_out > 0)).fillna(0.0)
+    cand["salary_return"] = cur_avg.where(cur_avg > 0, out_avg)
+    ret = cand["lever"] == "Вернуть"
+    n_fb = int((ret & (cur_avg <= 0) & (out_avg > 0)).sum())
+    n_zero = int((ret & (cand["salary_return"] <= 0)).sum())
+    if n_fb or n_zero:
+        n_all = n_fb + n_zero
+        org = ("организации" if n_all % 10 == 1 and n_all % 100 != 11
+               else "организаций")
+        progress.done(f"ФОТ возврата: у {n_all} {org} с рычагом «Вернуть» текущих "
+                      f"получателей нет — средняя зарплата взята по ушедшим у "
+                      f"{n_fb}, у {n_zero} её нет и ФОТ возврата ноль")
     fot = []
     for r in cand.itertuples():
         if r.lever == "Привлечь":
@@ -1519,8 +1558,8 @@ def _candidates(orgs: pd.DataFrame, days_left: int = 0,
             k = (r.impact_attract / r.emp_potential_qty) if r.emp_potential_qty else 0.0
             fot.append(float(r.fot_potential_amt) * k)
         else:
-            # ФОТ возврата — по ушедшим и не вернувшимся, по средней ЗП организации
-            fot.append(float(r.impact_return) * float(r.avg_salary or 0))
+            # ФОТ возврата — по ушедшим и не вернувшимся, по средней ЗП (см. выше)
+            fot.append(float(r.impact_return) * float(r.salary_return))
     cand["impact_fot_mln"] = [x / RUB_TO_MLN for x in fot]
     return cand
 

@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 # Ключ по умолчанию. Диапазон 1..93 — он же предел обратного сдвига в скрипте
 # (см. `+94` и `+96` в DECODER: при большем ключе остаток ушёл бы в минус).
@@ -73,6 +74,18 @@ def _pick(text: str) -> tuple[str, int]:
     raise RuntimeError("не нашёлся ключ без слова «ИНН» в результате")
 
 
+def _finite(o, n: list):
+    """Заменить NaN и бесконечности на None во вложенных словарях и списках."""
+    if isinstance(o, float) and not math.isfinite(o):
+        n[0] += 1
+        return None
+    if isinstance(o, dict):
+        return {k: _finite(v, n) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_finite(v, n) for v in o]
+    return o
+
+
 def hide(obj, slot: str) -> tuple[str, str]:
     """Массив — в документ закодированным. Отдаёт разметку и выражение для JS.
 
@@ -84,7 +97,23 @@ def hide(obj, slot: str) -> tuple[str, str]:
     инлайн-скрипты по ходу разбора документа, и элемент к этому моменту должен
     быть уже разобран.
     """
-    text = json.dumps(obj, ensure_ascii=False).replace("<", "\\u003c")
+    # NaN и бесконечность в JSON недопустимы: Python их пишет, а JSON.parse в
+    # браузере на них падает и не отдаёт массив ЦЕЛИКОМ — одно пустое число в
+    # одной строке оставляло пустой всю таблицу. Поэтому сначала строгая запись;
+    # если она не прошла, такие значения становятся null, а в лог сборки уходит,
+    # в каком массиве и сколько их было, — иначе источник так и остался бы
+    # незамеченным.
+    try:
+        text = json.dumps(obj, ensure_ascii=False, allow_nan=False)
+    except ValueError:
+        n = [0]
+        obj = _finite(obj, n)
+        text = json.dumps(obj, ensure_ascii=False, allow_nan=False)
+        from .. import progress
+        progress.warn(f"В массиве «{slot}» было {n[0]} пустых чисел (NaN) — "
+                      f"записаны как пустые значения, иначе браузер не открыл бы "
+                      f"таблицу. Источник стоит найти: число где-то не посчиталось")
+    text = text.replace("<", "\\u003c")
     enc, key = _pick(text)
     holder = f'<script type="application/octet-stream" id="{slot}">{enc}</script>'
     return holder, f'__vd("{slot}",{key})'
