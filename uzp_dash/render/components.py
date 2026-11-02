@@ -423,7 +423,9 @@ def trend_plan_fact(rows: list[dict]) -> str:
         # поэтому линия плана её не перечёркивает
         vals.append(
             f'<text x="{x:.0f}" y="{y - 11:.0f}" text-anchor="middle" font-size="9.5" '
-            f'font-weight="600" fill="var(--text)">{esc(fmt_num(r["fact"]))}</text>')
+            f'font-weight="600" fill="var(--text)" stroke="var(--surface-solid)" '
+            f'stroke-width="3.5" stroke-linejoin="round" paint-order="stroke">'
+            f'{esc(fmt_num(r["fact"]))}</text>')
         # ЗНАЧЕНИЯ ПРОШЛОГО ГОДА — ТАК ЖЕ, КАК ФАКТ: точка и число у неё. Без
         # числа вторая линия отвечала только на «выше или ниже», а вопрос к ней
         # другой — «на сколько», и считать это по сетке глазами невозможно.
@@ -434,15 +436,22 @@ def trend_plan_fact(rows: list[dict]) -> str:
         if has_prev:
             pv = float(r["prev"])
             py = y_of(pv)
-            dy = 15 if py >= y else -9
+            # Когда ряды близко, подписи по разные стороны всё равно могут
+            # задевать друг друга. Ставим прошлый год ниже факта, но оставляем
+            # запас до подписей месяцев под графиком.
+            prev_label_y = (min(y + 16, _CH - _PB + 10)
+                            if abs(py - y) < 24 else
+                            py + (15 if py >= y else -9))
             dots.append(
                 f'<circle cx="{x:.0f}" cy="{py:.0f}" r="2.5" fill="var(--text-2)" '
                 f'stroke="var(--surface-solid)" stroke-width="1.5" opacity="0.85">'
                 f'<title>{esc(r["label"])}: год назад {esc(fmt_num(pv))} чел'
                 f'</title></circle>')
             vals.append(
-                f'<text x="{x:.0f}" y="{py + dy:.0f}" text-anchor="middle" '
-                f'font-size="9" font-weight="600" fill="var(--text-2)">'
+                f'<text x="{x:.0f}" y="{prev_label_y:.0f}" text-anchor="middle" '
+                f'font-size="9" font-weight="600" fill="var(--text-2)" '
+                f'stroke="var(--surface-solid)" stroke-width="3.5" '
+                f'stroke-linejoin="round" paint-order="stroke">'
                 f'{esc(fmt_num(pv))}</text>')
     # подписи прямо у концов линий: надёжнее легенды, её приходится сопоставлять
     prev_pts = (" ".join(f'{_x_of(i, n):.0f},{y_of(float(r["prev"])):.0f}'
