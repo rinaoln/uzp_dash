@@ -21,6 +21,7 @@ import pandas as pd
 from ... import anonymize, progress
 from ...db import execute, read_sql, session
 from . import forecast, queries as Q, segments, text_rules
+from .freshness import orgs_snapshot
 
 RUB_TO_MLN = 1e6
 PIPE_MONTHS = 12                 # закрытых месяцев сделок для коэффициента реализуемости
@@ -164,11 +165,13 @@ def load(ctx) -> Bank:
 
     ORGS_EMPTY.clear()
     progress.step("Витрина организаций по всему банку (потенциал/отток/год к году)")
-    orgs = read_sql(e, Q.ORGS_ALL, {"ref_closed": d["ref_closed"]})
-    orgs_tb = _only_known_tb(read_sql(e, Q.ORGS_TB, {"ref_closed": d["ref_closed"]}),
+    d.update(organization_dates(e, d["ref_closed"]))
+    orgs = read_sql(e, Q.ORGS_ALL, {"ref_orgs": d["ref_orgs"]})
+    orgs_tb = _only_known_tb(read_sql(e, Q.ORGS_TB, {"ref_orgs_tb": d["ref_orgs_tb"]}),
                              tb_ids, "строк витрины уровня ТБ")
-    _check_orgs_month(e, orgs, d["ref_closed"])
+    _check_orgs_month(e, orgs, d["ref_orgs"] or d["ref_closed"])
     orgs = _prepare_orgs(orgs, apparat, tb_of)
+    orgs["orgs_asof"] = d["ref_orgs"]
     orgs_tb = _prepare_orgs_tb(orgs_tb, orgs)
     _log_orgs(orgs, orgs_tb)
 
@@ -612,6 +615,29 @@ def _flow_diag(engine, prev, cur) -> None:
                   f"{int(g['sys_ids'])}) — значит ни один человек не менял "
                   f"состояние между месяцами. Так бывает при одинаковых "
                   f"выгрузках двух месяцев.")
+
+
+def organization_dates(engine, ref_closed) -> dict:
+    """Последний срез каждого грейна без изменения прогнозного месяца.
+
+    Исторический отчёт не читает будущие срезы. Даты уровней gosb и tb могут
+    различаться: обе выбираются явно и подписываются в своих блоках.
+    """
+    rows = read_sql(engine, Q.ORGS_LATEST, {"ref_closed": ref_closed})
+    result = {"ref_orgs": None, "ref_orgs_tb": None}
+    for row in rows.itertuples():
+        if pd.isna(row.ref_orgs):
+            continue
+        selected = pd.Timestamp(row.ref_orgs).date()
+        if selected > pd.Timestamp(ref_closed).date():
+            raise ValueError("Дата среза организаций позже закрытого месяца отчёта")
+        key = "ref_orgs_tb" if row.level_name == "tb" else "ref_orgs"
+        result[key] = selected
+    for level in ("gosb", "tb"):
+        info = orgs_snapshot({"ref_closed": ref_closed, **result}, level)
+        (progress.warn if info["stale"] or not info["available"] else progress.done)(
+            f'Организации, уровень {level}: {info["note"]}')
+    return result
 
 
 def dates(engine, params: dict) -> dict:

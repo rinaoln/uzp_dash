@@ -20,6 +20,7 @@ from ... import llm as llm_mod
 from ... import narrative
 from ... import progress
 from ...anonymize import Aliases
+from .freshness import orgs_snapshot
 
 BATCH_STEPS = (30, 10, 3, 1)   # шаги деградации размера батча
 PROMPT_CHAR_LIMIT = 40_000     # больше в один запрос не отправляем — делим заранее
@@ -304,6 +305,8 @@ def _facts_line(f: dict) -> str:
     if not f:
         return "—"
     parts: list[str] = []
+    if f.get("orgs_asof"):
+        parts.append(f"потенциал по срезу организаций на {f['orgs_asof']}")
     if f.get("potential"):
         parts.append(f"потенциал привлечения {int(f['potential'])} чел")
     if f.get("outflow_fl"):
@@ -739,9 +742,12 @@ def section_narratives(ctx, a) -> dict:
     pf = getattr(a, "pf", {}) or {}
     d = getattr(a, "dates", {}) or {}
     cl = (getattr(a, "closed", {}) or {}).get("rcp", {})
+    orgs_date = orgs_snapshot(d)
     ctx_txt = (
         f"ТБ: {a.tb_full}. Месяц ещё НЕ ЗАКРЫТ: это {d.get('label', a.ref_date)}. "
         f"Цифры по получателям — ПРОГНОЗ ВИТРИНЫ, а не факт и не наш расчёт.\n"
+        f"Дата потенциала организаций: {orgs_date['note']} "
+        f"Не называй этот срез фактом прогнозного месяца и не меняй месяц прогноза.\n"
         f"Получатели: прогноз {v['rcp']['fact']:.0f} из плана {v['rcp']['plan']:.0f} "
         f"({(v['rcp']['exec'] or 0)*100:.0f}%), "
         f"{_dev_phrase(v['rcp']['fact'], v['rcp']['plan'])}. "

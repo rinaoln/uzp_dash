@@ -7,6 +7,7 @@ from __future__ import annotations
 import re
 
 from ...render import components as C
+from .freshness import orgs_snapshot
 
 _MONTHS = ("янв", "фев", "мар", "апр", "май", "июн",
            "июл", "авг", "сен", "окт", "ноя", "дек")
@@ -92,7 +93,7 @@ def _chart(rows):
         f'<span>Конец периода <b>{C.fmt_num(values[-1])}</b></span></div>')
 
 
-def overview(a, idx, titles, roll, concentration, asks):
+def overview(a, idx, titles, roll, concentration, asks, health=""):
     """Первый экран уровня; все действия ведут в существующие разделы и диалоги."""
     execution = a.verdict["rcp"].get("exec")
     state = ("Нет плана для сравнения" if execution is None else
@@ -135,6 +136,19 @@ def overview(a, idx, titles, roll, concentration, asks):
                      f'<span>{text}</span><b aria-hidden="true">↗</b></{tag}>')
     outflow = a.outflow or {}
     dates = a.dates or {}
+    source = orgs_snapshot(dates)
+    potential = '+' + C.fmt_num(roll["fl_need"]) if source["available"] else "—"
+    potential_count = (C.fmt_num(roll["k"]) + ' организаций'
+                       if source["available"] else 'Данные недоступны')
+    source_class = " is-stale" if source["stale"] or not source["available"] else ""
+    health = (health.replace('<span class="hx-eyebrow">Здоровье портфеля</span>',
+                             '<h2>Здоровье портфеля</h2>')
+              .replace('<span class="hx-eyebrow">Цепочка решения</span>',
+                       '<h3>Сценарий достижения плана</h3>'))
+    health_panel = ('<section class="pd-health" '
+                    'aria-label="Здоровье портфеля и сценарий достижения плана">'
+                    + health + f'<p class="source-note{source_class}">'
+                    + C.esc(source["note"]) + '</p></section>') if health else ""
     return (
         f'<div class="pd-overview" data-pd-index="{idx}" '
         f'data-closed="{C.esc(dates.get("closed_label", ""))}">'
@@ -142,13 +156,14 @@ def overview(a, idx, titles, roll, concentration, asks):
         f'<p class="pd-context">Прогноз на {C.esc(dates.get("label", a.ref_date))}</p>'
         f'<h2>{C.esc(a.tb_full)}</h2></div><span class="pd-status '
         f'{_tone(None if execution is None else execution - 1)}"><i></i>{state}</span></div>'
-        '<div class="pd-metrics">'
+        + health_panel + '<div class="pd-metrics">'
         + _metric("Получатели зарплаты", a.verdict["rcp"], "человек")
         + _metric("Фонд оплаты труда", a.verdict["fot"], "млн ₽", 1e6)
         + '<article class="pd-metric pd-reserve"><div class="pd-metric-top">'
           '<h3>Потенциал роста</h3><span class="pd-reserve-icon" aria-hidden="true">↗</span></div>'
-        f'<div class="pd-number">+{C.fmt_num(roll["fl_need"])}<small>человек</small></div>'
-        f'<div class="pd-metric-foot"><span>{C.fmt_num(roll["k"])} организаций</span>'
+        f'<div class="pd-number">{potential}<small>человек</small></div>'
+        f'<p class="pd-source-caption">Данные организаций: {C.esc(source["label"])}</p>'
+        f'<div class="pd-metric-foot"><span>{potential_count}</span>'
         + _link(idx, "orgs", "Открыть", titles) + '</div></article></div>' + attention
         + '<div class="pd-analysis"><article class="pd-panel pd-trend">'
           '<div class="pd-panel-title"><h3>Динамика портфеля</h3>'
@@ -174,5 +189,4 @@ def overview(a, idx, titles, roll, concentration, asks):
           'Управление портфелем<span aria-hidden="true">↗</span></button>'
           '<button type="button" class="pd-link" data-pd-network>'
           'Портфель по всем ТБ<span aria-hidden="true">↗</span></button>'
-          '</div><details class="pd-health">'
-          '<summary>Здоровье портфеля и сценарий достижения плана</summary></details></div>')
+          '</div></div>')

@@ -11,6 +11,7 @@ import math
 import re
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -20,6 +21,7 @@ from ...render import page
 from ...render import veil
 from ... import progress
 from . import analyze, bank, prompts, queries, segments, snapshot, visual
+from .freshness import orgs_snapshot
 
 SEG_ORDER = segments.ORDER   # короткие названия сегментов (КСБ, РГС, …)
 # Ключ варианта «без фильтра» в разделе «Отток». Звёздочка, а не пустая
@@ -251,6 +253,7 @@ def build(ctx: Context) -> str:
                if lag >= 2 else "")
     meta = (f'Прогноз на {C.esc(d.get("label", sb.ref_date))} · '
             f'база — закрытый {C.esc(d.get("closed_label", ""))} · '
+            f'организации — {C.esc(orgs_snapshot(d)["label"])} · '
             f'отчёт обновлён {datetime.now():%d.%m.%Y, %H:%M}{lag_txt}')
     return page(
         title=TITLE,
@@ -352,10 +355,13 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
         ("trend", _trend_section(a, idx)),
     ]
     secs = [(key, html) for key, html in secs if html]
+    secs = [(key, html.replace('</h2>', '</h2>' + _orgs_source_note(a), 1)
+             if key == "orgs" else html) for key, html in secs]
     titles = {k: _sec_title(h) for k, h in secs}
+    health = _health_block(a, idx, titles) + _chain_block(a, idx, titles)
     return (
         visual.overview(a, idx, titles, _units_roll(a), _concentration(a),
-                        _asks(a, _concentration(a), idx, titles))
+                        _asks(a, _concentration(a), idx, titles), health=health)
         + _lvl_head(a, idx)
         + _hero(a, idx, titles)
         # Легенда цвета стоит там, где цвет впервые работает, — сразу под
@@ -365,8 +371,7 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
         # Управленческий слой: чем обеспечено выполнение плана и куда ведёт
         # отклонение. Стоит сразу за плашкой прогноза — это и есть первый
         # экран, ради которого отчёт открывают.
-        + _health_block(a, idx, titles)
-        + _chain_block(a, idx, titles)
+        + health
         + _kpis(a)
         + _portfolio_block(a, story.get("forecast"))
         + _hub(a, idx, secs)
@@ -2145,6 +2150,8 @@ def _structure_section(a: analyze.Analysis, idx: int = 0) -> str:
         '<p class="gd-note">Состав портфеля по организациям за выбранный месяц '
         'не рассчитан. Ниже показаны доступные разрезы по физлицам из '
         'ведомостей.</p>')
+    if st.get("n_org") is not None:
+        lead = _orgs_source_note(a) + lead
 
     inds = _ind_block(st, idx)
 
@@ -2266,6 +2273,11 @@ def _matrix(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
             + (' Ранг — место ТБ в сети по выполнению плана за закрытый месяц '
                f'{C.esc((a.dates or {}).get("closed_label", ""))}.' if ranks else "")
             + '</p>')
+    cell_meta = _cell_meta(a)
+    if not cell_meta["available"]:
+        hint += f'<p class="gd-note">{C.esc(cell_meta["reason"])}</p>'
+    else:
+        hint += _orgs_source_note(a, "tb" if a.level == "sb" else "gosb", yoy=True)
     heat = C.card(
         '<h3>Прогноз выполнения плана по получателям, %</h3>' + hint
         + C.heat_matrix(rows_id_label, segs, cells, unit_head=a.unit_label,
@@ -2305,6 +2317,27 @@ def _matrix(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
                      eyebrow="Диагностика по прогнозу")
 
 
+def _orgs_source_note(a: analyze.Analysis, level: str = "gosb", yoy: bool = False) -> str:
+    info = orgs_snapshot(getattr(a, "dates", None) or {}, level)
+    message = info["note"] + (" " + info["yoy"] if yoy else "")
+    stale = ' is-stale' if info["stale"] or not info["available"] else ''
+    return f'<p class="source-note{stale}" role="note">{C.esc(message)}</p>'
+
+
+def _cell_meta(a: analyze.Analysis) -> dict:
+    """Нет детализации организаций и нет снижений — разные состояния данных."""
+    detail = a.detail
+    available = (detail is not None and not detail.empty and "fl_yoy" in detail)
+    info = orgs_snapshot(a.dates or {}, "tb" if getattr(a, "level", "tb") == "sb" else "gosb")
+    period = (info["label"] if info["available"] else
+              str((a.dates or {}).get("closed_label") or "выбранный месяц"))
+    reason = (f'Детализация организаций за {period} недоступна. '
+              'Определить клиентов со снижением по этим данным нельзя. '
+              'Выполнение прогноза рассчитано отдельно по витрине метрик.')
+    return {"available": available, "reason": "" if available else reason,
+            "source_note": info["note"] + " " + info["yoy"]}
+
+
 def _cell_data(a: analyze.Analysis, idx: int, cells: dict) -> str:
     """Состав ячеек матрицы — данными для скрипта, а не разметкой.
 
@@ -2316,9 +2349,12 @@ def _cell_data(a: analyze.Analysis, idx: int, cells: dict) -> str:
     Ключ — «единица|сегмент» в пределах уровня; сам уровень скрипт узнаёт по
     id блока, внутри которого лежит матрица: в одном файле тринадцать отчётов.
     """
+    # Статус передаётся даже при пустом словаре снижений: пустая витрина не
+    # доказывает, что клиентов со снижением нет.
+    meta_holder, meta_expr = veil.hide(_cell_meta(a), f"d-cell-meta-{idx}")
+    meta = (f'{meta_holder}<script>window.__CELL_META=window.__CELL_META||{{}};'
+            f'window.__CELL_META["lvl-{idx}"]={meta_expr};</script>')
     top = a.cell_top or {}
-    if not top:
-        return ""
     payload = {}
     for key in cells:
         cell = top.get(key)
@@ -2336,9 +2372,9 @@ def _cell_data(a: analyze.Analysis, idx: int, cells: dict) -> str:
                       _move_text(r.get("move"))] for r in cell["rows"]],
         }
     if not payload:
-        return ""
+        return meta
     holder, expr = veil.hide(payload, f"d-cells-{idx}")
-    return (f'{holder}<script>window.__CELLS=window.__CELLS||{{}};'
+    return (f'{meta}{holder}<script>window.__CELLS=window.__CELLS||{{}};'
             f'window.__CELLS["lvl-{idx}"]={expr};</script>')
 
 
@@ -2963,7 +2999,9 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
                 f'<span style="color:{"var(--bad)" if yoy < 0 else "var(--good)"}">'
                 f'{"−" if yoy < 0 else "+"}{C.fmt_num(abs(yoy))} чел</span>'
                 f' · снижение у {C.fmt_num(det.get("yoy_n_all", 0))} орг на '
-                f'−{C.fmt_num(abs(det.get("yoy_down_tot", 0)))}</h4>')
+                f'−{C.fmt_num(abs(det.get("yoy_down_tot", 0)))}</h4>'
+                + _orgs_source_note(SimpleNamespace(dates=d),
+                                    "tb" if unit == "ТБ" else "gosb", yoy=True))
     return (
         f'<dialog class="gd" id="gd-{uid}"><div class="gd-sheet">'
         f'<div class="gd-head"><div><h3 style="margin:0">{C.esc(c["gosb_name"])}</h3>'
@@ -4078,7 +4116,7 @@ def _cell_dialog() -> str:
         '<h3 style="margin:0" id="cd-title"></h3>'
         '<div class="gd-fc" id="cd-sub"></div></div>'
         '<div class="gd-head-actions">'
-        '<button type="button" class="gd-export" onclick="cellXls()" '
+        '<button type="button" class="gd-export" id="cd-export" onclick="cellXls()" '
         'title="Выгрузить список в Excel">Экспорт в Excel</button>'
         '<button type="button" class="gd-close" onclick="cellClose()" '
         'aria-label="Закрыть">×</button></div></div>'
@@ -4202,6 +4240,8 @@ function cellOpen(td){
   var lvl = td.closest('.lvl');
   var key = td.getAttribute('data-cell') || '';
   var cell = ((window.__CELLS || {})[lvl ? lvl.id : ''] || {})[key];
+  var meta = (window.__CELL_META || {})[lvl ? lvl.id : ''];
+  var unavailable = meta && !meta.available;
   var seg = key.split('|')[1] || '';
   var tr = td.closest('tr');
   var unit = (tr && tr.cells.length) ? tr.cells[0].textContent.trim() : '';
@@ -4209,6 +4249,7 @@ function cellOpen(td){
 
   document.getElementById('cd-title').textContent = unit + ' · ' + seg;
   var sub = 'Выполнение прогноза ' + pct;
+  if(meta && meta.available && meta.source_note) sub += ' · ' + meta.source_note;
   if(cell){
     sub += ' · за год просели ' + cellNum(cell.n) + ' орг на \\u2212'
         + cellNum(cell.fl) + ' чел';
@@ -4219,15 +4260,18 @@ function cellOpen(td){
   /* формулировки без согласования с числом: «1 крупнейших» в отчёте правления
      выглядело бы опечаткой, а склонять числительные в скрипте незачем */
   var head = document.getElementById('cd-h4');
-  head.textContent = rows.length
+  head.textContent = unavailable ? 'Детализация организаций недоступна' : rows.length
     ? ('Клиенты со снижением по получателям за год: ' + rows.length
        + (cell.n > rows.length ? ' из ' + cellNum(cell.n) : ''))
     : 'Клиенты со снижением по получателям за год';
 
   var host = document.getElementById('cd-rows');
-  if(!rows.length){
-    host.innerHTML = '<div class="gd-note">В этой ячейке организаций со снижением '
-      + 'по получателям за год нет.</div>';
+  var exportBtn = document.getElementById('cd-export');
+  if(exportBtn) exportBtn.disabled = !!unavailable || !rows.length;
+  if(unavailable || !rows.length){
+    host.innerHTML = '<div class="gd-note">' + (unavailable ? cellEsc(meta.reason) :
+      'В загруженном срезе этой ячейки не найдено организаций со снижением '
+      + 'по получателям за год.') + '</div>';
     window.__cdRows = null;
   } else {
     host.innerHTML = rows.map(function(r){

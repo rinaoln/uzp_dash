@@ -310,6 +310,15 @@ GROUP BY g.new_gosb_id, mm.end_dt, mm.seg_code
 # списке к работе, и в блоке годового тренда. Суммируем (а не берём max), потому что
 # так же обходится со слиянием ГОСБ и матрица метрик: два бывших отделения — это одна
 # клиентская связь с общей численностью.
+ORGS_LATEST = """
+SELECT level_name, max(report_dt) AS ref_orgs
+FROM {schema}.uzp_dwh_company_holding_metric
+WHERE org_type = 'inn' AND level_name IN ('gosb', 'tb')
+  AND report_dt <= :ref_closed
+GROUP BY level_name
+"""
+
+
 ORGS_ALL = """
 WITH gmap AS (""" + _GMAP + """)
 SELECT g.new_gosb_id, g.gosb_name, g.tb_id, c.org_id AS inn,
@@ -341,7 +350,7 @@ FROM {schema}.uzp_dwh_company_holding_metric c
 JOIN gmap g ON g.old_gosb_id=c.level_id
 LEFT JOIN {schema}.uzp_dim_company dc ON dc.inn=c.org_id
 WHERE c.level_name = 'gosb'
-  AND c.report_dt = :ref_closed
+  AND c.report_dt = :ref_orgs
   AND c.org_type = 'inn'   -- только организации по ИНН (не holding/head_holding)
 GROUP BY g.new_gosb_id, g.gosb_name, g.tb_id, c.org_id
 """
@@ -416,7 +425,7 @@ SELECT c.level_id AS tb_id, c.org_id AS inn,
        COALESCE(c.current_fl_qty, 0)  AS current_fl_qty
 FROM {schema}.uzp_dwh_company_holding_metric c
 WHERE c.level_name = 'tb'
-  AND c.report_dt = :ref_closed
+  AND c.report_dt = :ref_orgs_tb
   AND c.org_type = 'inn'
 """
 

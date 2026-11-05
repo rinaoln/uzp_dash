@@ -12,14 +12,6 @@
  var archive=nav.querySelector('.pd-nav-bottom>div');
  archive.textContent='Срез данных';
  var closed=document.createElement('small');archive.append(closed);
- document.querySelectorAll('.lvl').forEach(function(l){
-  var health=l.querySelector('.pd-health');
-  if(health&&!health.querySelector('.hx-wrap')){
-   [':scope > .hx-wrap',':scope > .chn-wrap'].forEach(function(selector){
-    var block=l.querySelector(selector);if(block)health.append(block.cloneNode(true));
-   });
-  }
- });
  var toolbar=document.querySelector('.top-switchers');
  if(toolbar){
   var originalFields=Array.from(toolbar.querySelectorAll(':scope > .ts-item'));

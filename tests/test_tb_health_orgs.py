@@ -3,10 +3,13 @@ from datetime import date
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import json
+import re
 
 import pandas as pd
 
 from uzp_dash.dashboards.tb_health import analyze, bank, view
+from uzp_dash.render import veil
 
 
 def _row(**changes):
@@ -156,6 +159,52 @@ class StructureRenderingTests(unittest.TestCase):
                 self.assertIn("Сколько за получателями людей", html)
                 self.assertIn("по организациям за выбранный месяц не рассчитан", html)
                 self.assertNotIn("Портфель собран из", html)
+
+
+class MatrixAvailabilityTests(unittest.TestCase):
+    def _analysis(self, detail, cell_top=None):
+        return SimpleNamespace(detail=detail, cell_top=cell_top or {},
+                               dates={"closed_label": "10.2026"})
+
+    def _payload(self, html, slot):
+        holder = re.search(r'<script[^>]*id="' + re.escape(slot) + r'">(.*?)</script>',
+                           html, re.S)
+        key = int(re.search(r'__vd\("' + re.escape(slot) + r'",(\d+)\)', html)[1])
+        return json.loads(veil._shift(holder[1], -key))
+
+    def test_empty_source_is_unavailable_and_keeps_reason(self):
+        a = self._analysis(pd.DataFrame(columns=["fl_yoy"]))
+        meta = view._cell_meta(a)
+        self.assertFalse(meta["available"])
+        self.assertIn("10.2026", meta["reason"])
+        self.assertIn("Определить клиентов со снижением", meta["reason"])
+
+    def test_loaded_source_without_declines_is_available(self):
+        a = self._analysis(pd.DataFrame([{"fl_yoy": 5}]))
+        meta = view._cell_meta(a)
+        self.assertTrue(meta["available"])
+        self.assertEqual(meta["reason"], "")
+
+    def test_missing_year_comparison_is_unavailable(self):
+        self.assertFalse(view._cell_meta(self._analysis(pd.DataFrame([{"inn": 1001}])))["available"])
+
+    def test_status_is_serialized_even_when_no_declines_exist(self):
+        for detail, expected in ((pd.DataFrame(), False),
+                                 (pd.DataFrame([{"fl_yoy": 5}]), True)):
+            with self.subTest(available=expected):
+                html = view._cell_data(self._analysis(detail), 0, {(18, "СКМ"): (.89, 10)})
+                self.assertIn('window.__CELL_META["lvl-0"]', html)
+                self.assertEqual(self._payload(html, "d-cell-meta-0")["available"], expected)
+
+    def test_loaded_declines_keep_existing_cell_payload(self):
+        cell = {"n": 1, "fl": 4, "top_fl": 4,
+                "rows": [dict(name="Тестовая организация", yoy=-4, cur=6, was=10,
+                              emp="", inn=1001)]}
+        a = self._analysis(pd.DataFrame([{"fl_yoy": -4}]), {(18, "СКМ"): cell})
+        html = view._cell_data(a, 0, {(18, "СКМ"): (.89, 10)})
+        payload = self._payload(html, "d-cells-0")["18|СКМ"]
+        self.assertEqual(payload["rows"][0][:4], ["Тестовая организация", -4, 6, 10])
+        self.assertEqual(payload["n"], 1)
 
 
 if __name__ == "__main__":

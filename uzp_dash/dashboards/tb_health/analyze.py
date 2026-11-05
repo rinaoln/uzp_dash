@@ -173,7 +173,7 @@ def prepare(b: Bank, tb_id: int, tb_short: str, tb_full: str) -> Analysis:
     # отчёт выглядит целым, а пустым остаётся один раздел, — и причину надо
     # назвать, иначе раздел сваливает её на «нет кандидатов с эффектом».
     ref_stats = {"n_detail": int(len(detail)), "n_ref": int(len(orgs))}
-    progress.done(f"{tb_short}: организации за {d['ref_closed']} — "
+    progress.done(f"{tb_short}: организации за {d.get('ref_orgs', d['ref_closed'])} — "
                   f"{ref_stats['n_detail']} пар после загрузки и привязки к ТБ, "
                   f"{ref_stats['n_ref']} в эталонной базе")
     if ref_stats["n_detail"] and not ref_stats["n_ref"]:
@@ -1779,6 +1779,7 @@ def _facts(r) -> dict:
     """
     return {
         "potential": int(getattr(r, "emp_potential_qty", 0) or 0),
+        "orgs_asof": str(getattr(r, "orgs_asof", "") or ""),
         "outflow_fl": int(getattr(r, "fl_outflow_qty", 0) or 0),
         "outflow_fot_mln": float(getattr(r, "fot_outflow_mln", 0) or 0),
         "avg_salary": float(getattr(r, "avg_salary", 0) or 0),
