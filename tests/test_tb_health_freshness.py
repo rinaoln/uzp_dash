@@ -1,8 +1,11 @@
 """Поздняя поставка организаций не сдвигает месяц витринного прогноза."""
 from datetime import date
-from types import SimpleNamespace
+from types import CodeType, SimpleNamespace
 import sqlite3
 import unittest
+import builtins
+import dis
+import inspect
 from unittest.mock import patch
 
 import pandas as pd
@@ -115,7 +118,9 @@ class LatestOrganizationSourceTests(unittest.TestCase):
         b.trend_seg, b.fagg, b.fmonths = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         b.promises, b.flow = pd.DataFrame(), pd.DataFrame()
         b.tb_of, b.seg_by_inn = {1801: 18}, {1001: "КСБ"}
-        b.orgs_fc["new_gosb_id"] = pd.Series(dtype="int64")
+        b.orgs_fc = pd.DataFrame([dict(
+            tb_id=18, new_gosb_id=1801, inn=1001, out_qty=5., ret_qty=1., out_kept=4.,
+            out_months=["10.2026"], pipe_np=0., pipe_np_raw=0., pipe_fact_mtd=0.)])
         tb = analyze.prepare(b, 18, "ББ", "Тестовый банк")
         analyze.finish(SimpleNamespace(params={"llm_max_calls": 0}), b, tb, pd.DataFrame())
         sb = analyze.build_sb(b, [tb])
@@ -124,11 +129,15 @@ class LatestOrganizationSourceTests(unittest.TestCase):
         self.assertIn((18, "КСБ"), sb.cell_top)
         for idx, a in enumerate((sb, tb)):
             with self.subTest(level=a.level):
+                self.assertTrue(a.gosb_detail)
                 html = view._level_body(a, {}, idx)
                 self.assertIn("Прогноз на 11.2026", html)
                 self.assertIn("30.09.2026", html)
                 self.assertLess(html.index('class="pd-health"'), html.index('class="pd-metrics"'))
                 self.assertEqual(a.verdict["rcp"]["fact"], 115)
+                self.assertIn(f'id="gd-{idx}-{18 if idx == 0 else 1801}"', html)
+                expected = "10.2026 к 10.2025" if idx == 0 else "09.2026 к 09.2025"
+                self.assertIn(expected, html)
 
 
 class SourceDateRenderingTests(unittest.TestCase):
@@ -165,6 +174,23 @@ class SourceDateRenderingTests(unittest.TestCase):
         self.assertNotIn('<details class="pd-health"', html)
         self.assertIn("30.09.2026", html)
         self.assertIn("Прогноз на 11.2026", html)
+
+    def test_view_functions_have_no_undefined_global_names(self):
+        known = set(vars(view)) | set(vars(builtins))
+        errors = []
+
+        def check(code):
+            for instruction in dis.get_instructions(code):
+                if instruction.opname == "LOAD_GLOBAL" and instruction.argval not in known:
+                    errors.append(f'{code.co_name}: {instruction.argval}')
+            for child in code.co_consts:
+                if isinstance(child, CodeType):
+                    check(child)
+
+        for value in vars(view).values():
+            if inspect.isfunction(value) and value.__module__ == view.__name__:
+                check(value.__code__)
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":

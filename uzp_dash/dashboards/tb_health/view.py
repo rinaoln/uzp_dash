@@ -3001,7 +3001,7 @@ def _gosb_dialog(c: dict, det: dict, d: dict, uid: str, unit_label: str = "ГО�
                 f' · снижение у {C.fmt_num(det.get("yoy_n_all", 0))} орг на '
                 f'−{C.fmt_num(abs(det.get("yoy_down_tot", 0)))}</h4>'
                 + _orgs_source_note(SimpleNamespace(dates=d),
-                                    "tb" if unit == "ТБ" else "gosb", yoy=True))
+                                    "tb" if unit_label == "ТБ" else "gosb", yoy=True))
     return (
         f'<dialog class="gd" id="gd-{uid}"><div class="gd-sheet">'
         f'<div class="gd-head"><div><h3 style="margin:0">{C.esc(c["gosb_name"])}</h3>'
