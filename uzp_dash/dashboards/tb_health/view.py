@@ -2103,7 +2103,8 @@ def _people_block(st: dict) -> str:
               'остаётся за этой границей — пенсии, пособия, прочие выплаты. '
               'Считаются зачисления и суммы, а не люди: одно и то же лицо '
               'встречается в нескольких видах.</div>')
-    return "".join(out)
+    # Одна метка месяца без распределений ещё не даёт содержимого раздела.
+    return "".join(out) if len(out) > 1 else ""
 
 
 def _structure_section(a: analyze.Analysis, idx: int = 0) -> str:
@@ -2120,12 +2121,16 @@ def _structure_section(a: analyze.Analysis, idx: int = 0) -> str:
     список организаций в нём был бы повтором соседнего раздела.
     """
     st = a.structure or {}
-    if not st.get("segs") and not st.get("inds") and not st.get("people"):
+    people = _people_block(st)
+    if not st.get("segs") and not st.get("inds") and not people:
         return ""
     unit = "организаций"
     not_ours = float(st.get("not_ours") or 0)
     emp = float(st.get("emp") or 0)
     known = float(st.get("ind_known") or 0)
+    # Разрезы по физлицам приходят из ведомостей независимо от витрины
+    # организаций. При наличии только people ключей n_org/fl здесь нет.
+    # Сохраняем доступные разрезы, не подменяя отсутствующие итоги нулями.
     lead = (
         f'<p class="sub" style="font-size:15px;margin:-4px 0 12px">'
         f'Портфель собран из <b>{C.fmt_num(st["n_org"])}</b> '
@@ -2136,7 +2141,10 @@ def _structure_section(a: analyze.Analysis, idx: int = 0) -> str:
            f'нас. Это не план продаж: сколько из них витрина считает '
            f'достижимыми, сказано в разделе «Потенциал организаций».'
            if emp and not_ours else "")
-        + '</p>')
+        + '</p>' if st.get("n_org") is not None and st.get("fl") is not None else
+        '<p class="gd-note">Состав портфеля по организациям за выбранный месяц '
+        'не рассчитан. Ниже показаны доступные разрезы по физлицам из '
+        'ведомостей.</p>')
 
     inds = _ind_block(st, idx)
 
@@ -2191,7 +2199,7 @@ def _structure_section(a: analyze.Analysis, idx: int = 0) -> str:
     return C.section(
         "Структура портфеля",
         C.card(f'<div class="no-xls">'
-               f'{lead + inds + depth + segs + _people_block(st) + help_html}'
+               f'{lead + inds + depth + segs + people + help_html}'
                f'</div>'),
         eyebrow="Из чего состоит портфель",
         desc="Чем занимаются наши клиенты, насколько глубоко мы в них сидим и "

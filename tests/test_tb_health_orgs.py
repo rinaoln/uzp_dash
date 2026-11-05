@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from uzp_dash.dashboards.tb_health import analyze, bank
+from uzp_dash.dashboards.tb_health import analyze, bank, view
 
 
 def _row(**changes):
@@ -82,6 +82,80 @@ class OrganizationSliceTests(unittest.TestCase):
         self.assertEqual(candidates["impact_fl"].tolist(), [10, 4])
         self.assertEqual(candidates["lever"].tolist(), ["Привлечь", "Вернуть"])
         self.assertEqual(candidates["impact_fot_mln"].tolist(), [.08, .2])
+
+
+class StructureRenderingTests(unittest.TestCase):
+    def _people_structure(self, orgs=None):
+        flow = pd.DataFrame()
+        flow.attrs["m_cur"] = "2026-10"
+        flow.attrs["people"] = {"multi": pd.DataFrame([
+            dict(tb_id=18, one_org=80, two_org=15, many_org=5)])}
+        st = analyze._structure(orgs)
+        st["people"] = analyze._people(SimpleNamespace(flow=flow), 18)
+        return st
+
+    def test_people_only_structure_renders_without_organization_totals(self):
+        st = self._people_structure(pd.DataFrame())
+        self.assertNotIn("n_org", st)
+        html = view._structure_section(SimpleNamespace(structure=st))
+        self.assertIn("Сколько за получателями людей", html)
+        self.assertIn("Зарплату получают <b>100</b>", html)
+        self.assertIn("по организациям за выбранный месяц не рассчитан", html)
+        self.assertNotIn("Портфель собран из", html)
+
+    def test_organizations_without_recipients_do_not_become_zero_totals(self):
+        orgs = pd.DataFrame([dict(inn=1001, current_fl_qty=0)])
+        html = view._structure_section(SimpleNamespace(structure=self._people_structure(orgs)))
+        self.assertIn("Сколько за получателями людей", html)
+        self.assertNotIn("Портфель собран из", html)
+
+    def test_existing_organization_totals_are_preserved(self):
+        orgs = pd.DataFrame([dict(inn=1001, current_fl_qty=12, total_emp_qty=20,
+                                 current_fot_amt=600000, seg_name="КСБ")])
+        html = view._structure_section(SimpleNamespace(structure=self._people_structure(orgs)))
+        self.assertIn("Портфель собран из <b>1</b>", html)
+        self.assertIn("<b>12</b> получателей", html)
+        self.assertIn("Сколько за получателями людей", html)
+
+    def test_empty_structure_and_month_metadata_only_hide_section(self):
+        for st in ({}, {"people": {"month": "2026-10"}}):
+            with self.subTest(structure=st):
+                self.assertEqual(view._structure_section(SimpleNamespace(structure=st)), "")
+
+    def test_full_tb_and_sb_html_with_empty_orgs_and_available_people(self):
+        cols = list(_row()) + ["current_fl_qty", "total_emp_qty", "current_fot_amt",
+                               "industry_name", "company_name"]
+        b = _bank(pd.DataFrame(columns=cols))
+        b.dates.update(out_label="10.2026, 09.2026, 08.2026", label="11.2026",
+                       closed_label="10.2026", ref_funnel=b.dates["ref_cur"])
+        units = []
+        for level, uid in (("gosb", 1801), ("tb", 18)):
+            for dt in (b.dates["ref_cur"], b.dates["ref_closed"]):
+                units.append(dict(level_name=level, tb_id=18, unit_id=uid,
+                                  unit_name="Тестовое подразделение", end_dt=dt,
+                                  seg_id=20, plan_amt=120, fact_amt=100, pred_amt=115))
+        b.unit_seg = pd.DataFrame(units)
+        b.unit_tot = b.unit_seg.copy()
+        b.trend_seg = pd.DataFrame()
+        b.orgs_tb = pd.DataFrame(columns=["tb_id", "inn"])
+        b.orgs_fc["new_gosb_id"] = pd.Series(dtype="int64")
+        b.seg_by_inn, b.tb_of = {}, {1801: 18}
+        b.fagg, b.fmonths, b.promises = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        b.flow = pd.DataFrame()
+        b.flow.attrs["people"] = {"multi": pd.DataFrame([
+            dict(tb_id=18, one_org=80, two_org=15, many_org=5)])}
+        b.flow.attrs["m_cur"] = "2026-10"
+
+        # Полная цепочка анализа и HTML, без подмены функций и сетевых вызовов.
+        tb = analyze.prepare(b, 18, "ББ", "Тестовый банк")
+        analyze.finish(SimpleNamespace(params={"llm_max_calls": 0}), b, tb, pd.DataFrame())
+        sb = analyze.build_sb(b, [tb])
+        for idx, a in enumerate((sb, tb)):
+            with self.subTest(level=a.level):
+                html = view._level_body(a, {}, idx)
+                self.assertIn("Сколько за получателями людей", html)
+                self.assertIn("по организациям за выбранный месяц не рассчитан", html)
+                self.assertNotIn("Портфель собран из", html)
 
 
 if __name__ == "__main__":
