@@ -1,0 +1,45 @@
+
+(function(){
+ 'use strict';
+ if(!document.querySelector('.pd-overview') || typeof window.hubHome!=='function')return;
+ var labels={home:'Обзор портфеля',matrix:'Выполнение плана',gosb:'Подразделения',orgs:'Потенциал организаций',outflow:'Отток',flow:'Переток получателей',struct:'Структура портфеля',trend:'Динамика портфеля'};
+ var icons={home:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',matrix:'<path d="M4 20V10m8 10V4m8 16v-7"/>',gosb:'<path d="M3 21h18M5 21V8h14v13M9 8V3h6v5M9 12h1m4 0h1m-6 4h1m4 0h1"/>',orgs:'<path d="M4 18l6-6 4 3 6-10M14 5h6v6"/>',outflow:'<path d="M10 4H4v16h6m1-8h10m-4-4 4 4-4 4"/>',flow:'<path d="M3 8h18m-4-4 4 4-4 4M21 17H3m4-4-4 4 4 4"/>',struct:'<path d="M12 3v9h9A9 9 0 0 0 12 3Z"/><path d="M8 4a9 9 0 1 0 12 12"/>',trend:'<path d="M3 3v18h18M6 15l5-6 4 3 6-8"/>'};
+ function svg(key){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'+icons[key]+'</svg>';}
+ function active(){return document.querySelector('.lvl:not([hidden])');}
+ function go(part){var l=active();if(!l)return;if(part==='home'){window.hubHome();return;}var tile=l.querySelector('.hub-tile[data-sec="sec-'+l.id.slice(4)+'-'+part+'"]');if(tile)tile.click();}
+ var nav=document.createElement('aside');nav.className='pd-nav';nav.innerHTML='<div class="pd-brand"><span class="pd-brand-symbol" aria-hidden="true">'+svg('trend')+'</span><div>УЗП<small>Аналитика портфеля</small></div></div><div class="pd-nav-label">Рабочее пространство</div><nav aria-label="Разделы отчёта">'+Object.keys(labels).map(function(k){return '<button type="button" data-pd-nav="'+k+'">'+svg(k)+'<span>'+labels[k]+'</span></button>';}).join('')+'</nav><div class="pd-nav-bottom"><span class="pd-archive-dot"></span><div>Срез данных</div></div>';
+ document.body.prepend(nav);
+ var archive=nav.querySelector('.pd-nav-bottom>div');
+ archive.textContent='Срез данных';
+ var closed=document.createElement('small');archive.append(closed);
+ document.querySelectorAll('.lvl').forEach(function(l){
+  var health=l.querySelector('.pd-health');
+  if(health&&!health.querySelector('.hx-wrap')){
+   [':scope > .hx-wrap',':scope > .chn-wrap'].forEach(function(selector){
+    var block=l.querySelector(selector);if(block)health.append(block.cloneNode(true));
+   });
+  }
+ });
+ var toolbar=document.querySelector('.top-switchers');
+ if(toolbar){
+  var originalFields=Array.from(toolbar.querySelectorAll(':scope > .ts-item'));
+  if(originalFields[0])originalFields[0].hidden=true;
+  var field=document.createElement('label');field.className='pd-bank-field';field.innerHTML='<span>Территориальный банк</span>';
+  var select=document.createElement('select');select.id='pd-bank';select.setAttribute('aria-label','Территориальный банк');
+  document.querySelectorAll('.lvl').forEach(function(l){var o=document.createElement('option');o.value=l.id.slice(4);o.textContent=l.querySelector('.lvl-name').textContent;select.append(o);});
+  select.addEventListener('change',function(){var t=document.querySelector('.lvl-tab[data-lvl="'+select.value+'"]');if(t)t.click();});field.append(select);toolbar.prepend(field);
+  if(originalFields[1]){var details=document.createElement('details');details.className='pd-search-gosb';details.innerHTML='<summary>Найти ГОСБ</summary>';details.append(originalFields[1]);toolbar.append(details);}
+  var pdf=document.createElement('button');pdf.type='button';pdf.className='pd-pdf';pdf.textContent='Скачать PDF';pdf.onclick=function(){var l=active();if(l)window.exportLevelPdf(Number(l.id.slice(4)));};toolbar.append(pdf);
+ }
+ document.addEventListener('click',function(ev){
+  if(ev.target.closest('[data-pd-management]')){var l=active();var dialog=l&&document.getElementById('mgmt-'+l.id);if(dialog&&!dialog.open)dialog.showModal();return;}
+  if(ev.target.closest('[data-pd-network]')){if(typeof window.tbDynOpen==='function')window.tbDynOpen();return;}
+  var n=ev.target.closest('[data-pd-nav]');if(n){go(n.dataset.pdNav);return;}
+  var s=ev.target.closest('[data-pd-section]');if(s){var target=document.getElementById(s.dataset.pdSection);if(target){var l=target.closest('.lvl');var tile=l.querySelector('.hub-tile[data-sec="'+target.id+'"]');if(tile)tile.click();}return;}
+  var d=ev.target.closest('[data-pd-dialog]');if(d&&typeof window.gdOpen==='function')window.gdOpen(d.dataset.pdDialog);
+ });
+ document.querySelectorAll('[data-pd-point]').forEach(function(p){function show(){p.closest('.pd-trend').querySelector('.pd-chart-readout').textContent=p.dataset.pdPoint;}p.addEventListener('mouseenter',show);p.addEventListener('focus',show);});
+ function sync(){var l=active();if(!l)return;if(select)select.value=l.id.slice(4);var sec=l.querySelector(':scope > section.hub-on');var part=l.dataset.hubView==='sec'&&sec?sec.id.split('-').pop():'home';nav.querySelectorAll('[data-pd-nav]').forEach(function(b){b.disabled=b.dataset.pdNav!=='home'&&!l.querySelector('.hub-tile[data-sec="sec-'+l.id.slice(4)+'-'+b.dataset.pdNav+'"]');if(b.dataset.pdNav===part)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});var overview=l.querySelector('.pd-overview');closed.textContent=overview&&overview.dataset.closed?'Закрытый месяц: '+overview.dataset.closed:'';}
+ var observer=new MutationObserver(sync);document.querySelectorAll('.lvl').forEach(function(l){observer.observe(l,{attributes:true,attributeFilter:['hidden','data-hub-view']});});sync();document.body.classList.add('pine-design');document.documentElement.classList.remove('js-boot');
+})();
+

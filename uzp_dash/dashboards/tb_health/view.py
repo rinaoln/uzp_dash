@@ -19,7 +19,7 @@ from ...render import components as C
 from ...render import page
 from ...render import veil
 from ... import progress
-from . import analyze, bank, prompts, queries, segments, snapshot
+from . import analyze, bank, prompts, queries, segments, snapshot, visual
 
 SEG_ORDER = segments.ORDER   # короткие названия сегментов (КСБ, РГС, …)
 # Ключ варианта «без фильтра» в разделе «Отток». Звёздочка, а не пустая
@@ -262,7 +262,8 @@ def build(ctx: Context) -> str:
               + _IND_JS + _SEGM_JS + _GD_JS + _LVL_JS + _OF_JS + _CELL_JS + _OFD_JS
               + _MX_JS + _TBDYN_JS + _FLOW_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
-        css=_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css"),
+        css=(_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css")
+             + _asset("pine.css")),
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
         # оборачивает gdOpen, поэтому идёт после всех остальных скриптов
         tail=(f'<script>{_asset("ux.js.txt")}</script>\n'
@@ -282,7 +283,8 @@ def build(ctx: Context) -> str:
               f'{_HELP_STEPS_JS}\n'
               # прямой потомок <body> — на него ссылается печатный CSS в
               # ux-fix.css (скрывает всё, кроме этого блока, во время печати)
-              f'<div id="print-root" aria-hidden="true"></div>'),
+              f'<div id="print-root" aria-hidden="true"></div>'
+              f'<script>{_asset("pine.js.txt")}</script>'),
     )
 
 
@@ -352,7 +354,9 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     secs = [(key, html) for key, html in secs if html]
     titles = {k: _sec_title(h) for k, h in secs}
     return (
-        _lvl_head(a, idx)
+        visual.overview(a, idx, titles, _units_roll(a), _concentration(a),
+                        _asks(a, _concentration(a), idx, titles))
+        + _lvl_head(a, idx)
         + _hero(a, idx, titles)
         # Легенда цвета стоит там, где цвет впервые работает, — сразу под
         # плашкой прогноза и сводкой. Внизу страницы её читали уже после того,
