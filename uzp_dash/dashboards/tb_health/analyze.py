@@ -163,12 +163,19 @@ def prepare(b: Bank, tb_id: int, tb_short: str, tb_full: str) -> Analysis:
     # Полный срез (`detail`) нужен детализации прогноза: в ожидаемый отток входят и
     # организации вне базы, и без них блок не сойдётся с итогом единицы.
     detail = b.orgs[b.orgs["tb_id"] == tb_id]
-    orgs = detail[detail["in_ref"]].reset_index(drop=True)
+    # Пустой SQL-срез может принести in_ref с dtype=object. В df[mask] такая
+    # пустая Series читается как список КОЛОНОК и удаляет всю схему, после чего
+    # _candidates падает с KeyError('emp_potential_qty'). Явно выбираем строки.
+    ref_mask = detail["in_ref"].fillna(False).astype(bool)
+    orgs = detail.loc[ref_mask].reset_index(drop=True)
     # Фильтр эталонной базы режет ТОЛЬКО потенциал: матрица, отток и структура
     # считаются по полному срезу. Поэтому, если в базе не нашлась ни одна пара,
     # отчёт выглядит целым, а пустым остаётся один раздел, — и причину надо
     # назвать, иначе раздел сваливает её на «нет кандидатов с эффектом».
     ref_stats = {"n_detail": int(len(detail)), "n_ref": int(len(orgs))}
+    progress.done(f"{tb_short}: организации за {d['ref_closed']} — "
+                  f"{ref_stats['n_detail']} пар после загрузки и привязки к ТБ, "
+                  f"{ref_stats['n_ref']} в эталонной базе")
     if ref_stats["n_detail"] and not ref_stats["n_ref"]:
         progress.warn(f"{tb_short}: ни одна из {ref_stats['n_detail']} пар (ГОСБ, "
                       f"организация) витрины не нашлась в эталонной базе "

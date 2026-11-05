@@ -887,9 +887,13 @@ def _prepare_orgs(orgs: pd.DataFrame, apparat: set, tb_of: dict) -> pd.DataFrame
     принадлежать ровно одному ТБ, иначе его организации попали бы в разбор двух ТБ
     сразу и свод по банку задвоился бы.
     """
-    if orgs.empty:
-        return orgs
-    o = orgs.dropna(subset=["new_gosb_id"]).copy()
+    # Нормализуем флаг и у пустого результата SQL: у него булева колонка может
+    # иметь dtype=object, а последующий df[df.in_ref] потеряет все колонки.
+    o = orgs.copy()
+    o["in_ref"] = o["in_ref"].fillna(False).astype(bool)
+    if o.empty:
+        return o
+    o = o.dropna(subset=["new_gosb_id"])
     o["new_gosb_id"] = o["new_gosb_id"].astype("int64")
     o["inn"] = o["inn"].astype("int64")
     o["tb_id"] = [tb_of.get(int(g)) for g in o["new_gosb_id"]]
@@ -929,7 +933,6 @@ def _prepare_orgs(orgs: pd.DataFrame, apparat: set, tb_of: dict) -> pd.DataFrame
                       f"слова без признаков вывески, одно похоже на фамилию. Под "
                       f"него попадают и названия по фамилии владельца вроде "
                       f"«Киселева Лимитед» — там тоже встанет номер организации")
-    o["in_ref"] = o["in_ref"].fillna(False).astype(bool)
     return o
 
 
