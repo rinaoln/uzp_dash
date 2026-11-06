@@ -1,0 +1,53 @@
+/* Экранная типографика: доступные в Linux системные шрифты и крупнее текст.
+   Печатный размер сохранён отдельно, чтобы таблицы помещались на лист. */
+@media screen {
+  body.pine-design {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+      "Noto Sans", "DejaVu Sans", "Liberation Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+  }
+  .pine-design table { font-size: 14px; }
+  .pine-design th { font-size: 13px; }
+  .pine-design :is(.rep-meta, .badge, .hub-home, .source-note, .footer),
+  .pine-design :is(.pd-nav button, .pd-bank-field, .pd-bank-field select,
+    .pd-search-gosb summary, .pd-pdf, .pd-metric-top h3, .pd-bank-row,
+    .pd-bank-row>b, .pd-attention strong, .pd-loss h3, .pd-task,
+    .pd-metric-details dt, .pd-metric-details dd, .pd-forecast-label) {
+    font-size: 13px;
+  }
+  .pine-design :is(.pd-brand small, .pd-nav-label, .pd-nav-bottom,
+    .pd-nav-bottom small, .pd-context, .pd-status, .pd-metric-top .pd-status,
+    .pd-number small, .pd-metric-foot, .pd-attention p, .pd-trend-summary>span,
+    .pd-chart-readout, .pd-trend-foot, .pd-ranking-note, .pd-loss-number span,
+    .pd-loss p, .pd-actions .pd-panel-title>span, .rep-foot-main,
+    .rep-foot-sub, .pd-metric-details dd small, .pd-execution dt>small,
+    .pd-source-caption) { font-size: 12px; }
+  .pine-design .pd-link { font-family: inherit; font-size: 13px; white-space: normal; }
+  .pine-design .pd-trend-foot b { font-size: 14px; }
+  .pine-design .pd-bank-row {
+    grid-template-columns: minmax(65px, .8fr) minmax(40px, 2fr) 52px;
+    min-height: 30px;
+  }
+  .pine-design .pd-chart-grid text, .pine-design .pd-chart-labels text {
+    font-family: inherit;
+    font-size: 11px;
+  }
+  .pine-design .pd-health :is(.hx-l, .hx-names, .chn-lead, .chn-t) {
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .pine-design .pd-health :is(.hx-s, .chn-s, .hx-go, .chn-go,
+    .hx-how>summary, .hx-verdict) { font-size: 12px; line-height: 1.6; }
+  .pine-design .hlp-title { font-size: 24px; }
+  .pine-design .hlp-h { font-size: 16px; }
+  .pine-design :is(.hlp-card p, .hlp-li, .hlp-steps, .hlp-tip, .hlp-sub) {
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  .pine-design :is(.hlp-chip, .hlp-count, .hlp-never-note, .hlp-foot-note) {
+    font-size: 13px;
+  }
+  .pine-design .hlp-foot { flex-wrap: wrap; }
+  .pine-design .hlp-card p+p { margin-top: 10px; }
+}

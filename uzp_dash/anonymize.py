@@ -81,6 +81,21 @@ class Aliases:
             text = pattern.sub(repl, text)
         return text
 
+    def _normalize_bank_tokens(self, text: str) -> str:
+        """LLM иногда разворачивает «ТБ-06» в «территориальном банке 06».
+
+        Номер всё ещё относится к словарю одного вызова. Нормализуем только
+        явное обозначение банка, не отдельные числа и не показатели/даты.
+        """
+        if "ТБ" not in self._counters:
+            return text
+        pattern = re.compile(
+            rf"(?<!\w)территориальн(?:ый|ого|ому|ым|ом|ые|ых|ыми)\s+"
+            rf"банк(?:ами|ах|ов|ом|ам|а|у|е|и)?{_SEP}(?:№\s*)?"
+            r"(0*\d{1,2})(?!\d|[.,]\d|\s*[%₽]|\s*(?:чел|организац|тыс|млн|руб))",
+            re.IGNORECASE)
+        return pattern.sub(lambda m: f'ТБ-{int(m[1]):02d}', text)
+
     def restore(self, text: str) -> str:
         """Вернуть настоящие имена в текст ответа LLM.
 
@@ -95,6 +110,7 @@ class Aliases:
         if not text:
             return text
         if self._by_token:
+            text = self._normalize_bank_tokens(text)
             text = self._expand_lists(text)
             # от длинных номеров к коротким: иначе «ГОСБ-1» съест начало «ГОСБ-12»
             for token in sorted(self._by_token, key=len, reverse=True):
