@@ -1,0 +1,37 @@
+/* Отток: общий масштаб, состав, возврат и адресная работа. */
+.oa-total,.oa-return-head{display:flex;align-items:center;justify-content:space-between;gap:24px}
+.oa-overview h3,.oa-return h3,.oa-concentration h3,.oa-tasks h3{margin:0 0 8px;font-size:20px;line-height:1.35}
+.oa-number{font-size:clamp(36px,4vw,56px);line-height:1.2;font-weight:650;letter-spacing:-1px;font-variant-numeric:tabular-nums}
+.oa-number small{font-size:16px;font-weight:400;letter-spacing:0;color:var(--text-2)}
+.oa-yoy{display:flex;flex-direction:column;gap:7px;font-size:14px;line-height:1.6}
+.oa-yoy>span,.oa-note,.oa-muted{color:var(--text-2)}
+.oa-yoy strong{font-size:18px;font-weight:600}
+.oa-note{font-size:13px;line-height:1.65;max-width:100ch;margin:12px 0}
+.oa-split-bar{height:9px;border-radius:4px;background:#c5a360;overflow:hidden;margin:22px 0 16px}
+.oa-split-bar i{display:block;height:100%;background:#33765a}
+.oa-split{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.oa-split>div+div{border-left:1px solid var(--separator);padding-left:24px}
+.oa-split h4{font-size:15px;font-weight:500;margin:0 0 7px}
+.oa-split b{font-size:24px;font-variant-numeric:tabular-nums;font-weight:600}
+.oa-split b small{font-size:13px;font-weight:400;color:var(--text-2)}
+.oa-split p{font-size:13px;margin:7px 0}
+.oa-return{border-left:3px solid #33765a}
+.oa-state{padding:6px 10px;background:var(--elevated);border-radius:6px;font-size:13px;line-height:1.5}
+.oa-return-metrics,.oa-task-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px;margin:20px 0}
+.oa-return-metrics>div,.oa-task-metrics>div{display:flex;flex-direction:column;gap:7px;min-width:0}
+.oa-return-metrics span,.oa-task-metrics span{font-size:13px;line-height:1.5;color:var(--text-2)}
+.oa-return-metrics b,.oa-task-metrics b{font-size:25px;line-height:1.3;font-weight:600;font-variant-numeric:tabular-nums}
+.oa-return-metrics small,.oa-task-metrics small{font-size:12px;line-height:1.6;color:var(--text-2)}
+.oa-progress{height:10px;background:#e2eae4;border-radius:5px;overflow:hidden}
+.oa-progress i{display:block;height:100%;background:#33765a}
+.oa-lead{font-size:16px;line-height:1.7;max-width:90ch;margin:12px 0}
+.oa-cell-note{display:block;margin-top:5px;color:var(--text-2);font-size:12px;line-height:1.5}
+.oa-cases{margin-top:22px}.oa-cases>summary{cursor:pointer;font-size:16px;font-weight:600;line-height:1.5}
+.oa-evidence>summary{cursor:pointer;color:var(--accent);font-size:12px;margin-top:6px}
+.oa-evidence p{font-size:13px;line-height:1.6;max-width:50ch;margin:7px 0}
+.oa-concentration td:last-child{min-width:230px;max-width:400px;white-space:normal}
+.oa-concentration>.tbl-scroll{max-height:460px;overflow:auto}
+.oa-concentration>.tbl-scroll th{position:sticky;top:0;z-index:1}
+@media(max-width:1000px){.oa-return-metrics,.oa-task-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:650px){.oa-total,.oa-return-head{align-items:flex-start;flex-direction:column;gap:14px}.oa-split{grid-template-columns:1fr;gap:14px}.oa-split>div+div{border-left:0;border-top:1px solid var(--separator);padding:14px 0 0}.oa-split b small{display:block;margin-top:4px}.oa-return-metrics,.oa-task-metrics{gap:20px 12px}.oa-yoy strong{font-size:16px}}
+@media print{.oa-cases{display:block}.oa-total{break-inside:avoid}.oa-number{font-size:32px}.oa-return-metrics b,.oa-task-metrics b{font-size:18px}.oa-note{font-size:11px}.oa-evidence>summary{display:none}.oa-evidence p{display:block}.oa-concentration>.tbl-scroll{max-height:none;overflow:visible}.oa-concentration>.tbl-scroll th{position:static}}

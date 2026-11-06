@@ -636,6 +636,9 @@ def _outflow_facts(a, al, unit: str) -> str:
     настоящее имя за пределы контура уходить не должно.
     """
     o = getattr(a, "outflow", {}) or {}
+    analytics = o.get("analytics") or {}
+    if analytics:
+        return _outflow_analytics_line(analytics)
     if not o:
         return "Отток: за окно потерь не зафиксировано."
     def _what(r):
@@ -668,6 +671,30 @@ def _outflow_facts(a, al, unit: str) -> str:
         + _outflow_reasons_line(o)
         + f"Крупнейшие потери: {top}."
     )
+
+
+def _outflow_analytics_line(o: dict) -> str:
+    """Только проверяемые агрегаты нового блока, без имён и свободных текстов."""
+    if not o.get("available"):
+        return "Полные данные оттока недоступны; масштаб и выполнение цели не оценивать."
+    yoy = o["change"]
+    dynamics = (f"год к году {yoy['absolute']:+.0f} чел"
+                + (f" ({yoy['percent']:+.1f}%)" if yoy['percent'] is not None else "; база 0, % не определён")
+                if yoy["absolute"] is not None else "сопоставимой истории за прошлый год нет")
+    goal = (f"подтверждённый возврат B2B {o['returned']:.0f} чел; цель 50% B2B = "
+            f"{o['return_target']:.1f} чел; выполнение цели {o['execution']:.1f}%, "
+            f"до цели {o['return_gap']:.1f} чел" if o["execution"] is not None
+            else "выполнение цели не рассчитывается: нет B2B либо не поступили данные возврата")
+    tasks = o["tasks"]
+    coverage = (f"задача типа Отток есть у {tasks['covered']} из {tasks['clients']} клиентов B2B"
+                if tasks["available"] else "данные задач недоступны, покрытие не оценивать")
+    return (f"Отток за {o['dates']['out_label']}: всего {o['total']:.0f} чел, "
+            f"B2B {o['b2b']:.0f}, B2C (уход 1–2 получателей) {o['b2c']:.0f}; {dynamics}. "
+            f"{goal}. {coverage}. "
+            + ("Окно неполное: учтены только поступившие месяцы. " if not o["complete"] else "")
+            + ("Возвраты поступили не за все месяцы. " if not o["return_source_ok"] else "")
+            + "Успех задачи не означает фактический возврат. B2C не входит в цель 50%. "
+              "Остаток невозврата на дату сборки нельзя называть окончательной потерей.")
 
 
 def _outflow_reasons_line(o: dict) -> str:
@@ -1050,6 +1077,8 @@ def _outflow_fallback(a) -> str:
     видно, ответила модель или нет.
     """
     o = getattr(a, "outflow", {}) or {}
+    if o.get("analytics"):
+        return _outflow_analytics_line(o["analytics"])
     if not o:
         return "За три закрытых месяца заметных потерь не было."
     parts = [f"Ушли {o['tot_gone']:.0f} человек, вернулись {o['tot_ret']:.0f}. "

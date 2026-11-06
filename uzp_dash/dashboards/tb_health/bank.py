@@ -20,7 +20,7 @@ import pandas as pd
 
 from ... import anonymize, progress
 from ...db import execute, read_sql, session
-from . import forecast, queries as Q, segments, text_rules
+from . import forecast, outflows, queries as Q, segments, text_rules
 from .freshness import orgs_snapshot
 
 RUB_TO_MLN = 1e6
@@ -29,7 +29,8 @@ PIPE_MONTHS = 12                 # закрытых месяцев сделок 
 # он не закрыт, и отток по нему был бы неполным.
 OUT_MONTHS = 3
 # Порог оттока: уход одного-двух человек — текучка, а не потеря клиента. Требование
-# бизнеса; ниже порога организация в разбор не попадает.
+# бизнеса для списка B2B к работе. В общем своде отток 1–2 получателей
+# учитывается отдельно как B2C (см. outflows).
 OUT_MIN_QTY = 3
 # Глубина окна помесячных активностей под блок «Портфель год к году»: год плюс месяц,
 # потому что задачу на отток заводят и в следующем отчётном месяце.
@@ -82,6 +83,7 @@ class Bank:
     params: dict = field(default_factory=dict)     # параметры запуска (ctx.params)
     flow: pd.DataFrame = field(default_factory=pd.DataFrame)  # движение ФЛ за месяц
     fc_stats: dict = field(default_factory=dict)   # диагностика оттока и пайплайна
+    outflow_source: outflows.Source | None = None  # весь отток B2B+B2C и год назад
 
 
 # --------------------------------------------------------------------------- #
@@ -105,6 +107,13 @@ def load(ctx) -> Bank:
 
     flags = read_sql(e, Q.GOSB_FLAGS)
     apparat, tb_of, gosb_name = _apparat(flags)
+
+    progress.step("Полный отток B2B+B2C, сопоставимая история и задачи по ролям")
+    outflow_source = outflows.load(e, d, apparat)
+    d.update(outflow_source.dates)
+    if outflow_source.dates:
+        # Длинное окно задач должно покрывать и фактически выбранный срез.
+        d["months_from"] = min(d["months_from"], d["out_from"])
 
     progress.step("Вердикты уровней СБ и ТБ: текущий месяц, закрытый, год назад")
     verdict = read_sql(e, Q.METRICS_VERDICT, {**p_metric, **p_dates})
@@ -223,7 +232,8 @@ def load(ctx) -> Bank:
                 orgs=orgs, orgs_tb=orgs_tb, fagg=fagg, act_tot=act_tot, act_brk=act_brk,
                 fmonths=fmonths, orgs_fc=orgs_fc, conv=conv, seg_by_inn=seg_by_inn,
                 promises=promises, flow=payroll_flow(e, d, ctx.params or {}),
-                params=dict(ctx.params or {}), fc_stats=stats)
+                params=dict(ctx.params or {}), fc_stats=stats,
+                outflow_source=outflow_source)
 
 
 def _outflow_promises(engine, orgs_fc: pd.DataFrame, d: dict) -> pd.DataFrame:

@@ -290,6 +290,7 @@ def build_sb(b: Bank, per_tb: list) -> Analysis:
     _attach_seg_matrix(a.gosb_detail, b.trend_seg, "tb")
     a.outflow = _outflow_top(a, b.fmonths, b.promises, b.tb_of,
                              seg_by_inn=b.seg_by_inn, moves=a.moves)
+    _attach_outflow_analytics(a, b)
     _log_outflow_section(a)
     return a
 
@@ -363,6 +364,7 @@ def finish(ctx, b: Bank, a: Analysis, text_df) -> Analysis:
     _attach_seg_matrix(a.gosb_detail, b.trend_seg, "gosb")
     a.outflow = _outflow_top(a, fmonths, b.promises, b.tb_of,
                              seg_by_inn=b.seg_by_inn, moves=a.moves)
+    _attach_outflow_analytics(a, b)
     _log_outflow_section(a)
     n_named = sum(sum(len(g["rows"]) for g in v["out_groups"])
                   for v in a.gosb_detail.values())
@@ -2445,8 +2447,9 @@ def _rest_row(gosb_row, segs: list, n_need_total: int) -> dict | None:
 def _log_outflow_section(a: "Analysis") -> None:
     """Что попало в раздел «Отток» — и сколько осталось за его пределами."""
     o = a.outflow or {}
-    if not o:
-        progress.done(f"{a.tb_short}: оттока за окно нет — раздел «Отток» не строится")
+    if not o.get("rows"):
+        progress.done(f"{a.tb_short}: списков крупных потерь B2B нет; "
+                      "полный отток и доступность данных — в общем своде")
         return
     progress.done(
         f"Отток: {o['n_all']} организаций потеряли {o['tot_kept']:.0f} чел "
@@ -2577,6 +2580,27 @@ def _outflow_reasons(rows: list) -> tuple[list, int, float]:
     for g in out:
         g["share"] = g["kept"] / known_kept if known_kept else 0.0
     return out, known_n, known_kept
+
+
+def _attach_outflow_analytics(a: "Analysis", b: Bank) -> None:
+    from . import outflows
+    report = outflows.analyze(getattr(b, "outflow_source", None),
+                             None if a.level == "sb" else a.tb_id,
+                             (b.params or {}).get("today") or b.dates.get("today")
+                             or pd.Timestamp.now().date())
+    if not report:
+        return
+    a.outflow["analytics"] = report
+    if report.get("dates"):
+        asof = pd.Timestamp(report["dates"]["out_asof"]).to_period("M")
+        closed = pd.Timestamp(b.dates["ref_closed"]).to_period("M")
+        report["lag_months"] = max(0, closed.ordinal - asof.ordinal)
+    by_seg = a.outflow.setdefault("by_seg", {})
+    segs = a.outflow.setdefault("segs", [])
+    for seg, data in report.get("by_seg", {}).items():
+        by_seg.setdefault(seg, {})["analytics"] = data
+        if seg not in segs:
+            segs.append(seg)
 
 
 def _outflow_top(a: "Analysis", funnel_months: pd.DataFrame | None,

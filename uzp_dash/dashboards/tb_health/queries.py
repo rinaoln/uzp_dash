@@ -709,6 +709,88 @@ ORDER BY f.inn, g.new_gosb_id, f.task_create_dt
 
 # ==================== Отток и пайплайн ===================================== #
 
+# Дата оттока независима от месяца прогноза: в начале месяца закрытый срез
+# ещё может не поступить. Отсутствующая партиция не считается нулевым оттоком.
+OUTFLOW_DATES = """
+SELECT DISTINCT report_dt
+FROM {schema}.uzp_dwh_fact_outflow
+WHERE report_dt <= :ref_closed
+ORDER BY report_dt
+"""
+
+_OUT_PERIODS = "(:m_out1, :m_out2, :m_out3, :m_prev1, :m_prev2, :m_prev3)"
+
+# Один ряд = исходный ГОСБ × ИНН × месяц. Порог B2B применяется ПОСЛЕ чтения:
+# иначе отток 1–2 получателей потеряется из общего итога. Справочники и возвраты
+# предварительно свёрнуты до ключа, чтобы JOIN не размножал численность.
+OUTFLOW_OVERVIEW = """
+WITH gmap AS (""" + _GMAP + """),
+geo AS (
+  SELECT old_gosb_id,
+         CASE WHEN count(DISTINCT NULLIF(btrim(region_name), '')) = 1
+              THEN min(NULLIF(btrim(region_name), ''))
+              ELSE 'Регион не определён' END AS region
+  FROM {schema}.uzp_dim_gosb GROUP BY old_gosb_id
+), names AS (
+  SELECT inn, min(company_name) AS company_name
+  FROM {schema}.uzp_dim_company GROUP BY inn
+), ret AS (
+  SELECT report_dt, gosb_id, inn, sum(return_qty) AS ret_qty
+  FROM {schema}.uzp_data_outflow_return_detail
+  WHERE report_dt IN """ + _OUT_PERIODS + """
+  GROUP BY report_dt, gosb_id, inn
+), ret_dates AS (
+  SELECT DISTINCT report_dt FROM {schema}.uzp_data_outflow_return_detail
+  WHERE report_dt IN """ + _OUT_PERIODS + """
+)
+SELECT f.report_dt, f.gosb_id AS old_gosb_id, g.new_gosb_id, g.tb_id,
+       g.gosb_name, geo.region, f.inn, names.company_name,
+       f.segment_name AS seg, f.outflow_qty AS gone,
+       LEAST(f.outflow_qty, GREATEST(COALESCE(ret.ret_qty, 0), 0)) AS returned,
+       (ret.inn IS NOT NULL) AS return_record,
+       (ret_dates.report_dt IS NOT NULL) AS return_source
+FROM {schema}.uzp_dwh_fact_outflow f
+JOIN gmap g ON g.old_gosb_id = f.gosb_id
+LEFT JOIN geo ON geo.old_gosb_id = f.gosb_id
+LEFT JOIN names ON names.inn = f.inn
+LEFT JOIN ret ON ret.report_dt = f.report_dt
+             AND ret.gosb_id = f.gosb_id AND ret.inn = f.inn
+LEFT JOIN ret_dates ON ret_dates.report_dt = f.report_dt
+WHERE f.report_dt IN """ + _OUT_PERIODS + """ AND f.outflow_qty > 0
+"""
+
+# Только задачи клиентов из сопоставляемых когорт и только месяц ухода / M+1.
+# Отдельные задачи с текстом нужны для причины; в покрытии и ролях учитываются
+# исключительно task_type='Отток'. task_code устраняет повторные снимки задачи.
+OUTFLOW_COHORT_TASKS = """
+WITH gmap AS (""" + _GMAP + """), tasks AS (
+ SELECT f.task_code, f.report_dt, f.gosb_id AS old_gosb_id,
+        g.new_gosb_id, g.tb_id, f.inn, f.company_name,
+        f.task_create_dt, f.task_type, f.role_code,
+        f.is_task_closed, f.is_task_closed_success, f.plan_close_task_dttm,
+        f.task_questionnaire, f.task_comment,
+        row_number() OVER (PARTITION BY f.task_code ORDER BY f.report_dt DESC,
+                           f.task_create_dt DESC) AS rn
+ FROM {schema}.uzp_dwh_sale_funnel_task f
+ JOIN gmap g ON g.old_gosb_id = f.gosb_id
+ WHERE f.task_create_dt <= :ref_funnel
+   AND ((f.task_create_dt >= :out_from
+         AND f.task_create_dt < date_trunc('month', CAST(:m_out1 AS date)) + interval '2 months')
+        OR (f.task_create_dt >= :out_prev_from
+            AND f.task_create_dt < date_trunc('month', CAST(:m_prev1 AS date)) + interval '2 months'))
+   AND (f.task_type = 'Отток' OR COALESCE(btrim(f.task_questionnaire), '') <> ''
+        OR COALESCE(btrim(f.task_comment), '') <> '')
+   AND EXISTS (
+     SELECT 1 FROM {schema}.uzp_dwh_fact_outflow o
+     WHERE o.inn = f.inn AND o.gosb_id = f.gosb_id AND o.outflow_qty > 0
+       AND o.report_dt IN """ + _OUT_PERIODS + """
+       AND f.task_create_dt >= date_trunc('month', o.report_dt)
+       AND f.task_create_dt < date_trunc('month', o.report_dt) + interval '2 months'
+   )
+)
+SELECT * FROM tasks WHERE rn=1
+"""
+
 # ФАКТИЧЕСКИЙ отток, который НЕ ВЕРНУЛСЯ, за три ЗАКРЫТЫХ месяца (T-1, T-2, T-3).
 #
 # Заменяет собой и ежедневную витрину, и модель истории: отчёт больше ничего не

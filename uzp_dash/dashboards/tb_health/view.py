@@ -20,7 +20,7 @@ from ...render import components as C
 from ...render import page
 from ...render import veil
 from ... import progress
-from . import analyze, bank, prompts, queries, segments, snapshot, visual
+from . import analyze, bank, outflow_view, prompts, queries, segments, snapshot, visual
 from .freshness import orgs_snapshot
 
 SEG_ORDER = segments.ORDER   # короткие названия сегментов (КСБ, РГС, …)
@@ -263,7 +263,7 @@ def build(ctx: Context) -> str:
               + _MX_JS + _TBDYN_JS + _FLOW_JS),
         # ux-fix.css — наши правки поверх дизайна (сам ux.css остаётся копией макета)
         css=(_asset("ux.css") + _asset("ux-fix.css") + _asset("help.css")
-             + _asset("pine.css") + _asset("readability.css")),
+             + _asset("pine.css") + _asset("readability.css") + _asset("outflows.css")),
         # скрипт дизайна — ПОСЛЕ .wrap: он переносит её содержимое в новую раскладку и
         # оборачивает gdOpen, поэтому идёт после всех остальных скриптов
         tail=(f'<script>{_asset("ux.js.txt")}</script>\n'
@@ -534,7 +534,16 @@ def _hub_facts(a: analyze.Analysis) -> dict:
             "Организации, за счёт которых закрывается отклонение от плана.", nums)
 
     o = a.outflow or {}
-    if o.get("rows"):
+    analytics = o.get("analytics") or {}
+    if analytics.get("available"):
+        execution = analytics.get("execution")
+        out["outflow"] = (
+            "Масштаб оттока, концентрация и работа по возврату B2B.",
+            [(C.fmt_num(analytics["total"]), "чел общего оттока B2B+B2C", "bad"),
+             (C.fmt_num(analytics["b2c"]), "чел оттока B2C · 1–2 получателя", ""),
+             (f'{execution:.1f}%' if execution is not None else "—",
+              "выполнение цели возврата 50% B2B", "good" if (execution or 0) >= 100 else "warn")])
+    elif o.get("rows"):
         # Числа — ИТОГ раздела, а не длина показанного топа: раньше здесь стояло
         # «15», потому что в таблице пятнадцать строк, и плашка обещала пятнадцать
         # организаций там, где их триста сорок одна.
@@ -5910,7 +5919,7 @@ def _outflow_filter(o: dict, idx: int) -> str:
         lines.append(_of_seg_var(x, _outflow_sum(d, f'сегмент {x}'), False))
     return (
         f'<div class="of-flt" data-lvl="{idx}">'
-        f'<span class="of-flt-l">Сегмент:</span>'
+        f'<span class="of-flt-l">Сегмент для свода и списков:</span>'
         f'<span class="of-chips">{"".join(chips)}</span>'
         f'<button type="button" class="of-detail" onclick="ofXls(this)" '
         f'title="Книга из двух листов: свод по причинам и построчная '
@@ -5921,6 +5930,11 @@ def _outflow_filter(o: dict, idx: int) -> str:
 
 def _outflow_sum(d: dict, who: str) -> str:
     """Одна строка итога: сколько организаций и потерь в выбранном срезе."""
+    analytics = d.get("analytics") or {}
+    if analytics.get("available"):
+        return (f'<span>{C.esc(who)}: B2B <b>{C.fmt_num(analytics["b2b"])}</b> чел · '
+                f'B2C <b>{C.fmt_num(analytics["b2c"])}</b> чел · год к году '
+                + outflow_view.delta(analytics["change"]) + '</span>')
     n = int(d.get("n_all") or 0)
     if not n:
         return f'<span>{C.esc(who)}: организаций с потерями нет.</span>'
@@ -6111,18 +6125,17 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None,
     Порядок колонок повторяет вопрос: кто ушёл → сколько → когда → чем закончилось.
     """
     o = a.outflow or {}
-    if not o or not o.get("rows"):
+    analytics = o.get("analytics") or {}
+    if not o.get("rows") and not analytics:
         return ""
     unit = a.unit_label
-    ret_pct = (o["tot_ret"] / o["tot_gone"] * 100) if o["tot_gone"] else 0
     head = (
-        f'<h3>Крупнейшие потери портфеля и чем закончилась работа по ним</h3>'
+        f'<h3>Работа с клиентами B2B, которые ещё не вернули получателей</h3>'
         f'<p class="sub" style="font-size:15px;margin:-4px 0 10px">'
-        f'За {C.esc((a.dates or {}).get("out_label", "три закрытых месяца"))} отток '
-        f'составил <b>{C.fmt_num(o["tot_gone"])}</b> чел по '
-        f'{C.fmt_num(o["n_all"])} организациям, возврат — '
-        f'{C.fmt_num(o["tot_ret"])} ({ret_pct:.0f}%). Безвозвратные потери: '
-        f'<b>{C.fmt_num(o["tot_kept"])}</b> чел.</p>'
+        f'Период: {C.esc((a.dates or {}).get("out_label", "три закрытых месяца"))}. '
+        f'У {C.fmt_num(o.get("n_all", 0))} клиентов B2B ещё не вернулись '
+        f'<b>{C.fmt_num(o.get("tot_kept", 0))}</b> получателей. '
+        f'Это остаток на дату сборки, который ещё можно вернуть.</p>'
         + _outflow_funnel(o)
         + _outflow_moves(a)
         + _gd_help(
@@ -6160,7 +6173,7 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None,
             'считается по всем организациям уровня, поэтому под ним стоит покрытие: '
             'у скольких организаций причина вообще зафиксирована.',
             title="Как собраны эти списки")
-    )
+    ) if o.get("rows") else ""
     # Три плашки одного переключателя: сначала общая картина («из-за чего уходят»),
     # затем два разреза по результату работы. Свод стоит первым и открыт по
     # умолчанию: он отвечает на вопрос раздела целиком, а списки — точечно.
@@ -6226,13 +6239,13 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None,
                                               (a.flow or {}).get("m_cur", ""))})
     return C.section(
         "Отток",
-        _ai(ai) + C.card(head + _outflow_filter(o, idx) + _outflow_tabs(groups))
+        outflow_view.overview(analytics)
+        + outflow_view.concentration(analytics) + outflow_view.tasks(analytics)
+        + _ai(ai) + C.card(head + _outflow_filter(o, idx) + _outflow_tabs(groups))
         + _outflow_detail_data(a, idx),
-        eyebrow="Безвозвратные потери портфеля",
-        desc="Кого потеряли за три закрытых месяца, кого вернули и чем "
-             "закончилась работа: отдельно возвраты поимённо, отдельно "
-             "невыполненные обещания вернуть получателей, отдельно отработка, "
-             "которая результата не дала.")
+        eyebrow="Масштаб оттока и работа по возврату",
+        desc="Общий отток и динамика год к году, B2B и B2C, цель возврата 50% B2B, "
+             "регионы концентрации, причины ухода и покрытие клиентов задачами.")
 
 
 def _outflow_tabs(groups: list) -> str:
@@ -6283,6 +6296,13 @@ def _outflow_reasons(o: dict) -> str:
     разрезом самих списков: видно не только, из-за чего уходят, но и чем при этой
     причине заканчивается работа.
     """
+    if o.get("analytics"):
+        summary = outflow_view.reasons(o["analytics"])
+        if o.get("reasons"):
+            legacy = {k: v for k, v in o.items() if k != "analytics"}
+            summary += ('<details class="oa-cases"><summary>Результат работы по причинам '
+                        'в списках клиентов</summary>' + _outflow_reasons(legacy) + '</details>')
+        return summary
     rows_src = o.get("reasons") or []
     if not rows_src:
         return ""
@@ -6315,6 +6335,9 @@ def _outflow_reasons(o: dict) -> str:
 
 def _reasons_tab_sub(o: dict) -> str:
     """Подпись плашки свода: сколько причин и какую долю потерь они объясняют."""
+    if o.get("analytics"):
+        data = o["analytics"]
+        return f'B2B · {C.fmt_num(data.get("b2b", 0))} чел · сравнение год к году'
     rows = o.get("reasons") or []
     cov = (float(o.get("reason_known_kept") or 0) / o["tot_kept"] * 100
            if o.get("tot_kept") else 0)
