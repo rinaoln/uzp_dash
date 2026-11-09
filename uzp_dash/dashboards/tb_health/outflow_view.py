@@ -122,6 +122,8 @@ def concentration(o: dict) -> str:
     known = o["known_reason_gone"]/total*100 if total else 0
     return C.card(
         '<h3>Концентрация оттоков B2B</h3>'
+        + _cards(o.get("cards") or [])
+        + '<details class="oa-cases"><summary>Регионы обслуживания — полная таблица</summary>'
         f'<p class="oa-lead"><b>{C.esc(lead["name"])}</b> — '
         f'{C.fmt_num(lead["gone"])} чел, <b>{share:.1f}%</b> оттока B2B. '
         f'Крупнейшая категория в данных: {C.esc(lead["leading_reason"])}.</p>'
@@ -132,12 +134,19 @@ def concentration(o: dict) -> str:
         + '<div class="tbl-scroll">'
         + C.table(["Регион обслуживания", "Клиентов", "Отток B2B, чел", "Доля B2B",
                    "Год к году: чел · %", "Крупнейшая категория"], region_rows, [1, 2, 3])
-        + '</div><details class="oa-cases" open><summary>Крупнейшие клиенты и причины — до 15 случаев</summary>'
+        + '</div></details><details class="oa-cases"><summary>Крупнейшие клиенты и причины — до 15 случаев</summary>'
         '<p class="oa-note">Случай — клиент × регион × причина. Клиент с несколькими '
         'причинами или регионами может занимать несколько строк. «Не вернулись» — '
         'остаток на дату сборки, который ещё можно вернуть.</p><div class="tbl-scroll">'
         + C.table(["Организация", "Регион", "ГОСБ", "Отток, чел", "Не вернулись, чел", "Причина / контекст"],
                   case_rows, [3, 4]) + '</div></details>', "oa-concentration")
+
+
+def _tone(value, good: float, warn: float) -> str:
+    if value is None:
+        return '<span class="oa-muted">—</span>'
+    kind = "good" if value >= good else "warn" if value >= warn else "bad"
+    return f'<span class="oa-t-{kind}">{value:.0f}%</span>'
 
 
 def tasks(o: dict) -> str:
@@ -148,28 +157,48 @@ def tasks(o: dict) -> str:
         return C.card('<h3>Работа с задачами на отток B2B</h3>'
                       '<p class="source-note">Данные задач недоступны. Покрытие и роли нельзя оценить.</p>')
     uncovered = t["clients"]-t["covered"]
-    rows = [[C.esc(r["role"]), C.fmt_num(r["tasks"]),
-             f'{r["tasks"]/t["tasks"]*100:.1f}%' if t["tasks"] else "—",
-             C.fmt_num(r["success"]), C.fmt_num(r["closed_other"]),
-             C.fmt_num(r["open"]), C.fmt_num(r["overdue"])] for r in t["roles"]]
+    goal = 50
+    rows = []
+    for r in t["roles"]:
+        empty = not r["tasks"]
+        rows.append([
+            f'<b>{C.esc(r["label"])}</b>' + (f'<small class="oa-cell-note">{C.esc(r["role"])}</small>'
+                                             if r["label"] != r["role"] else ""),
+            "—" if empty else f'{C.fmt_num(r["tasks"])} <small class="oa-muted">/ {C.fmt_num(r["fl"])} ФЛ</small>',
+            "—" if empty else _tone(r["worked_pct"], 55, 45)
+            + f' <small class="oa-muted">/ {C.fmt_num(r["fl_worked"])} ФЛ</small>',
+            "—" if empty else _tone(r["return_pct"], goal, goal*.8)
+            + f' <small class="oa-muted">/ {C.fmt_num(r["fl_returned"])} ФЛ</small>',
+            "—" if empty else C.fmt_num(r["success"]),
+            "—" if empty else C.fmt_num(r["open"]),
+            "—" if empty else C.fmt_num(r["overdue"])])
+    attrs = [' class="oa-row-empty"' if not r["tasks"] else "" for r in t["roles"]]
     return C.card(
-        '<h3>Работа с задачами на отток B2B</h3>'
+        '<h3>Покрытие задачами и отработка по ролям</h3>'
         '<div class="oa-task-metrics">'
         f'<div><span>Клиенты с задачей на отток</span><b>{_pct(t["percent"])}</b>'
         f'<small>{C.fmt_num(t["covered"])} из {C.fmt_num(t["clients"])} клиентов</small></div>'
         f'<div><span>Клиенты без задачи на отток</span><b>{C.fmt_num(uncovered)}</b>'
         '<small>Нужны назначение и ответственный</small></div>'
         f'<div><span>Доля оттока у клиентов с задачей</span><b>{_pct(t["gone_percent"])}</b>'
-        f'<small>{C.fmt_num(t["covered_gone"])} из {C.fmt_num(t["gone"])} чел</small></div>'
-        f'<div><span>Задач на отток</span><b>{C.fmt_num(t["tasks"])}</b>'
-        '<small>Уникальных кодов задач</small></div></div>'
+        f'<small>{C.fmt_num(t["covered_gone"])} из {C.fmt_num(t["gone"])} чел · '
+        f'{C.fmt_num(t["tasks"])} задач</small></div>'
+        f'<div class="oa-accent"><span>Завершено возвратом</span><b>{C.fmt_num(t["covered_returned"])} ФЛ</b>'
+        f'<small>{_pct(t["covered_return_pct"])} от ФЛ в задачах</small></div></div>'
+        '<h4 class="oa-h4">Отработка задач по ролям</h4>'
+        '<p class="oa-note">Все роли воронки, включая те, у которых задач на отток нет. '
+        '«Задач / ФЛ» — число задач роли и отток клиентов, к которым они привязаны. '
+        '«Отработано» — доля закрытых задач и ФЛ по ним. «Возврат» — подтверждённый '
+        'витриной возврат ФЛ по клиентам роли, цель 50%. Клиент с задачами нескольких '
+        'ролей учитывается в каждой, поэтому сумма ФЛ по ролям больше итога.</p>'
+        + '<div class="tbl-scroll">' + C.table(
+            ["Роль", "Задач / ФЛ", "Отработано, % / ФЛ", "Возврат, % / ФЛ",
+             "Успешно закрыты", "Открыты", "Просрочены"],
+            rows, [1, 2, 3, 4, 5, 6], attrs) + '</div>'
         '<p class="oa-note">Клиент — ИНН в подразделении выбранного уровня '
         '(в сети: ТБ × ИНН; внутри ТБ: ГОСБ × ИНН). Учитываются только задачи типа '
         '«Отток», созданные в месяц ухода или следующий месяц; один код задачи '
-        'учитывается один раз. Прочие контакты не заменяют задачу на отток.</p>'
-        + ('<div class="tbl-scroll">' + C.table(
-            ["Роль", "Задач", "Доля", "Успешно закрыты", "Закрыты без успеха", "Открыты", "Из открытых просрочены"],
-            rows, [1, 2, 3, 4, 5, 6]) + '</div>' if rows else '<p>Задачи на отток B2B не найдены.</p>'),
+        'учитывается один раз. Прочие контакты не заменяют задачу на отток.</p>',
         "oa-tasks")
 
 
@@ -196,3 +225,234 @@ def reasons(o: dict) -> str:
             '<div class="tbl-scroll">' + C.table(
                 ["Причина", "Клиентов", "Отток, чел", "Не вернулись, чел", "Отток год назад, чел", "Год к году: чел · %"],
                 rows, [1, 2, 3, 4]) + '</div>')
+
+
+# ==================== Фокусы руководителя ================================== #
+
+def _signed(value, digits: int = 0, unit: str = "") -> str:
+    if value is None:
+        return "—"
+    sign = "+" if value > 0 else "−" if value < 0 else ""
+    return f'{sign}{C.fmt_num(abs(value), digits=digits)}{unit}'
+
+
+def _loss(share) -> str:
+    """Доля невозвращённых: больше половины — красным (цель возврата 50%)."""
+    kind = "bad" if share > 50 else "warn" if share > 40 else "good"
+    return f'<span class="oa-t-{kind}">{share:.0f}%</span>'
+
+
+def _rating_list(title: str, items: list, empty: str) -> str:
+    if not items:
+        return (f'<div class="oa-rank"><h5>{C.esc(title)}</h5>'
+                f'<p class="oa-muted">{C.esc(empty)}</p></div>')
+    li = "".join(
+        f'<li><span class="oa-rank-n">{i}</span><span class="oa-rank-name">{C.esc(g["name"])}'
+        + (f'<small>{C.esc(g["note"])}</small>' if g.get("note") else "")
+        + f'</span><span class="oa-rank-v">{_loss(g["share"])}'
+        f'<small>{C.fmt_num(g["kept"])} из {C.fmt_num(g["gone"])} ФЛ</small></span></li>'
+        for i, g in enumerate(items, 1))
+    return f'<div class="oa-rank"><h5>{C.esc(title)}</h5><ol>{li}</ol></div>'
+
+
+def _fold(summary: str, inner: str) -> str:
+    """Сворачиваемая деталь фокуса: на виду вывод, таблицы — по клику."""
+    return (f'<details class="oa-fold"><summary>{summary}</summary>'
+            f'<div class="oa-fold-body">{inner}</div></details>')
+
+
+def _focus_head(n: int, title: str) -> str:
+    return (f'<div class="oa-focus-head"><span class="oa-focus-n">{n}</span>'
+            f'<h4>{title}</h4></div>')
+
+
+def _focus_t2(t: dict) -> str:
+    month = f' · {C.esc(t.get("month_label"))}' if t.get("month_label") else ""
+    head = _focus_head(1, f'Т-2{month}: «отток не подтверждён» против факта возврата')
+    if not t.get("available"):
+        return head + '<p class="source-note">Данные задач недоступны — рейтинг не построить.</p>'
+    if not t.get("in_window"):
+        return head + (f'<p class="source-note">Месяц Т-2 ({C.esc(t["month_label"])}) не входит '
+                       'в доступный срез оттока.</p>')
+    if not t.get("rows"):
+        return head + ('<p class="oa-lead">Задач по оттоку с выводом «отток не подтверждён» '
+                       f'в Т-2 нет (задач на отток с привязкой к уходу: '
+                       f'{C.fmt_num(t.get("tasks_rows", 0))}).</p>')
+    share, base = t["share"], t["confirmed_share"]
+    compare = (f' · при подтверждённом оттоке — {base:.0f}%' if base is not None else "")
+    lead = (f'<p class="oa-lead">{C.fmt_num(t["clients"])} клиентов закрыты как «отток не '
+            f'подтверждён»: из {C.fmt_num(t["gone"])} ФЛ не вернулись '
+            f'<b class="oa-t-bad">{C.fmt_num(t["kept"])} ({share:.0f}%)</b>{compare}.</p>')
+    if not t.get("return_ok"):
+        lead += '<p class="source-note">Возвраты за Т-2 поступили не полностью — доля может снизиться.</p>'
+    worst = [(lbl, items[0]) for lbl, items in
+             (("роль", t["roles"]), ("МЗП", t["mzp"]), (t["unit_label"], t["units"])) if items]
+    summary = ("Рейтинг ролей, МЗП и " + C.esc(t["unit_label"])
+               + (' · хуже всех: ' + " · ".join(
+                   f'{C.esc(lbl)} <b>{C.esc(g["name"])}</b> {_loss(g["share"])}' for lbl, g in worst)
+                  if worst else ""))
+    lists = ('<div class="oa-ranks">'
+             + _rating_list("Роли", t["roles"], "Нет ролей с оттоком от 5 ФЛ")
+             + _rating_list("МЗП", t["mzp"], "Нет МЗП с оттоком от 5 ФЛ")
+             + _rating_list(t["unit_label"], t["units"], "Нет подразделений с оттоком от 5 ФЛ")
+             + '</div><p class="oa-note">«Отток не подтверждён» — задача «Отток» закрыта с '
+               'выводом, что ухода нет или он временный (сезон, отпуска, «портфель без '
+               'изменений», «сотрудники вернутся»). Доля — невернувшиеся ФЛ ÷ ушедшие ФЛ; в '
+               'рейтинг входят группы от 5 ушедших ФЛ. МЗП — автор задачи с ролью МЗП (ФИО из '
+               'витрины оттока, иначе табельный номер).</p>')
+    return head + lead + _fold(summary, lists)
+
+
+def _pattern_li(p: dict) -> str:
+    series = " → ".join(f'{m} — {C.fmt_num(v)}' for m, v in p["series"])
+    arrow = " ↑" if p["growing"] else ""
+    share = f' · {p["share"]:.0f}% B2B' if p["dim"] != "client" else ""
+    return (f'<li title="{C.esc(series)} ФЛ"><b>{C.esc(p["name"])}</b> '
+            f'<span class="oa-chip">{C.esc(p["dim_title"])}</span> '
+            f'{p["streak"]} мес. подряд{arrow} · возврат '
+            f'<b class="oa-t-bad">{p["return_pct"]:.0f}%</b> · не вернулись '
+            f'{C.fmt_num(p["kept"])} ФЛ{share}</li>')
+
+
+def _focus_top(leader: dict, unit: str) -> str:
+    top = leader.get("top") or []
+    head = _focus_head(2, "Личное вовлечение: топ-5 оттоков и закономерности за 3 месяца")
+    if not top:
+        body = '<p class="oa-lead">Невозвращённых потерь B2B в окне нет.</p>'
+    else:
+        rows = []
+        for i, g in enumerate(top, 1):
+            months = " → ".join(f'{C.fmt_num(v)}' for _, v in g["month_list"])
+            group = " · ".join(x for x in (g["seg"], g["group"]) if x)
+            rows.append([
+                f'<span class="oa-rank-n">{i}</span>',
+                f'<b>{C.esc(g["name"])}</b><small class="oa-cell-note">Орг. {g["inn"]} · {C.esc(group)}</small>',
+                C.esc(g["unit"]) + (f'<small class="oa-cell-note">{C.esc(g["gosb"])}</small>'
+                                    if g["gosb"] != g["unit"] else ""),
+                C.esc(g["mzp"] or "—"),
+                f'{months}<small class="oa-cell-note">'
+                + ("отток " + str(g["streak"]) + " мес. подряд" if g["streak"] >= 2 else "разовый уход")
+                + '</small>',
+                f'<b class="oa-t-bad">{C.fmt_num(g["kept"])}</b> <small class="oa-muted">из {C.fmt_num(g["gone"])}</small>',
+                _tone(g["return_pct"], 50, 40),
+                C.esc(g["state"]) + f'<small class="oa-cell-note">{C.esc(g["reason"])}</small>',
+                C.esc(g["action"])])
+        months = " → ".join(leader.get("months") or [])
+        table = ('<div class="tbl-scroll">' + C.table(
+            ["#", "Организация", unit, "МЗП", f"Отток по месяцам ({months})",
+             "Не вернулись, ФЛ", "Возврат", "Задача и причина", "Что сделать"],
+            rows, [5, 6]) + '</div>')
+        kept = sum(g["kept"] for g in top)
+        no_task = sum(g["state"] == "Задачи на отток нет" for g in top)
+        repeat = sum(g["streak"] >= 2 for g in top)
+        facts = [f'не вернулись <b class="oa-t-bad">{C.fmt_num(kept)} ФЛ</b>']
+        if no_task:
+            facts.append(f'без задачи на отток — <b>{no_task} из {len(top)}</b>')
+        if repeat:
+            facts.append(f'уходят повторно — <b>{repeat}</b>')
+        names = ", ".join(C.esc(g["name"]) for g in top[:3])
+        body = (f'<p class="oa-lead">Топ-{len(top)}: {"; ".join(facts)}.</p>'
+                + _fold(f'Таблица топ-{len(top)} с действиями · {names}'
+                        + ("…" if len(top) > 3 else ""), table))
+    pats = leader.get("patterns") or []
+    if pats:
+        shown, rest = pats[:3], pats[3:]
+        body += ('<h5 class="oa-h5">Закономерности концентрации</h5>'
+                 f'<ul class="oa-patterns">{"".join(_pattern_li(p) for p in shown)}</ul>')
+        note = ('<p class="oa-note">Группа попадает в вывод, если отток B2B идёт не меньше '
+                'двух месяцев подряд, а возврат ниже цели 50%. Для ведомства, отрасли, '
+                'сегмента и подразделения месяц считается, если на группу пришлось от 1% '
+                'оттока B2B уровня. Порядок: ведомства, отрасли, клиенты, затем подразделения '
+                'и сегменты как фон. Помесячные значения — в подсказке при наведении.</p>')
+        more = (f'<ul class="oa-patterns">{"".join(_pattern_li(p) for p in rest)}</ul>'
+                if rest else "")
+        body += _fold((f'Ещё {len(rest)} · ' if rest else "") + 'как отбираются закономерности',
+                      more + note)
+    else:
+        body += ('<p class="oa-note">Устойчивых закономерностей нет: ни одна группа не '
+                 'теряет получателей два месяца подряд с возвратом ниже цели.</p>')
+    return head + body
+
+
+def leader(o: dict, unit: str = "Подразделение") -> str:
+    """Вывод в начале раздела: на что руководителю смотреть в первую очередь."""
+    if not o.get("available") or not o.get("leader"):
+        return ""
+    ld = o["leader"]
+    return C.card(
+        '<div class="oa-leader-title"><h3>Фокусы внимания руководителя</h3>'
+        f'<span class="oa-muted">Окно: {C.esc(o["dates"].get("out_label", ""))}</span></div>'
+        + '<div class="oa-focus">' + _focus_t2(ld.get("t2") or {}) + '</div>'
+        + '<div class="oa-focus">' + _focus_top(ld, unit) + '</div>',
+        "oa-leader")
+
+
+def _seg_table(title: str, data: dict) -> str:
+    target = data["target"]*100
+    rows, attrs = [], []
+    for r in data["rows"]:
+        d = r["change"]
+        dyn = ('<span class="oa-muted">—</span>' if d["percent"] is None else
+               f'<span class="{"oa-t-bad" if d["percent"] > 0 else "oa-t-good"}">'
+               f'{_signed(d["percent"], 1, "%")}</span>')
+        ret = ("—" if r["returned"] is None else
+               f'{C.fmt_num(r["returned"])}<small class="oa-cell-note">'
+               + _tone(r["rate"], target, target*.8) + '</small>')
+        gap = ("—" if r["gap"] is None else
+               f'<span class="{"oa-t-bad" if r["gap"] < 0 else "oa-t-good"}">{_signed(r["gap"])}</span>'
+               f'<small class="oa-cell-note">{_signed(r["gap_pp"], 1, " п.п.")}</small>')
+        name = f'<b>{C.esc(r["name"])}</b>'
+        rows.append([name, C.fmt_num(r["gone"]), dyn, ret, gap])
+        attrs.append(' class="oa-total-row"' if r["total"] else "")
+    return (f'<div class="oa-seg"><div class="oa-seg-head"><h4>{C.esc(title)}</h4>'
+            f'<span class="oa-muted">цель возврата {target:.0f}%</span></div>'
+            + C.table(["Сегмент", "Отток ФЛ", "Динамика", "Возврат ФЛ, %", "Потери до цели"],
+                      rows, [1, 2, 3, 4], attrs) + '</div>')
+
+
+def segments(o: dict) -> str:
+    if not o.get("available") or not o.get("segments"):
+        return ""
+    sg = o["segments"]
+    note = ('Динамика — год к году за те же три месяца.' if o.get("comparable") else
+            'Динамика год к году недоступна: нет всех месяцев прошлого года.')
+    return C.card(
+        '<h3>Оттоки по сегментам</h3>'
+        '<div class="oa-segs">'
+        + _seg_table("B2B (3+ ФЛ)", sg["B2B"]) + _seg_table("1–2 получателя", sg["B2C"])
+        + '</div><p class="oa-note">' + note + ' «Потери до цели» — сколько ФЛ не хватает '
+        'до цели возврата (возврат − цель × отток) и разрыв в процентных пунктах. '
+        'Снижение оттока — зелёным, рост — красным.</p>', "oa-segments")
+
+
+def _cards(cards: list) -> str:
+    if not cards:
+        return ""
+    out = []
+    for i, c in enumerate(cards, 1):
+        mx = max((it["gone"] for it in c["items"]), default=0) or 1
+        lead = (" и ".join(c["lead"]) + f' — {c["lead_share"]:.0f}% {c["scope"]}'
+                if c["lead"] else "Нет данных")
+        items = "".join(
+            f'<li><div><span>{j}. {C.esc(it["name"])}</span><b>{C.fmt_num(it["gone"])}</b></div>'
+            f'<i style="width:{it["gone"]/mx*100:.1f}%"></i></li>'
+            for j, it in enumerate(c["items"], 1))
+        cover = (f'<small class="oa-muted">определено для {c["known_pct"]:.0f}% оттока</small>'
+                 if c["known_pct"] < 99.5 else "")
+        if not c["items"]:
+            out.append(
+                f'<div class="oa-cc oa-cc{i}"><span class="oa-cc-t">{C.esc(c["title"])}</span>'
+                '<div class="oa-cc-big"><b>—</b></div>'
+                '<p class="oa-muted">В витринах ЕПК и ключевых клиентов отрасль для этого '
+                f'оттока не заполнена или указана как «Прочее» ({C.fmt_num(c["total"])} ФЛ).</p></div>')
+            continue
+        out.append(
+            f'<div class="oa-cc oa-cc{i}"><span class="oa-cc-t">{C.esc(c["title"])}</span>'
+            f'<div class="oa-cc-big"><b>{c["top_share"]:.0f}%</b><span>топ-5</span></div>'
+            f'<p class="oa-cc-lead">{C.esc(lead)}</p>{cover}<ol>{items}</ol></div>')
+    return ('<div class="oa-ccs">' + "".join(out) + '</div>'
+            '<p class="oa-note">Крупный процент — доля топ-5 групп в оттоке B2B разреза '
+            '(для ведомств — в оттоке РГС, для отрасли — в оттоке вне РГС). Ведомство '
+            'определяется по наименованию организации и флагу силовых структур, отрасль — '
+            'по витрине ЕПК; неопределённые и «Прочее» в топ не входят, но остаются в '
+            'знаменателе.</p>')

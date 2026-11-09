@@ -6239,13 +6239,15 @@ def _outflow_section(a: analyze.Analysis, ai: str | None = None,
                                               (a.flow or {}).get("m_cur", ""))})
     return C.section(
         "Отток",
-        outflow_view.overview(analytics)
+        outflow_view.leader(analytics, unit)
+        + outflow_view.overview(analytics) + outflow_view.segments(analytics)
         + outflow_view.concentration(analytics) + outflow_view.tasks(analytics)
         + _ai(ai) + C.card(head + _outflow_filter(o, idx) + _outflow_tabs(groups))
         + _outflow_detail_data(a, idx),
         eyebrow="Масштаб оттока и работа по возврату",
-        desc="Общий отток и динамика год к году, B2B и B2C, цель возврата 50% B2B, "
-             "регионы концентрации, причины ухода и покрытие клиентов задачами.")
+        desc="Фокусы руководителя (рейтинг Т-2, топ-5 потерь, закономерности), общий "
+             "отток и динамика год к году, сегменты B2B и 1–2 получателя, концентрация "
+             "по ведомствам, отраслям и подразделениям, покрытие задачами по всем ролям.")
 
 
 def _outflow_tabs(groups: list) -> str:

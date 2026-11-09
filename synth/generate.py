@@ -2024,6 +2024,7 @@ def _funnel(orgs: pd.DataFrame, gosb: pd.DataFrame) -> pd.DataFrame:
                 "task_code": f"T{int(o.inn)}-{int(RNG.integers(1000,9999))}",
                 "task_create_dt": created.date(),
                 "fact_close_task_dttm": (active if closed else None),
+                "plan_close_task_dttm": created + pd.Timedelta(days=14),
                 "is_task_closed": closed,
                 "is_task_closed_success": success,
                 "is_task_in_progress": not closed,

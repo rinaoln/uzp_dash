@@ -139,6 +139,7 @@ CREATE TABLE uzp_dwh_sale_funnel_task (
   task_code              varchar,
   task_create_dt         date,
   fact_close_task_dttm   timestamp,   -- факт. закрытие задачи (для «закрыто в день создания»)
+  plan_close_task_dttm   timestamp,   -- плановый срок закрытия (для просрочки)
   is_task_closed         boolean,
   is_task_closed_success boolean,
   is_task_in_progress    boolean,

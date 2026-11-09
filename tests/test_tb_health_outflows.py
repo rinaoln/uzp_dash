@@ -110,7 +110,12 @@ class OutflowAnalysisTests(unittest.TestCase):
         self.assertEqual((t["clients"], t["covered"], t["tasks"]), (3, 2, 3))
         self.assertEqual(t["covered_gone"], 160)
         self.assertAlmostEqual(t["percent"], 2/3*100)
-        self.assertEqual({r["role"]: r["tasks"] for r in t["roles"]}, {"МЗП": 1, "СЗП": 1, "МКК": 1})
+        self.assertEqual({r["role"]: r["tasks"] for r in t["roles"] if r["tasks"]},
+                         {"МЗП": 1, "СЗП": 1, "МКК": 1})
+        # все роли воронки видны, даже без задач
+        self.assertTrue({"НО", "НУ", "ДУ", "УПР", "ЗАМПРЕД"} <= {r["role"] for r in t["roles"]})
+        mzp = next(r for r in t["roles"] if r["role"] == "МЗП")
+        self.assertEqual((mzp["fl"], mzp["fl_returned"]), (120, 40))
         self.assertEqual(sum(r["overdue"] for r in t["roles"]), 1)
         for r in t["roles"]:
             self.assertEqual(r["tasks"], r["success"]+r["closed_other"]+r["open"])
@@ -141,7 +146,8 @@ class OutflowAnalysisTests(unittest.TestCase):
         rendered = view._outflow_section(a)
         self.assertLess(rendered.index("Общий отток получателей"), rendered.index("Концентрация оттоков"))
         self.assertIn("Отток год назад", rendered)
-        self.assertIn("Работа с задачами", rendered)
+        self.assertIn("Покрытие задачами", rendered)
+        self.assertLess(rendered.index("Фокусы внимания руководителя"), rendered.index("Общий отток получателей"))
         self.assertIn("B2C не входит в цель", prompts._outflow_fallback(a))
 
     def test_same_inn_in_two_gosbs_is_one_client_at_sb_and_two_at_tb(self):
@@ -174,6 +180,58 @@ class OutflowAnalysisTests(unittest.TestCase):
         self.assertEqual(a.outflow["analytics"]["total"], 174)
 
 
+class LeaderFocusTests(unittest.TestCase):
+    def source(self):
+        s = source_fixture()
+        s.dates["out_t2"] = date(2026, 9, 30)
+        # t2 закрыта как «временное снижение», а из 20 ушедших вернулись 10
+        s.tasks.loc[s.tasks.task_code.eq("t2"), "task_comment"] = (
+            "Причина оттока: сезонные отпуска, снижение временное, клиент обслуживание не менял")
+        s.tasks.loc[s.tasks.task_code.eq("t2"), "isu_struct_saphr_id"] = 777
+        s.tasks.loc[s.tasks.task_code.eq("t2"), "role_code"] = "МЗП"
+        return s
+
+    def test_unconfirmed_rule(self):
+        from uzp_dash.dashboards.tb_health import text_rules as T
+        self.assertTrue(T.outflow_unconfirmed("1. Причина оттока\nСезонные отпуска"))
+        self.assertTrue(T.outflow_unconfirmed("", "Отток не подтвержден, портфель на месте"))
+        self.assertTrue(T.outflow_unconfirmed("", "сотрудники вернутся в декабре"))
+        self.assertFalse(T.outflow_unconfirmed("1. Причина оттока\nСокращение штата"))
+        self.assertFalse(T.outflow_unconfirmed("", "Клиент подтвердил уход"))
+        self.assertFalse(T.outflow_unconfirmed("", "сотрудники не вернутся"))
+
+    def test_t2_rating_uses_fact_of_return(self):
+        o = O.analyze(self.source(), None, date(2026, 11, 6))
+        t = o["leader"]["t2"]
+        self.assertEqual(t["month_label"], "09.2026")
+        self.assertEqual((t["gone"], t["kept"]), (20, 10))
+        self.assertEqual(t["roles"][0]["name"], "МЗП")
+        self.assertEqual(t["mzp"][0]["name"], "таб. № 777")
+        self.assertAlmostEqual(t["units"][0]["share"], 50)
+        html = V.leader(o, "ТБ")
+        self.assertIn("Фокусы внимания руководителя", html)
+        self.assertIn("таб. № 777", html)
+
+    def test_top_cases_patterns_segments_cards(self):
+        o = O.analyze(self.source(), None, date(2026, 11, 6))
+        top = o["leader"]["top"]
+        self.assertEqual(top[0]["inn"], 101)
+        self.assertEqual(top[0]["kept"], 80)
+        self.assertEqual(top[0]["streak"], 2)
+        # клиент 101 уходит два месяца подряд с возвратом 33% < 50%
+        self.assertTrue(any(p["dim"] == "client" and p["streak"] == 2
+                            for p in o["leader"]["patterns"]))
+        b2b = o["segments"]["B2B"]["rows"]
+        self.assertEqual(b2b[-1]["name"], "Итого")
+        self.assertEqual(b2b[-1]["gone"], o["b2b"])
+        self.assertEqual(b2b[-1]["gap"], 60 - 85)
+        self.assertEqual(o["segments"]["B2C"]["target"], .15)
+        titles = [c["title"] for c in o["cards"]]
+        self.assertIn("Территориальные банки", titles)
+        self.assertIn("Оттоки по сегментам", V.segments(o))
+        self.assertIn("топ-5", V.concentration(o))
+
+
 class OutflowSourceTests(unittest.TestCase):
     def test_latest_source_never_moves_forecast_and_rolls_over_year_boundary(self):
         available = {date(2026, 9, 30), date(2026, 8, 31)}
@@ -199,10 +257,10 @@ class OutflowSourceTests(unittest.TestCase):
         db.executescript("""
           CREATE TABLE uzp_dim_gosb(old_gosb_id INT,new_gosb_id INT,tb_id INT,new_gosb_name TEXT,tb_short_name TEXT,region_name TEXT);
           INSERT INTO uzp_dim_gosb VALUES(1,10,18,'ГОСБ','ББ','Область А'),(1,10,18,'ГОСБ','ББ','Область А');
-          CREATE TABLE uzp_dim_company(inn INT,company_name TEXT);
-          INSERT INTO uzp_dim_company VALUES(101,'Клиент'),(101,'Клиент');
-          CREATE TABLE uzp_dwh_fact_outflow(report_dt TEXT,gosb_id INT,inn INT,segment_name TEXT,outflow_qty INT);
-          INSERT INTO uzp_dwh_fact_outflow VALUES('2026-10-31',1,101,'РГС',10),('2026-10-31',1,102,'ММБ',2),('2026-11-30',1,101,'РГС',999);
+          CREATE TABLE uzp_dim_company(inn INT,company_name TEXT,holding_name TEXT);
+          INSERT INTO uzp_dim_company VALUES(101,'Клиент','Х'),(101,'Клиент','Х');
+          CREATE TABLE uzp_dwh_fact_outflow(report_dt TEXT,gosb_id INT,inn INT,segment_name TEXT,outflow_qty INT,is_force INT,mzp_fio TEXT);
+          INSERT INTO uzp_dwh_fact_outflow VALUES('2026-10-31',1,101,'РГС',10,0,'Иванов'),('2026-10-31',1,102,'ММБ',2,0,NULL),('2026-11-30',1,101,'РГС',999,0,NULL);
           CREATE TABLE uzp_data_outflow_return_detail(report_dt TEXT,gosb_id INT,inn INT,return_qty INT);
           INSERT INTO uzp_data_outflow_return_detail VALUES('2026-10-31',1,101,8),('2026-10-31',1,101,7);
         """)

@@ -732,8 +732,11 @@ geo AS (
               ELSE 'Регион не определён' END AS region
   FROM {schema}.uzp_dim_gosb GROUP BY old_gosb_id
 ), names AS (
-  SELECT inn, min(company_name) AS company_name
+  SELECT inn, min(company_name) AS company_name, min(holding_name) AS holding_name
   FROM {schema}.uzp_dim_company GROUP BY inn
+), tbn AS (
+  SELECT tb_id, min(tb_short_name) AS tb_name
+  FROM {schema}.uzp_dim_gosb GROUP BY tb_id
 ), ret AS (
   SELECT report_dt, gosb_id, inn, sum(return_qty) AS ret_qty
   FROM {schema}.uzp_data_outflow_return_detail
@@ -744,7 +747,8 @@ geo AS (
   WHERE report_dt IN """ + _OUT_PERIODS + """
 )
 SELECT f.report_dt, f.gosb_id AS old_gosb_id, g.new_gosb_id, g.tb_id,
-       g.gosb_name, geo.region, f.inn, names.company_name,
+       g.gosb_name, tbn.tb_name, geo.region, f.inn, names.company_name,
+       names.holding_name, f.is_force, f.mzp_fio,
        f.segment_name AS seg, f.outflow_qty AS gone,
        LEAST(f.outflow_qty, GREATEST(COALESCE(ret.ret_qty, 0), 0)) AS returned,
        (ret.inn IS NOT NULL) AS return_record,
@@ -753,6 +757,7 @@ FROM {schema}.uzp_dwh_fact_outflow f
 JOIN gmap g ON g.old_gosb_id = f.gosb_id
 LEFT JOIN geo ON geo.old_gosb_id = f.gosb_id
 LEFT JOIN names ON names.inn = f.inn
+LEFT JOIN tbn ON tbn.tb_id = g.tb_id
 LEFT JOIN ret ON ret.report_dt = f.report_dt
              AND ret.gosb_id = f.gosb_id AND ret.inn = f.inn
 LEFT JOIN ret_dates ON ret_dates.report_dt = f.report_dt
@@ -766,8 +771,9 @@ OUTFLOW_COHORT_TASKS = """
 WITH gmap AS (""" + _GMAP + """), tasks AS (
  SELECT f.task_code, f.report_dt, f.gosb_id AS old_gosb_id,
         g.new_gosb_id, g.tb_id, f.inn, f.company_name,
-        f.task_create_dt, f.task_type, f.role_code,
+        f.task_create_dt, f.task_type, f.role_code, f.isu_struct_saphr_id,
         f.is_task_closed, f.is_task_closed_success, f.plan_close_task_dttm,
+        f.task_text_status,
         f.task_questionnaire, f.task_comment,
         row_number() OVER (PARTITION BY f.task_code ORDER BY f.report_dt DESC,
                            f.task_create_dt DESC) AS rn
@@ -789,6 +795,37 @@ WITH gmap AS (""" + _GMAP + """), tasks AS (
    )
 )
 SELECT * FROM tasks WHERE rn=1
+"""
+
+# Отрасль организаций с оттоком в окне — для «Концентрации оттоков». Только ИНН
+# из витрины оттока: справочник ЕПК большой, тянуть его целиком ради пары тысяч
+# организаций незачем. Приоритет источников: ЕПК по epk_id (точная связь), витрина
+# ключевых клиентов (отрасль заполнена у ~93% её ИНН, но сама витрина покрывает
+# только ключевых), ЕПК по ИНН — запасная. Отрасль заполнена далеко не у всех, поэтому
+# в отчёте рядом с ней всегда стоит покрытие.
+OUTFLOW_INDUSTRY = """
+WITH o AS (
+  SELECT DISTINCT inn FROM {schema}.uzp_dwh_fact_outflow
+  WHERE report_dt IN """ + _OUT_PERIODS + """ AND outflow_qty > 0
+)
+SELECT o.inn, min(e.industry_name) AS industry_name, 1 AS prio
+FROM o
+JOIN {schema}.uzp_dim_company dc ON dc.inn = o.inn
+JOIN {schema}.uzp_data_epk_consolidation e ON e.epk_id = dc.epk_id
+WHERE e.industry_name IS NOT NULL
+GROUP BY o.inn
+UNION ALL
+SELECT o.inn, min(k.industry_name) AS industry_name, 2 AS prio
+FROM o
+JOIN {schema}.uzp_data_key_client_info_add_attr k ON k.inn = o.inn
+WHERE k.industry_name IS NOT NULL
+GROUP BY o.inn
+UNION ALL
+SELECT o.inn, min(e.industry_name) AS industry_name, 3 AS prio
+FROM o
+JOIN {schema}.uzp_data_epk_consolidation e ON e.inn = o.inn
+WHERE e.industry_name IS NOT NULL
+GROUP BY o.inn
 """
 
 # ФАКТИЧЕСКИЙ отток, который НЕ ВЕРНУЛСЯ, за три ЗАКРЫТЫХ месяца (T-1, T-2, T-3).
