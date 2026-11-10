@@ -27,12 +27,31 @@ NOT_INDUSTRY = {NO_INDUSTRY, "Прочее"}
 TOP_N = 5
 # Порог значимости группы в рейтингах: меньше — шум, где 1 из 1 даёт 100%.
 MIN_RATING_FL = 5
-# Все роли воронки — в порядке от первой линии к руководству. Роль без задач
-# показывается строкой с нулём: «никто из руководства не брал отток» — тоже вывод.
+# Все роли воронки — в порядке от первой линии к руководству. В данных роль без
+# задач остаётся строкой с нулём; в таблице отчёта такие строки не выводятся.
 ROLE_ORDER = ["РН по Сервису", "СЗП", "МЗП", "МКК", "МКК ЦА", "КМ", "МС-СМС", "РН",
               "НО", "НУ", "ДУ", "ЗУПР РБ", "УПР", "ЗАМУПР", "ЗАМПРЕД", "ИД"]
 ROLE_LABEL = {"РН по Сервису": "Сервис (РН по сервису)", "ЗАМПРЕД": "ЗамПред",
               "ЗАМУПР": "ЗамУпр", "ЗУПР РБ": "ЗУПР"}
+
+
+# Регион обслуживания там, где справочник ГОСБ его не даёт. В uzp_dim_gosb
+# region_name пуст у всего Московского банка (единственная единица — «Аппарат
+# МБ»), у четырёх ГО Среднерусского банка и у части отделений; у Чукотского
+# отделения две строки с разными регионами. Без подстановки все они сливались в
+# «Регион не определён», и эта строка становилась крупнейшей в разрезе.
+# Ключ — новый ГОСБ; для Чукотки — старый, конфликт в самом справочнике.
+REGION_BY_GOSB = {
+    9038: "г. Москва",
+    1023: "Московская область", 1024: "Московская область",
+    1025: "Московская область", 1026: "Московская область",
+    1790: "Ямало-Ненецкий АО", 1791: "Ханты-Мансийский АО - Югра",
+    1027: "Красноярский край", 7449: "Красноярский край",
+    2363: "Кемеровская область", 2413: "Иркутская область",
+    1039: "Самарская область",
+}
+REGION_BY_OLD_GOSB = {1009: "Чукотский АО"}
+NO_REGION = "Регион не указан в справочнике ГОСБ"
 
 
 @dataclass
@@ -43,6 +62,8 @@ class Source:
     available: set = field(default_factory=set)
     tasks_ok: bool = False
     error: str = ""
+    service: pd.DataFrame | None = None   # None — диагностика сервиса не читалась
+    reason_map: dict | None = None
 
 
 def period_dates(latest, available) -> dict:
@@ -88,6 +109,7 @@ def load(engine, dates: dict, apparat: set) -> Source:
             raise
         except Exception as err:  # дополнительная аналитика не останавливает отчёт
             progress.warn(f"Отток: задачи для покрытия и ролей недоступны ({str(err)[:120]})")
+        source.service = _service_tasks(engine, params)
         progress.done(f"Полный отток: срез {source.dates['out_asof']}, "
                       f"месяцев в окне {len(source.dates['out_available'])}/3, "
                       f"{len(source.facts)} строк B2B+B2C с историей")
@@ -97,6 +119,39 @@ def load(engine, dates: dict, apparat: set) -> Source:
         source.error = "Не удалось прочитать данные для полного свода оттока."
         progress.warn(f"{source.error} {str(err)[:120]}")
     return source
+
+
+def _service_tasks(engine, params: dict) -> pd.DataFrame | None:
+    """Задачи ролей сервиса по клиентам с оттоком — для пояснения под таблицей ролей."""
+    try:
+        svc = read_sql(engine, Q.OUTFLOW_SERVICE_TASKS, params)
+    except KerberosTicketError:
+        raise
+    except Exception as err:  # noqa: BLE001 — диагностика необязательная
+        progress.warn(f"Отток: задачи ролей сервиса недоступны ({str(err)[:120]})")
+        return None
+    s = _service_summary(svc)
+    progress.done(f"Отток, роли сервиса: {s['total']} задач по клиентам с оттоком, "
+                  f"из них «Отток» — {s['outflow']} (в том же ГОСБ — {s['outflow_same']}); "
+                  f"прочие типы: " + (", ".join(f"{k} — {v}" for k, v in s["other"]) or "нет"))
+    return svc
+
+
+def _service_summary(svc: pd.DataFrame, tb_id=None) -> dict:
+    out = {"available": True, "total": 0, "outflow": 0, "outflow_same": 0, "other": []}
+    if svc is None or svc.empty:
+        return out
+    if tb_id is not None:
+        svc = svc.loc[svc.tb_id.eq(tb_id)]
+    svc = svc.drop_duplicates("task_code")
+    kind = svc["task_type"].fillna("Тип не указан").astype(str)
+    is_out = kind.eq("Отток")
+    same = pd.to_numeric(svc["same_gosb"], errors="coerce").fillna(0).astype(int).eq(1)
+    other = kind[~is_out].value_counts()
+    out.update(total=int(len(svc)), outflow=int(is_out.sum()),
+               outflow_same=int((is_out & same).sum()),
+               other=[(k, int(v)) for k, v in other.head(3).items()])
+    return out
 
 
 def _with_industry(engine, facts: pd.DataFrame, params: dict) -> pd.DataFrame:
@@ -138,12 +193,36 @@ def _text(value, default="") -> str:
     return str(value).strip() or default if pd.notna(value) else default
 
 
+def _reason_map(source: Source) -> dict:
+    """Причины с одинаковым началом сводятся в одну — один раз на всю сборку.
+
+    Группы считаются по задачам всего банка, а не по задачам уровня: иначе одна и
+    та же причина в отчёте ТБ и в отчёте СБ называлась бы по-разному.
+    """
+    if source.reason_map is None:
+        weights: dict = {}
+        cols = ["task_questionnaire", "task_comment"]
+        if not source.tasks.empty and all(c in source.tasks for c in cols):
+            pairs = source.tasks[cols].fillna("").astype(str).value_counts()
+            for (quest, comment), n in pairs.items():
+                label, _ = text_rules.outflow_reason_label(quest, comment)
+                if label:
+                    weights[label] = weights.get(label, 0) + int(n)
+        source.reason_map = text_rules.group_reasons(weights)
+        merged = sum(1 for k, v in source.reason_map.items() if k != v)
+        if merged:
+            progress.done(f"Отток: причины с одинаковым началом сведены — "
+                          f"{len(weights)} формулировок → {len(set(source.reason_map.values()))} причин")
+    return source.reason_map
+
+
 def _records(source: Source, tb_id: int | None) -> tuple[list, list]:
     frame = source.facts
     if frame.empty:
         return [], []
     if tb_id is not None:
         frame = frame.loc[frame.tb_id.eq(tb_id)]
+    rmap = _reason_map(source)
     tasks = source.tasks
     if not tasks.empty:
         if tb_id is not None:
@@ -156,7 +235,7 @@ def _records(source: Source, tb_id: int | None) -> tuple[list, list]:
         task["month"] = pd.Timestamp(task["task_create_dt"]).to_period("M")
         reason, origin = text_rules.outflow_reason_label(
             _text(task.get("task_questionnaire")), _text(task.get("task_comment")))
-        task["reason"], task["reason_source"] = reason, origin
+        task["reason"], task["reason_source"] = rmap.get(reason, reason), origin
         task["unconfirmed"] = (text_rules.outflow_unconfirmed(
             _text(task.get("task_questionnaire")), _text(task.get("task_comment")))
             if task.get("task_type") == "Отток" else "")
@@ -185,7 +264,8 @@ def _records(source: Source, tb_id: int | None) -> tuple[list, list]:
         row["company_name"] = (_text(row.get("company_name"))
                                or next((_text(t.get("company_name")) for t in eligible
                                         if _text(t.get("company_name"))), "") or f"Орг. {inn}")
-        row["region"] = _text(row.get("region"), "Регион не определён")
+        row["region"] = (_text(row.get("region")) or REGION_BY_OLD_GOSB.get(old)
+                         or REGION_BY_GOSB.get(uid) or NO_REGION)
         row["seg"] = _text(row.get("seg"), "Сегмент не определён")
         row["tb_name"] = _text(row.get("tb_name"), f'ТБ {row.get("tb_id")}')
         row["gosb_name"] = _text(row.get("gosb_name"), "ГОСБ не определён")
@@ -533,10 +613,12 @@ def _patterns(b2b: list, tb_id, months: list, n: int = 8) -> list:
             if not key:
                 continue
             g = groups.setdefault(key, {"m": {}, "gone": 0., "returned": 0., "kept": 0.,
-                                        "name": r["company_name"] if dim == "client" else key})
+                                        "name": r["company_name"] if dim == "client" else key,
+                                        "rows": []})
             g["m"][r["report_dt"]] = g["m"].get(r["report_dt"], 0.) + r["gone"]
             for k in ("gone", "returned", "kept"):
                 g[k] += r[k]
+            g["rows"].append(r)
         for g in groups.values():
             if dim != "client" and g["gone"] < .02*total:
                 continue
@@ -552,7 +634,8 @@ def _patterns(b2b: list, tb_id, months: list, n: int = 8) -> list:
                           "name": g["name"], "streak": streak, "growing": growing,
                           "series": [(_month_label(m), v) for m, v in zip(order, series)],
                           "gone": g["gone"], "kept": g["kept"], "return_pct": rate,
-                          "share": g["gone"]/total*100 if total else 0.})
+                          "share": g["gone"]/total*100 if total else 0.,
+                          "_rows": g["rows"]})
     found.sort(key=lambda p: (p["prio"], -p["kept"], -p["streak"]))
     caps = {d: c for d, _, c in PATTERN_DIMS}
     picked, per_dim = [], {}
@@ -563,7 +646,49 @@ def _patterns(b2b: list, tb_id, months: list, n: int = 8) -> list:
         picked.append(p)
         if len(picked) >= n:
             break
+    chosen = {id(p) for p in picked}
+    for p in found:
+        rows = p.pop("_rows")
+        if id(p) in chosen:
+            p["detail"] = _pattern_detail(rows, tb_id, months)
+            p["detail_total"] = len({r["client"] for r in rows})
     return picked
+
+
+PATTERN_DETAIL_N = 10
+
+
+def _pattern_detail(rows: list, tb_id, months: list) -> list:
+    """Детализация закономерности: организации, из которых она складывается.
+
+    Тот же грейн, что у топ-5 (клиент уровня), — по невозвращённым ФЛ; строки без
+    потерь в конце. Показываются первые PATTERN_DETAIL_N, полный список — в Excel.
+    """
+    cases: dict = {}
+    for r in rows:
+        g = cases.setdefault(r["client"], {"name": r["company_name"], "inn": r["inn"],
+                                           "gosb": set(), "months": {}, "gone": 0.,
+                                           "returned": 0., "kept": 0., "reasons": {},
+                                           "tasks": {}, "mzp": r["mzp"]})
+        g["gosb"].add(r["gosb_name"])
+        g["months"][r["report_dt"]] = g["months"].get(r["report_dt"], 0.) + r["gone"]
+        for k in ("gone", "returned", "kept"):
+            g[k] += r[k]
+        if r["reason_known"]:
+            g["reasons"][r["reason"]] = g["reasons"].get(r["reason"], 0.) + r["gone"]
+        for t in r["out_task_list"]:
+            g["tasks"][str(t["task_code"])] = t
+    out = []
+    for g in sorted(cases.values(), key=lambda g: (-g["kept"], -g["gone"], g["name"]))[:PATTERN_DETAIL_N]:
+        g["state"] = _task_state(list(g.pop("tasks").values()))
+        g["gosb"] = ", ".join(sorted(g["gosb"]))
+        g["reason"] = max(g["reasons"], key=g["reasons"].get) if g["reasons"] else UNKNOWN_REASON
+        del g["reasons"]
+        g["month_list"] = [g["months"].get(m, 0.) for m in reversed(months)]
+        del g["months"]
+        g["return_pct"] = g["returned"]/g["gone"]*100 if g["gone"] else None
+        out.append(g)
+    return out
 
 
 def _segments(rows: list, previous: list, comparable: bool, return_available: bool) -> dict:
@@ -651,6 +776,8 @@ def analyze(source: Source | None, tb_id: int | None, today) -> dict:
     current = [r for r in rows if r["report_dt"] in source.dates.get("out_months", [])]
     previous = [r for r in rows if r["report_dt"] in source.dates.get("out_prev_months", [])]
     report = _report(current, previous, tasks, source, pd.Timestamp(today).date())
+    report["tasks"]["service"] = (_service_summary(source.service, tb_id)
+                                  if source.service is not None else {"available": False})
     report["leader"] = _leader(current, source, tb_id)
     report["segments"] = _segments(current, previous, report["comparable"],
                                    report["return_available"])

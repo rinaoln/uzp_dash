@@ -165,7 +165,7 @@ class OutflowAnalysisTests(unittest.TestCase):
         s.facts["company_name"], s.facts["region"] = pd.NA, pd.NA
         s.tasks["company_name"], s.tasks["role_code"] = pd.NA, " "
         o = self.report(s)
-        self.assertEqual(o["regions"][0]["name"], "Регион не определён")
+        self.assertEqual(o["regions"][0]["name"], O.NO_REGION)
         self.assertEqual(o["tasks"]["roles"][0]["role"], "Роль не указана")
         self.assertNotIn('>nan<', V.concentration(o))
 
@@ -230,6 +230,89 @@ class LeaderFocusTests(unittest.TestCase):
         self.assertIn("Территориальные банки", titles)
         self.assertIn("Оттоки по сегментам", V.segments(o))
         self.assertIn("топ-5", V.concentration(o))
+
+
+class OutflowFixesTests(unittest.TestCase):
+    """Группировка причин, регион, детализация закономерностей, роли сервиса."""
+
+    def test_reasons_with_same_start_are_one_reason(self):
+        from uzp_dash.dashboards.tb_health import text_rules as T
+        raw = ["Переток в другую организацию", "Переток в другую организацию (холдинг)",
+               "переток в другую организацию: ИНН 7701234567",
+               "Переток в другую организацию\nсотрудники перешли в ООО",
+               "Переток в другую организацию группы компаний",
+               "Ликвидация организации", "Ликвидация",
+               "Переход сотрудников на самозанятость", "Переход сотрудников в другую организацию"]
+        labels = {}
+        for r in raw:
+            labels[T._reason_label(r)] = labels.get(T._reason_label(r), 0) + 1
+        g = T.group_reasons(labels)
+        self.assertEqual({g[T._reason_label(r)] for r in raw[:5]}, {"Переток в другую организацию"})
+        self.assertEqual(g["Ликвидация организации"], "Ликвидация")
+        self.assertNotEqual(g["Переход сотрудников на самозанятость"],
+                            g["Переход сотрудников в другую организацию"])
+        # общего полного варианта нет — имя группы помечено многоточием
+        g2 = T.group_reasons({"Переток в другую организацию холдинга": 2,
+                              "Переток в другую организацию ИП": 1})
+        self.assertEqual(set(g2.values()), {"Переток в другую организацию…"})
+
+    def test_reason_summary_has_no_duplicates(self):
+        s = source_fixture()
+        s.tasks["task_questionnaire"] = [
+            "1. Причина оттока\nПереток в другую организацию (холдинг)",
+            "1. Причина оттока\nПереток в другую организацию: ИНН 1",
+            "1. Причина оттока\nПереток в другую организацию",
+            "1. Причина оттока\nПереток в другую организацию\nкомментарий",
+            "", "", "", ""]
+        o = O.analyze(s, None, date(2026, 11, 6))
+        names = [r["name"] for r in o["reasons"]]
+        self.assertEqual([n for n in names if n.startswith("Переток")],
+                         ["Переток в другую организацию"])
+
+    def test_region_fallback_for_moscow_and_empty_dictionary(self):
+        s = source_fixture()
+        s.facts["region"] = pd.NA
+        s.facts.loc[s.facts.old_gosb_id.eq(1), ["old_gosb_id", "new_gosb_id"]] = 9038
+        o = O.analyze(s, None, date(2026, 11, 6))
+        names = {r["name"] for r in o["regions"]}
+        self.assertIn("г. Москва", names)
+        self.assertIn(O.NO_REGION, names)
+
+    def test_pattern_rows_open_organization_detail(self):
+        o = O.analyze(source_fixture(), None, date(2026, 11, 6))
+        pat = next(p for p in o["leader"]["patterns"] if p["dim"] == "client")
+        self.assertEqual(pat["detail"][0]["inn"], 101)
+        self.assertEqual(pat["detail"][0]["kept"], 80)
+        html = V.leader(o, "ТБ")
+        self.assertIn('class="oa-pat"', html)
+        self.assertIn("детализация", html)
+
+    def test_service_roles_note_explains_empty_rows(self):
+        s = source_fixture()
+        s.service = pd.DataFrame([
+            dict(tb_id=18, role_code="РН по Сервису", task_type="Сервисная задача по Юр.лицу",
+                 task_code="s1", same_gosb=1),
+            dict(tb_id=18, role_code="МС-СМС", task_type="Отток", task_code="s2", same_gosb=0),
+            dict(tb_id=40, role_code="МС-СМС", task_type="Отток", task_code="s3", same_gosb=1)])
+        o = O.analyze(s, 18, date(2026, 11, 6))
+        svc = o["tasks"]["service"]
+        self.assertEqual((svc["total"], svc["outflow"], svc["outflow_same"]), (2, 1, 0))
+        html = V.tasks(o)
+        self.assertIn("Роли сервиса", html)
+        self.assertIn("Сервисная задача по Юр.лицу", html)
+        self.assertIn("на другой ГОСБ", html)
+        # диагностика не читалась — пояснения нет, а не «задач нет»
+        self.assertNotIn("Роли сервиса", V.tasks(O.analyze(source_fixture(), 18, date(2026, 11, 6))))
+
+
+class RoleTableTests(unittest.TestCase):
+    def test_roles_without_tasks_are_hidden_with_explanation(self):
+        o = O.analyze(source_fixture(), None, date(2026, 11, 6))
+        html = V.tasks(o)
+        self.assertIn("ЗамПред", [r["label"] for r in o["tasks"]["roles"]])   # в данных есть
+        self.assertNotIn("ЗамПред", html)                                     # в таблице нет
+        self.assertIn("МЗП", html)
+        self.assertIn("В анализе участвовали все роли воронки", html)
 
 
 class OutflowSourceTests(unittest.TestCase):

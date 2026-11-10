@@ -492,11 +492,71 @@ def outflow_reason_label(questionnaire: str | None,
     return "", ""
 
 
+# Ответ чек-листа — это пункт формы, к которому сотрудник часто дописывает
+# уточнение: «Переток в другую организацию (холдинг)», «…: ИНН 7701…», вторая
+# строка с комментарием. Без обрезки каждое уточнение становилось отдельной
+# «причиной», и свод распадался на десятки строк одной и той же причины.
+_REASON_CUT = re.compile(r"\s*(?:\n|\(|\[|:|;|,|/|\s[—–-]\s).*", re.S)
+
+
 def _reason_label(text: str) -> str:
-    """Ярлык причины: без вердикта после тире, с заглавной буквы, не длиннее строки."""
-    label = str(text).split(" — ")[0].strip().strip(".")
+    """Ярлык причины: без уточнений и вердикта, с заглавной буквы, не длиннее строки."""
+    label = _REASON_CUT.sub("", str(text).strip()).strip().strip(".").strip()
+    label = re.sub(r"\s+", " ", label) or str(text).strip()[:60]
     label = REASON_SYNONYMS.get(label.lower(), label)
     return (label[:1].upper() + label[1:])[:60]
+
+
+# Сколько первых слов должно совпасть, чтобы две причины считались одной.
+# Три слова различают «Переход сотрудников на самозанятость» и «Переход
+# сотрудников в другую организацию», но сводят вместе «Переток в другую
+# организацию» и «Переток в другую организацию холдинга».
+REASON_HEAD_WORDS = 3
+_TAIL_STOP = {"в", "во", "на", "по", "с", "со", "к", "у", "из", "от", "до", "для", "и", "или", "за"}
+
+
+def _reason_words(label: str) -> list[str]:
+    return re.findall(r"[a-zа-я0-9]+(?:-[a-zа-я0-9]+)*", label.lower().replace("ё", "е"))
+
+
+def group_reasons(weights: dict[str, float]) -> dict[str, str]:
+    """Свести причины с одинаковым началом: {ярлык: ярлык группы}.
+
+    Группа — совпадение первых REASON_HEAD_WORDS слов; короткая причина
+    («Сокращение штата») забирает все, что с неё начинаются («Сокращение штата
+    у клиента»). Имя группы — общее начало её причин; если оно не совпадает ни
+    с одной причиной целиком, в конце ставится «…», чтобы было видно, что это
+    объединение. weights — вес причины (ФЛ или число задач) для выбора написания.
+    """
+    words = {lbl: _reason_words(lbl) for lbl in weights if lbl}
+    head = {lbl: tuple(w[:REASON_HEAD_WORDS]) for lbl, w in words.items() if w}
+    short = sorted({h for lbl, h in head.items() if len(words[lbl]) < REASON_HEAD_WORDS},
+                   key=len)
+    key = {}
+    for lbl, h in head.items():
+        full = tuple(words[lbl])
+        key[lbl] = next((s for s in short if full[:len(s)] == s), h)
+    groups: dict[tuple, list[str]] = {}
+    for lbl, k in key.items():
+        groups.setdefault(k, []).append(lbl)
+    out = {}
+    for members in groups.values():
+        seqs = [words[m] for m in members]
+        n = 0
+        while all(len(s) > n for s in seqs) and len({s[n] for s in seqs}) == 1:
+            n += 1
+        exact = [m for m in members if len(words[m]) == n]
+        if exact:
+            name = max(exact, key=lambda m: (weights.get(m, 0), m))
+        else:
+            while n > 1 and seqs[0][n-1] in _TAIL_STOP:
+                n -= 1
+            best = max(members, key=lambda m: (weights.get(m, 0), m))
+            tokens = best.split()
+            name = " ".join(tokens[:n]).rstrip(".,;:") + "…"
+        for m in members:
+            out[m] = name
+    return out
 
 
 def themes(texts: list[str]) -> str:

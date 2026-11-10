@@ -149,6 +149,28 @@ def _tone(value, good: float, warn: float) -> str:
     return f'<span class="oa-t-{kind}">{value:.0f}%</span>'
 
 
+def _service_note(s: dict) -> str:
+    """Почему у ролей сервиса пусто: что у них есть по клиентам с оттоком на самом деле."""
+    if not s.get("available"):
+        return ""
+    if not s["total"]:
+        return ('<p class="oa-note"><b>Роли сервиса.</b> По клиентам с оттоком в месяц ухода '
+                'или следующий у ролей сервиса (РН по сервису, МС/СМС) задач нет ни одного типа.</p>')
+    other = ", ".join(f'«{C.esc(k)}» — {C.fmt_num(v)}' for k, v in s["other"])
+    lost = s["outflow"] - s["outflow_same"]
+    parts = [f'<b>Роли сервиса.</b> По клиентам с оттоком у ролей сервиса (РН по сервису, '
+             f'МС/СМС) {C.fmt_num(s["total"])} задач в месяц ухода или следующий']
+    if s["outflow"]:
+        parts.append(f'типа «Отток» — {C.fmt_num(s["outflow"])}'
+                     + (f', из них {C.fmt_num(lost)} заведены на другой ГОСБ внутри ТБ и в '
+                        'таблицу не попали' if lost else ''))
+    else:
+        parts.append('типа «Отток» среди них нет')
+    if other:
+        parts.append(f'других типов: {other} — в таблицу они не входят, она считает только задачи на отток')
+    return '<p class="oa-note">' + "; ".join(parts) + '.</p>'
+
+
 def tasks(o: dict) -> str:
     if not o.get("available"):
         return ""
@@ -159,20 +181,21 @@ def tasks(o: dict) -> str:
     uncovered = t["clients"]-t["covered"]
     goal = 50
     rows = []
-    for r in t["roles"]:
-        empty = not r["tasks"]
+    # Роли без задач в таблицу не выводятся: строка из прочерков ничего не говорит,
+    # а что анализ шёл по всем ролям, сказано в пояснении над таблицей.
+    active = [r for r in t["roles"] if r["tasks"]]
+    for r in active:
         rows.append([
             f'<b>{C.esc(r["label"])}</b>' + (f'<small class="oa-cell-note">{C.esc(r["role"])}</small>'
                                              if r["label"] != r["role"] else ""),
-            "—" if empty else f'{C.fmt_num(r["tasks"])} <small class="oa-muted">/ {C.fmt_num(r["fl"])} ФЛ</small>',
-            "—" if empty else _tone(r["worked_pct"], 55, 45)
+            f'{C.fmt_num(r["tasks"])} <small class="oa-muted">/ {C.fmt_num(r["fl"])} ФЛ</small>',
+            _tone(r["worked_pct"], 55, 45)
             + f' <small class="oa-muted">/ {C.fmt_num(r["fl_worked"])} ФЛ</small>',
-            "—" if empty else _tone(r["return_pct"], goal, goal*.8)
+            _tone(r["return_pct"], goal, goal*.8)
             + f' <small class="oa-muted">/ {C.fmt_num(r["fl_returned"])} ФЛ</small>',
-            "—" if empty else C.fmt_num(r["success"]),
-            "—" if empty else C.fmt_num(r["open"]),
-            "—" if empty else C.fmt_num(r["overdue"])])
-    attrs = [' class="oa-row-empty"' if not r["tasks"] else "" for r in t["roles"]]
+            C.fmt_num(r["success"]),
+            C.fmt_num(r["open"]),
+            C.fmt_num(r["overdue"])])
     return C.card(
         '<h3>Покрытие задачами и отработка по ролям</h3>'
         '<div class="oa-task-metrics">'
@@ -186,16 +209,19 @@ def tasks(o: dict) -> str:
         f'<div class="oa-accent"><span>Завершено возвратом</span><b>{C.fmt_num(t["covered_returned"])} ФЛ</b>'
         f'<small>{_pct(t["covered_return_pct"])} от ФЛ в задачах</small></div></div>'
         '<h4 class="oa-h4">Отработка задач по ролям</h4>'
-        '<p class="oa-note">Все роли воронки, включая те, у которых задач на отток нет. '
-        '«Задач / ФЛ» — число задач роли и отток клиентов, к которым они привязаны. '
+        '<p class="oa-note">В анализе участвовали все роли воронки. Если роли нет в '
+        f'таблице, значит, задач на отток у неё за период {C.esc(o["dates"].get("out_label", ""))} '
+        'не было. «Задач / ФЛ» — число задач роли и отток клиентов, к которым они привязаны. '
         '«Отработано» — доля закрытых задач и ФЛ по ним. «Возврат» — подтверждённый '
         'витриной возврат ФЛ по клиентам роли, цель 50%. Клиент с задачами нескольких '
         'ролей учитывается в каждой, поэтому сумма ФЛ по ролям больше итога.</p>'
-        + '<div class="tbl-scroll">' + C.table(
+        + ('<div class="tbl-scroll">' + C.table(
             ["Роль", "Задач / ФЛ", "Отработано, % / ФЛ", "Возврат, % / ФЛ",
              "Успешно закрыты", "Открыты", "Просрочены"],
-            rows, [1, 2, 3, 4, 5, 6], attrs) + '</div>'
-        '<p class="oa-note">Клиент — ИНН в подразделении выбранного уровня '
+            rows, [1, 2, 3, 4, 5, 6]) + '</div>' if rows else
+           '<p class="oa-lead">Задач на отток за период нет ни у одной роли.</p>')
+        + _service_note(t.get("service") or {})
+        + '<p class="oa-note">Клиент — ИНН в подразделении выбранного уровня '
         '(в сети: ТБ × ИНН; внутри ТБ: ГОСБ × ИНН). Учитываются только задачи типа '
         '«Отток», созданные в месяц ухода или следующий месяц; один код задачи '
         'учитывается один раз. Прочие контакты не заменяют задачу на отток.</p>',
@@ -303,15 +329,48 @@ def _focus_t2(t: dict) -> str:
     return head + lead + _fold(summary, lists)
 
 
-def _pattern_li(p: dict) -> str:
+def _pattern_detail(p: dict, months: list) -> str:
+    """Организации закономерности — таблица под строкой, открывается по клику."""
+    rows = []
+    for g in p.get("detail") or []:
+        series = " → ".join(C.fmt_num(v) for v in g["month_list"])
+        rows.append([
+            f'<b>{C.esc(g["name"])}</b><small class="oa-cell-note">Орг. {g["inn"]}</small>',
+            C.esc(g["gosb"]) + (f'<small class="oa-cell-note">МЗП: {C.esc(g["mzp"])}</small>'
+                                if g["mzp"] else ""),
+            series,
+            f'<b class="oa-t-bad">{C.fmt_num(g["kept"])}</b> <small class="oa-muted">из {C.fmt_num(g["gone"])}</small>',
+            _tone(g["return_pct"], 50, 40),
+            C.esc(g["state"]) + f'<small class="oa-cell-note">{C.esc(g["reason"])}</small>'])
+    if not rows:
+        return ""
+    total = p.get("detail_total", len(rows))
+    more = (f'<p class="oa-note">Показаны {len(rows)} из {C.fmt_num(total)} организаций — '
+            'по числу невернувшихся. Полный список — в выгрузке Excel раздела.</p>'
+            if total > len(rows) else "")
+    head = f"Отток по месяцам ({' → '.join(months)})" if months else "Отток по месяцам"
+    return ('<div class="tbl-scroll">' + C.table(
+        ["Организация", "ГОСБ", head, "Не вернулись, ФЛ", "Возврат", "Задача и причина"],
+        rows, [2, 3, 4]) + '</div>' + more)
+
+
+def _pattern_li(p: dict, months: list | None = None) -> str:
     series = " → ".join(f'{m} — {C.fmt_num(v)}' for m, v in p["series"])
     arrow = " ↑" if p["growing"] else ""
     share = f' · {p["share"]:.0f}% B2B' if p["dim"] != "client" else ""
-    return (f'<li title="{C.esc(series)} ФЛ"><b>{C.esc(p["name"])}</b> '
+    line = (f'<b>{C.esc(p["name"])}</b> '
             f'<span class="oa-chip">{C.esc(p["dim_title"])}</span> '
             f'{p["streak"]} мес. подряд{arrow} · возврат '
             f'<b class="oa-t-bad">{p["return_pct"]:.0f}%</b> · не вернулись '
-            f'{C.fmt_num(p["kept"])} ФЛ{share}</li>')
+            f'{C.fmt_num(p["kept"])} ФЛ{share}')
+    detail = _pattern_detail(p, months or [])
+    if not detail:
+        return f'<li title="{C.esc(series)} ФЛ">{line}</li>'
+    n = p.get("detail_total", 0)
+    link = f'детализация: {C.fmt_num(n)} орг. ›' if n > 1 else 'детализация ›'
+    return (f'<li><details class="oa-pat"><summary title="{C.esc(series)} ФЛ">{line} '
+            f'<span class="oa-pat-link">{link}</span></summary>'
+            f'<div class="oa-pat-body">{detail}</div></details></li>')
 
 
 def _focus_top(leader: dict, unit: str) -> str:
@@ -355,16 +414,18 @@ def _focus_top(leader: dict, unit: str) -> str:
                 + _fold(f'Таблица топ-{len(top)} с действиями · {names}'
                         + ("…" if len(top) > 3 else ""), table))
     pats = leader.get("patterns") or []
+    pm = leader.get("months") or []
     if pats:
         shown, rest = pats[:3], pats[3:]
         body += ('<h5 class="oa-h5">Закономерности концентрации</h5>'
-                 f'<ul class="oa-patterns">{"".join(_pattern_li(p) for p in shown)}</ul>')
+                 f'<ul class="oa-patterns">{"".join(_pattern_li(p, pm) for p in shown)}</ul>')
         note = ('<p class="oa-note">Группа попадает в вывод, если отток B2B идёт не меньше '
                 'двух месяцев подряд, а возврат ниже цели 50%. Для ведомства, отрасли, '
                 'сегмента и подразделения месяц считается, если на группу пришлось от 1% '
                 'оттока B2B уровня. Порядок: ведомства, отрасли, клиенты, затем подразделения '
-                'и сегменты как фон. Помесячные значения — в подсказке при наведении.</p>')
-        more = (f'<ul class="oa-patterns">{"".join(_pattern_li(p) for p in rest)}</ul>'
+                'и сегменты как фон. Помесячные значения — в подсказке при наведении, '
+                'организации закономерности — по клику на её строку.</p>')
+        more = (f'<ul class="oa-patterns">{"".join(_pattern_li(p, pm) for p in rest)}</ul>'
                 if rest else "")
         body += _fold((f'Ещё {len(rest)} · ' if rest else "") + 'как отбираются закономерности',
                       more + note)

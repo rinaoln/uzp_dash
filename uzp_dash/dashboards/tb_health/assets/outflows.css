@@ -94,3 +94,10 @@
 .oa-fold-body{padding:4px 0 2px}
 .oa-fold-body .oa-ranks{margin-top:10px}
 @media print{.oa-fold>summary::before{display:none}.oa-fold-body{display:block}}
+/* закономерности: строка раскрывается в организации, из которых она сложилась */
+.oa-pat>summary{cursor:pointer;list-style:none}
+.oa-pat>summary::-webkit-details-marker{display:none}
+.oa-pat-link{margin-left:6px;color:var(--accent);font-size:13px;white-space:nowrap}
+.oa-pat>summary:hover .oa-pat-link{text-decoration:underline}
+.oa-pat[open] .oa-pat-link{opacity:.7}
+.oa-pat-body{margin:6px 0 10px}

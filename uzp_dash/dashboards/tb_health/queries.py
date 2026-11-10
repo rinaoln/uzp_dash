@@ -728,8 +728,7 @@ WITH gmap AS (""" + _GMAP + """),
 geo AS (
   SELECT old_gosb_id,
          CASE WHEN count(DISTINCT NULLIF(btrim(region_name), '')) = 1
-              THEN min(NULLIF(btrim(region_name), ''))
-              ELSE 'Регион не определён' END AS region
+              THEN min(NULLIF(btrim(region_name), '')) END AS region
   FROM {schema}.uzp_dim_gosb GROUP BY old_gosb_id
 ), names AS (
   SELECT inn, min(company_name) AS company_name, min(holding_name) AS holding_name
@@ -795,6 +794,29 @@ WITH gmap AS (""" + _GMAP + """), tasks AS (
    )
 )
 SELECT * FROM tasks WHERE rn=1
+"""
+
+# Роли сервиса в воронке. Таблица ролей считает только задачи типа «Отток» в том
+# же ГОСБ, где был уход; сервис чаще работает другими типами задач, поэтому
+# отдельным запросом видно, что у сервиса по клиентам с оттоком есть вообще и что
+# из этого отсекает правило. Только диагностика: в расчёт покрытия не входит.
+SERVICE_ROLES = ("РН по Сервису", "МС-СМС")
+OUTFLOW_SERVICE_TASKS = """
+WITH gmap AS (""" + _GMAP + """), o AS (
+  SELECT DISTINCT g.tb_id, f.gosb_id, f.inn, f.report_dt
+  FROM {schema}.uzp_dwh_fact_outflow f
+  JOIN gmap g ON g.old_gosb_id = f.gosb_id
+  WHERE f.report_dt IN (:m_out1, :m_out2, :m_out3) AND f.outflow_qty > 0
+)
+SELECT t.tb_id, t.role_code, t.task_type, t.task_code,
+       max(CASE WHEN o.gosb_id = t.gosb_id THEN 1 ELSE 0 END) AS same_gosb
+FROM {schema}.uzp_dwh_sale_funnel_task t
+JOIN o ON o.inn = t.inn AND o.tb_id = t.tb_id
+     AND t.task_create_dt >= date_trunc('month', o.report_dt)
+     AND t.task_create_dt < date_trunc('month', o.report_dt) + interval '2 months'
+WHERE t.role_code IN (""" + ", ".join(f"'{r}'" for r in SERVICE_ROLES) + """)
+  AND t.task_create_dt >= :out_from AND t.task_create_dt <= :ref_funnel
+GROUP BY t.tb_id, t.role_code, t.task_type, t.task_code
 """
 
 # Отрасль организаций с оттоком в окне — для «Концентрации оттоков». Только ИНН

@@ -2546,10 +2546,18 @@ def _outflow_reasons(rows: list) -> tuple[list, int, float]:
     """
     agg: dict = {}
     known_n, known_kept = 0, 0.0
+    weights: dict = {}
+    for r in rows:
+        name = str(r.get("out_reason") or "").strip()
+        if name:
+            weights[name] = weights.get(name, 0.0) + r["gone"]
+    # одна причина с разными уточнениями — одна строка свода
+    groups = text_rules.group_reasons(weights)
     for r in rows:
         name = str(r.get("out_reason") or "").strip()
         if not name:
             continue
+        name = groups.get(name, name)
         known_n += 1
         known_kept += r["kept"]
         g = agg.setdefault(name, {"reason": name, "n": 0, "kept": 0.0, "gone": 0.0,
