@@ -171,6 +171,33 @@ def _service_note(s: dict) -> str:
     return '<p class="oa-note">' + "; ".join(parts) + '.</p>'
 
 
+def _quality(t: dict) -> str:
+    """Качество отработки: вывод сотрудника в задаче против факта возврата."""
+    q = t.get("quality")
+    if not q or not t["tasks"]:
+        return ""
+    p, c = q["promised"], q["confirmed"]
+    return (
+        '<h4 class="oa-h4">Качество отработки задач</h4>'
+        '<div class="oa-task-metrics">'
+        f'<div><span>{C.esc(p["label"])}</span><b class="oa-t-bad">{C.fmt_num(p["flagged"])} {C.plural(p["flagged"], "задача", "задачи", "задач")}</b>'
+        f'<small>из {C.fmt_num(p["tasks"])} с причиной «вернутся»</small></div>'
+        f'<div><span>Не вернулись по этим задачам</span><b>{C.fmt_num(p["kept"])} ФЛ</b>'
+        f'<small>из {C.fmt_num(p["gone"])} ФЛ оттока</small></div>'
+        f'<div><span>{C.esc(c["label"])}</span><b class="oa-t-warn">{C.fmt_num(c["flagged"])} {C.plural(c["flagged"], "задача", "задачи", "задач")}</b>'
+        f'<small>из {C.fmt_num(c["tasks"])} с причиной «ушли окончательно»</small></div>'
+        f'<div><span>Вернулись по этим задачам</span><b>{C.fmt_num(c["returned"])} ФЛ</b>'
+        f'<small>из {C.fmt_num(c["gone"])} ФЛ оттока</small></div></div>'
+        '<p class="oa-note">Категория задачи — по причине из чек-листа и справочнику '
+        '«Качество отработки». «Обещали вернуть» — причина временная (перенос выплат, '
+        'наличные, текучка, разовое зачисление), а по клиентам задачи вернулись не все ФЛ. '
+        '«Подтверждённый отток» — уход назван окончательным (другой банк, ликвидация, '
+        'сокращение, политика головной компании), а возврат по клиентам есть. Причина '
+        f'распознана по справочнику у {C.fmt_num(q["classified"])} из {C.fmt_num(t["tasks"])} '
+        'задач; недозвон, «пункт не актуален» и отказ от разговора в категории не входят. '
+        'ФЛ считаются по клиентам без повторов.</p>')
+
+
 def tasks(o: dict) -> str:
     if not o.get("available"):
         return ""
@@ -208,7 +235,8 @@ def tasks(o: dict) -> str:
         f'{C.fmt_num(t["tasks"])} задач</small></div>'
         f'<div class="oa-accent"><span>Завершено возвратом</span><b>{C.fmt_num(t["covered_returned"])} ФЛ</b>'
         f'<small>{_pct(t["covered_return_pct"])} от ФЛ в задачах</small></div></div>'
-        '<h4 class="oa-h4">Отработка задач по ролям</h4>'
+        + _quality(t)
+        + '<h4 class="oa-h4">Отработка задач по ролям</h4>'
         '<p class="oa-note">В анализе участвовали все роли воронки. Если роли нет в '
         f'таблице, значит, задач на отток у неё за период {C.esc(o["dates"].get("out_label", ""))} '
         'не было. «Задач / ФЛ» — число задач роли и отток клиентов, к которым они привязаны. '

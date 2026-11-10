@@ -12,7 +12,7 @@ import pandas as pd
 
 from ... import agency, progress
 from ...db import KerberosTicketError, read_sql
-from . import queries as Q, segments, text_rules
+from . import queries as Q, reason_quality, segments, text_rules
 
 RETURN_TARGET = .5
 # Цель возврата для оттока 1–2 получателей: такой уход чаще текучка, и вернуть
@@ -239,6 +239,8 @@ def _records(source: Source, tb_id: int | None) -> tuple[list, list]:
         task["unconfirmed"] = (text_rules.outflow_unconfirmed(
             _text(task.get("task_questionnaire")), _text(task.get("task_comment")))
             if task.get("task_type") == "Отток" else "")
+        task["quality"] = reason_quality.classify(
+            _text(task.get("task_questionnaire")), _text(task.get("task_comment")))
         index.setdefault((int(task["old_gosb_id"]), int(task["inn"]), task["month"]), []).append(task)
         task_rows.append(task)
     records = []
@@ -357,6 +359,7 @@ def _tasks(rows: list, tasks: list, ok: bool, today) -> dict:
         g["worked_pct"] = (g["success"]+g["closed_other"])/g["tasks"]*100 if g["tasks"] else None
         g["return_pct"] = g["fl_returned"]/g["fl"]*100 if g["fl"] else None
     order = {r: i for i, r in enumerate(ROLE_ORDER)}
+    quality = _quality(selected, fl_of)
     gone = _sum(b2b)
     covered_rows = [r for r in b2b if r["client"] in covered]
     covered_gone = _sum(covered_rows)
@@ -367,9 +370,37 @@ def _tasks(rows: list, tasks: list, ok: bool, today) -> dict:
             "covered_returned": covered_ret,
             "covered_return_pct": covered_ret/covered_gone*100 if covered_gone else None,
             "gone_percent": covered_gone/gone*100 if gone else None,
-            "tasks": len(selected),
+            "tasks": len(selected), "quality": quality,
             "roles": sorted(roles.values(), key=lambda g: (-g["tasks"], order.get(g["role"], 99),
                                                            g["role"]))}
+
+
+def _quality(selected: list, fl_of: dict) -> dict:
+    """Качество отработки: вывод в задаче против факта возврата.
+
+    Категория задачи — по причине из справочника (`reason_quality`). Задача
+    «обещали вернуть, но не вернули» — причина временная, а по её клиентам
+    вернулись не все ФЛ; «вернулись в подтверждённом оттоке» — уход назван
+    окончательным, а по клиентам есть возврат. ФЛ считаются по клиентам без
+    повторов: две задачи одного клиента не удваивают его отток.
+    """
+    out = {"classified": 0}
+    for cat, name, hit in ((reason_quality.PROMISED, "promised", lambda g, r: g > r),
+                           (reason_quality.CONFIRMED, "confirmed", lambda g, r: r > 0)):
+        part = [t for t in selected if t.get("quality") == cat]
+        fl: dict = {}
+        flagged = 0
+        for t in part:
+            own = fl_of.get(str(t["task_code"]), {})
+            gone, ret = sum(v[0] for v in own.values()), sum(v[1] for v in own.values())
+            flagged += hit(gone, ret)
+            fl.update(own)
+        out["classified"] += len(part)
+        out[name] = {"label": cat, "tasks": len(part), "flagged": flagged,
+                     "gone": sum(v[0] for v in fl.values()),
+                     "returned": sum(v[1] for v in fl.values())}
+        out[name]["kept"] = out[name]["gone"] - out[name]["returned"]
+    return out
 
 
 def _report(rows: list, previous: list, tasks: list, source: Source, today) -> dict:

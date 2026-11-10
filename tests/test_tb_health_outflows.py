@@ -315,6 +315,39 @@ class RoleTableTests(unittest.TestCase):
         self.assertIn("В анализе участвовали все роли воронки", html)
 
 
+class TaskQualityTests(unittest.TestCase):
+    def test_reference_matching(self):
+        from uzp_dash.dashboards.tb_health import reason_quality as R
+        q = "1. Причина оттока\n{}\n2. Ожидаемый возврат получателей\nПункт не актуален"
+        self.assertEqual(R.classify(q.format("Перенос даты выплаты ЗП (на декабрь)")), R.PROMISED)
+        self.assertEqual(R.classify(q.format("Блокировка комплаенс\\Стоп-листы")), R.CONFIRMED)
+        self.assertEqual(R.classify(q.format("Пункт не актуален"), "STAFF_TURNOVER"), R.PROMISED)
+        self.assertEqual(R.classify(q.format("Сезонный бизнесмен")), "")
+        self.assertEqual(R.classify(q.format("Недостаток контактных данных")), "")
+
+    def test_quality_counts_tasks_against_fact_of_return(self):
+        s = source_fixture()
+        quest = {"t1": "1. Причина оттока\nПеренос даты выплаты ЗП",
+                 "t2": "1. Причина оттока\nУшел в другой банк",
+                 "t3": "1. Причина оттока\nПункт не актуален"}
+        s.tasks["task_questionnaire"] = s.tasks.task_code.map(quest).fillna("")
+        s.tasks.loc[s.tasks.task_code.eq("t3"), "task_comment"] = "COVENANTS"
+        t = O.analyze(s, None, date(2026, 11, 6))["tasks"]
+        q = t["quality"]
+        self.assertEqual(q["classified"], 3)
+        # t1: 101 за сен+окт — 120 ФЛ, вернулись 40
+        self.assertEqual({k: q["promised"][k] for k in ("tasks", "flagged", "gone", "kept")},
+                         {"tasks": 1, "flagged": 1, "gone": 120, "kept": 80})
+        # t2 (101 за сен: 20/10) и t3 (102 за авг: 40/10) — возврат есть у обеих
+        self.assertEqual({k: q["confirmed"][k] for k in ("tasks", "flagged", "gone", "returned")},
+                         {"tasks": 2, "flagged": 2, "gone": 60, "returned": 20})
+        html = V.tasks(O.analyze(s, None, date(2026, 11, 6)))
+        self.assertIn("Качество отработки задач", html)
+        self.assertIn("1 задача", html)
+        self.assertIn("2 задачи", html)
+        self.assertLess(html.index("Качество отработки"), html.index("Отработка задач по ролям"))
+
+
 class OutflowSourceTests(unittest.TestCase):
     def test_latest_source_never_moves_forecast_and_rolls_over_year_boundary(self):
         available = {date(2026, 9, 30), date(2026, 8, 31)}
