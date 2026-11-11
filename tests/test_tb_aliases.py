@@ -56,6 +56,13 @@ class BankAliasTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(self.aliases.restore(text), text)
 
+    def test_latin_tokens_restore_and_plain_latin_is_untouched(self):
+        self.aliases.alias("ГОСБ", "Тестовый ГОСБ")
+        self.aliases.alias("Организация", "Тестовая компания")
+        self.assertEqual(self.aliases.restore("Organization-01 [GOSB-01], TB-06"),
+                         "Тестовая компания [Тестовый ГОСБ], СЗБ")
+        self.assertEqual(self.aliases.restore("ATB-01, сеть 5 TB"), "ATB-01, сеть 5 TB")
+
     def test_unknown_number_is_not_assigned_to_an_existing_bank(self):
         text = self.aliases.restore("территориальному банку 99")
         self.assertEqual(text, "другие территориальные банки")

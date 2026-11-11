@@ -20,6 +20,7 @@ from ... import llm as llm_mod
 from ... import narrative
 from ... import progress
 from ...anonymize import Aliases
+from . import outflows
 from .freshness import orgs_snapshot
 
 BATCH_STEPS = (30, 10, 3, 1)   # шаги деградации размера батча
@@ -192,7 +193,7 @@ _ANGLES = {
     "orgs": (
         "с организации с наибольшим эффектом",
         "с общего числа организаций, требующих отработки",
-        "с приоритета: возврат или привлечение",
+        "с того, что в отобранном списке даёт больший эффект: привлечение или возврат",
         "с оценки, покрывает ли потенциал отклонение",
         "с организаций, по которым отработка уже ведётся",
     ),
@@ -638,7 +639,7 @@ def _outflow_facts(a, al, unit: str) -> str:
     o = getattr(a, "outflow", {}) or {}
     analytics = o.get("analytics") or {}
     if analytics:
-        return _outflow_analytics_line(analytics)
+        return _outflow_analytics_line(analytics) + _outflow_analytics_detail(analytics)
     if not o:
         return "Отток: за окно потерь не зафиксировано."
     def _what(r):
@@ -671,6 +672,39 @@ def _outflow_facts(a, al, unit: str) -> str:
         + _outflow_reasons_line(o)
         + f"Крупнейшие потери: {top}."
     )
+
+
+def _outflow_analytics_detail(o: dict) -> str:
+    """Причины ухода и качество отработки задач — только для промпта, не для фолбэка.
+
+    Без свода причин модель, которой велено «назвать главную причину», бралась за
+    единственную разбивку в фактах — B2B/B2C — и писала «главная причина ухода —
+    B2B». Поэтому причины передаются явно, а если их нет, так и сказано.
+    """
+    if not o.get("available"):
+        return ""
+    # «Причина не зафиксирована» и «Данные причин недоступны» — не причины
+    known = [r for r in o.get("reasons") or []
+             if r["name"] not in (outflows.UNKNOWN_REASON, "Данные причин недоступны")]
+    base = o.get("known_reason_gone") or 0
+    if known and base:
+        top = "; ".join(f"{r['name']} — {r['gone']:.0f} чел ({r['gone'] / base * 100:.0f}%)"
+                        for r in known[:3])
+        cov = base / o["b2b"] * 100 if o.get("b2b") else 0
+        out = (f"\nПричины ухода B2B (зафиксированы для {cov:.0f}% оттока B2B; доли — "
+               f"от этой части): {top}.")
+    else:
+        out = "\nПричины ухода B2B в задачах не зафиксированы."
+    q = (o.get("tasks") or {}).get("quality") or {}
+    p, c = q.get("promised") or {}, q.get("confirmed") or {}
+    if p.get("tasks") or c.get("tasks"):
+        out += (f"\nКачество отработки задач на отток: «обещали вернуть, но не вернули» — "
+                f"{p.get('flagged', 0)} задач из {p.get('tasks', 0)} с временной причиной, "
+                f"не вернулись {p.get('kept', 0):.0f} из {p.get('gone', 0):.0f} ФЛ; "
+                f"«вернулись в подтверждённом оттоке» — {c.get('flagged', 0)} задач из "
+                f"{c.get('tasks', 0)} с окончательной причиной, вернулись "
+                f"{c.get('returned', 0):.0f} ФЛ.")
+    return out + "\n"
 
 
 def _outflow_analytics_line(o: dict) -> str:
@@ -805,7 +839,8 @@ def section_narratives(ctx, a) -> dict:
         f"люди, которые за три закрытых месяца ушли и НЕ вернулись. Прогноз приходит "
         f"готовым, а список организаций показывает, чем его можно улучшить: "
         f"потенциал и возврат в прогнозе не учтены.\n"
-        f"Для выполнения плана нужно отработать {a.sim['k']} организаций (ГОСБ×организация) "
+        f"ОТОБРАННЫЙ СПИСОК (факты блока orgs): для выполнения плана нужно отработать "
+        f"{a.sim['k']} организаций (ГОСБ×организация) "
         f"с суммарным эффектом +{a.sim['closable']:.0f} чел и ФОТ ~{a.sim['fot_mln']:.0f} млн ₽ "
         f"(привлечение {a.sim['attract']:.0f}, возврат {a.sim['retention']:.0f}); "
         f"весь доступный потенциал покрывает отклонение на {a.sim['coverage']*100:.0f}%; "
@@ -815,6 +850,7 @@ def section_narratives(ctx, a) -> dict:
            f"отобранный потенциал: {top_orgs}.\n"
            if getattr(a, "level", "tb") == "sb" else
            f"Приоритетные: {top_orgs}.\n")
+        + "ОТТОК (факты блока outflow, в другие блоки не переносить): "
         + _outflow_facts(a, al, unit)
     )
     prompt = (
@@ -842,12 +878,19 @@ def section_narratives(ctx, a) -> dict:
         "не требуется, называй в конце блока или не называй вовсе: открывать "
         "вывод фразой «отработка не требуется в …» нельзя — читатель решает, с "
         "чего начать, а не где можно не начинать.\n"
-        "• orgs — с чего начинать отработку списка организаций.\n"
+        "• orgs — только про ОТОБРАННЫЙ СПИСОК организаций под план: сколько "
+        "организаций, какой эффект, что в нём больше — привлечение или возврат "
+        "(по разбивке эффекта самого списка), с каких подразделений или "
+        "организаций начинать. Общий отток, подтверждённый возврат B2B и цель 50% "
+        "относятся к блоку outflow: в orgs эти числа не приводи и о них не пиши.\n"
         "• outflow — потери портфеля: из-за чего уходят и чем заканчивается работа. "
-        "Начинай с невыполненных обещаний вернуть получателей — это конкретная "
-        "договорённость, по которой есть что спросить, — затем назови главную "
-        "причину ухода и что она означает для отработки. Долю причины приводи "
-        "только вместе с оговоркой, что причина известна не по всем организациям. "
+        "Если в фактах есть «обещали вернуть, но не вернули», начинай с этого — это "
+        "конкретная договорённость, по которой есть что спросить. Затем назови "
+        "главную причину ухода ТОЛЬКО из строки «Причины ухода B2B» и что она "
+        "означает для отработки; долю причины приводи вместе с оговоркой, что "
+        "причина известна не по всему оттоку. Если причины не зафиксированы, "
+        "причину не называй. B2B и B2C — тип оттока по числу ушедших из одной "
+        "организации, а не причина ухода: называть их причиной нельзя. "
         "На уровне всей сети имён организаций не называй: масштаб решения там "
         "другой, назови подразделения и объёмы, а имена остаются уровнем ниже.\n\n"
         "ТЕРМИНОЛОГИЯ — обязательна, это язык отчётности банка:\n"
@@ -962,6 +1005,17 @@ def section_narratives(ctx, a) -> dict:
             text = narrative.fmt_numbers(text)
             text, n_w = narrative.drop_water(text)
             watered += n_w
+            if k == "outflow":
+                text, n_t = _drop_type_as_reason(text)
+                if n_t:
+                    progress.llm_error("выводы", f"outflow: снято предложений, где B2B/B2C "
+                                                 f"названы причиной ухода: {n_t}")
+            # вывод по списку организаций, пересказывающий раздел «Отток», читатель
+            # видит под чужой таблицей — такой блок заменяется своим текстом целиком
+            if k == "orgs" and k in got and _borrows_outflow(text, _outflow_numbers(a)):
+                progress.llm_error("выводы", "orgs: вывод взял цифры раздела «Отток» — "
+                                             "заменён своим текстом")
+                text = ""
             if not text.strip():
                 text = narrative.fmt_numbers(fb[k])
                 emptied.append(k)
@@ -1006,6 +1060,45 @@ def section_narratives(ctx, a) -> dict:
         progress.llm_error("выводы", f"{type(ex).__name__}: {ex}")
         progress.llm_dump("выводы", prompt, f"<ошибка> {ex}", dict(llm_mod.LAST_META))
         return fb
+
+
+# B2B/B2C — тип оттока, а не причина. Модель, которой не дали свода причин,
+# писала «Главная причина ухода — B2B» и следом «Долю B2B приводим с оговоркой:
+# причина известна не по всем организациям». Обе фразы снимаются целиком.
+_TYPE_AS_REASON = (
+    re.compile(r"причин\w*(?:\s+\w+){0,3}\s*(?:[—–:-]|это|является|стал\w*)\s*"
+               r"(?:отток\w*\s+)?B2[BC]\b", re.I),
+    re.compile(r"\bдол\w+\s+B2[BC]\b[^.!?]*причин", re.I),
+    re.compile(r"\bB2[BC]\b\s*[—–-]\s*(?:главн|основн|крупнейш)\w*\s+причин", re.I),
+)
+
+
+def _drop_type_as_reason(text: str) -> tuple[str, int]:
+    keep = [s for s in _SENT.split(text) if not any(rx.search(s) for rx in _TYPE_AS_REASON)]
+    return " ".join(keep).strip(), len(_SENT.split(text)) - len(keep)
+
+
+def _outflow_numbers(a) -> set[int]:
+    """Крупные числа раздела «Отток», которых в выводе по списку организаций быть не должно."""
+    o = getattr(a, "outflow", {}) or {}
+    an = o.get("analytics") or {}
+    vals = ([an.get(k) for k in ("total", "b2b", "returned", "return_target", "return_gap")]
+            if an.get("available") else
+            [o.get(k) for k in ("tot_gone", "tot_ret", "tot_kept")])
+    sim = getattr(a, "sim", {}) or {}
+    own = {round(float(sim.get(k) or 0)) for k in ("k", "closable", "attract", "retention")}
+    # от тысячи: мелкие числа совпадают случайно; числа самого списка не трогаем
+    out = set()
+    for v in vals:
+        if v is not None and float(v) >= 1000:
+            out |= {math.floor(float(v)), math.ceil(float(v)), round(float(v))}
+    return out - own
+
+
+def _borrows_outflow(text: str, nums: set[int]) -> bool:
+    found = {int(re.sub(r"\D", "", m))
+             for m in re.findall(r"\d[\d\s  ]*\d|\d", text or "")}
+    return bool(found & nums)
 
 
 # Метки блоков = разделы отчёта, после которых печатается вывод
@@ -1063,8 +1156,9 @@ def _fallback_blocks(a) -> dict:
             f"+{a.sim.get('closable', 0):.0f} чел и ФОТ ~{a.sim.get('fot_mln', 0):.0f} млн ₽. "
             f"Возврат ушедших — {a.sim.get('retention', 0):.0f} чел, "
             f"привлечение — {a.sim.get('attract', 0):.0f}. "
-            f"Частые причины из комментариев: {a.themes}. "
-            f"Порядок работы — по убыванию эффекта: верхние строки списка дают "
+            + (f"Частые причины из комментариев: {a.themes}. "
+               if str(a.themes or "").strip(" .—-") else "")
+            + f"Порядок работы — по убыванию эффекта: верхние строки списка дают "
             f"основную часть прироста портфеля."),
         "outflow": _outflow_fallback(a),
     }

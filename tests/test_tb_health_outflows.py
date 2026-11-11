@@ -348,6 +348,74 @@ class TaskQualityTests(unittest.TestCase):
         self.assertLess(html.index("Качество отработки"), html.index("Отработка задач по ролям"))
 
 
+class SectionNarrativeTests(unittest.TestCase):
+    """Выводы разделов: orgs не пересказывает отток, B2B не становится причиной."""
+
+    def setUp(self):
+        from uzp_dash import progress
+        s = source_fixture()
+        s.tasks["task_questionnaire"] = s.tasks.task_code.map(
+            {"t1": "1. Причина оттока\nПеренос даты выплаты ЗП",
+             "t3": "1. Причина оттока\nУшел в другой банк"}).fillna("")
+        an = O.analyze(s, None, date(2026, 11, 6))
+        an.update(total=61051, b2b=52541, returned=10309, return_target=26270.5,
+                  return_gap=15961.5)
+        row = dict(fact=100, plan=100, exec=1, rank=1, n_tb=9)
+        self.a = SimpleNamespace(
+            verdict={"rcp": row, "fot": row}, unit_label="ТБ", level="sb", gosb_cards=[],
+            top_cells=pd.DataFrame(), to_work=pd.DataFrame(), pf={}, dates={}, closed={},
+            tb_full="Сбербанк", ref_date="07.2026", activity={}, themes="—",
+            no_point=pd.DataFrame(), outflow={"analytics": an},
+            sim={"k": 475, "closable": 33432, "fot_mln": 2126, "attract": 27940,
+                 "retention": 5492, "coverage": .9})
+        self.patches = [patch.object(progress, "LOG_DIR", None),
+                        patch.object(prompts, "_USED_OPENERS", {})]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def run_llm(self, response):
+        from unittest.mock import Mock
+        llm = Mock(return_value=response)
+        return prompts.section_narratives(SimpleNamespace(llm=llm), self.a), llm.call_args.args[0]
+
+    def test_prompt_has_reasons_quality_and_block_labels(self):
+        _, prompt = self.run_llm("")
+        self.assertIn("Причины ухода B2B (зафиксированы", prompt)
+        self.assertNotIn("Причина не зафиксирована —", prompt)
+        self.assertIn("«обещали вернуть, но не вернули» — 1 задач", prompt)
+        self.assertIn("B2B и B2C — тип оттока", prompt)
+        self.assertIn("ОТОБРАННЫЙ СПИСОК (факты блока orgs)", prompt)
+        self.assertIn("ОТТОК (факты блока outflow", prompt)
+
+    def test_orgs_with_outflow_numbers_falls_back_and_b2b_reason_is_dropped(self):
+        out, _ = self.run_llm(
+            "[[orgs]]\nПриоритет — возврат: из 61 051 ушедшего подтверждён возврат "
+            "только 10 309 чел B2B при цели 26 270.\n"
+            "[[outflow]]\nОбещания вернуть не выполнены по 1 задаче. Главная причина "
+            "ухода — B2B, 52 541 чел из 61 051. Долю B2B приводим с оговоркой: причина "
+            "известна не по всем организациям. Основные потери в ТБ-11.")
+        self.assertNotIn("61 051", out["orgs"])
+        self.assertIn("475 организаций", out["orgs"])
+        self.assertNotIn("Частые причины из комментариев: —", out["orgs"])
+        self.assertNotIn("причина ухода — B2B", out["outflow"].lower().replace("главная ", ""))
+        self.assertNotIn("Долю B2B", out["outflow"])
+        self.assertIn("Обещания вернуть не выполнены", out["outflow"])
+
+    def test_orgs_about_the_list_is_kept(self):
+        text = ("Больший эффект в списке даёт привлечение: 27 940 из 33 432 чел. "
+                "Начинать предлагается с ТБ с самым длинным списком.")
+        out, _ = self.run_llm("[[orgs]]\n" + text)
+        self.assertIn("27 940", out["orgs"])
+
+    def test_no_known_reasons_is_said_explicitly(self):
+        an = dict(self.a.outflow["analytics"], reasons=[], known_reason_gone=0)
+        self.assertIn("не зафиксированы", prompts._outflow_analytics_detail(an))
+
+
 class OutflowSourceTests(unittest.TestCase):
     def test_latest_source_never_moves_forecast_and_rolls_over_year_boundary(self):
         available = {date(2026, 9, 30), date(2026, 8, 31)}
