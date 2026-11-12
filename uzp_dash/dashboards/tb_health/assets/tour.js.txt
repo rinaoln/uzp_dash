@@ -1,0 +1,200 @@
+/* Подсказки-тур: ведут руководителя по отчёту шаг за шагом.
+
+   Каждый шаг подсвечивает блок экрана и в двух-трёх фразах говорит, что в нём
+   смотреть и куда нажать дальше. Два тура:
+     • главный экран — от выбора банка до поручений и разделов;
+     • страница ГОСБ — показатели, вкладки, вывод и отток подразделения.
+   Главный тур запускается сам один раз (после окна «Что нового»), тур по ГОСБ —
+   при первом открытии страницы подразделения; дальше — кнопкой «Подсказки».
+   Шаги, блока которых на экране нет (например, нет тревоги), пропускаются.
+   Отметка «уже показывали» — в localStorage; без него тур просто не стартует сам. */
+(function(){
+  'use strict';
+  var KEY_MAIN = 'tb_health.tour.main', KEY_GOSB = 'tb_health.tour.gosb';
+  function seen(k){ try { return localStorage.getItem(k) === '1'; } catch(e){ return true; } }
+  function mark(k){ try { localStorage.setItem(k, '1'); } catch(e){} }
+  function lvl(){ return document.querySelector('.lvl:not([hidden])'); }
+  function txt(el, sel){ var x = el && el.querySelector(sel); return x ? x.textContent.replace(/\s+/g, ' ').trim() : ''; }
+
+  var MAIN = [
+    {sel: '.top-switchers', scope: 'doc', t: 'Выбор банка',
+     b: 'Отчёт открыт по всей сети. Здесь выбирается территориальный банк — весь экран перестроится под него. «Найти ГОСБ» сразу открывает страницу подразделения.'},
+    {sel: '.pd-health .hx', t: 'Здоровье портфеля',
+     b: 'Пять сторон портфеля: выполнение плана, динамика год к году, удержание, подразделения ниже 95% и резерв под план. Зелёный — в норме, жёлтый — внимание, красный — риск. Клик по плитке открывает разбор.',
+     dyn: function(el){ var l = el.closest('.pd-health'); var v = txt(l, '.hx-verdict'), n = txt(l, '.hx-names'); return v ? v + (n ? '. ' + n : '') : ''; }},
+    {sel: '.pd-health .chn', t: 'Сценарий достижения плана',
+     b: 'Читается слева направо: какое отклонение → где оно сосредоточено → чем закрываем (отобранные организации) → что не закрывается и требует новых кандидатов.'},
+    {sel: '.pd-metrics', t: 'Прогноз на месяц',
+     b: 'Получатели и ФОТ — прогноз против плана. «Потенциал роста» — сколько человек дают отобранные организации; «Открыть» ведёт к поимённому списку.'},
+    {sel: '.pd-attention', t: 'Главный адрес проблемы',
+     b: 'Подразделение, на которое приходится основное отклонение. «Разобрать» открывает детализацию.',
+     dyn: function(el){ return txt(el, 'strong'); }},
+    {sel: '.pd-ranking', t: 'Кто отстаёт',
+     b: 'Подразделения от худшего выполнения к лучшему, черта на полосе — 100% плана. Клик по строке открывает страницу подразделения.'},
+    {sel: '.pd-trend', t: 'Динамика портфеля',
+     b: 'Портфель за 12 закрытых месяцев. Наведите на точку — увидите значение месяца. «Подробнее» — динамика по сегментам.'},
+    {sel: '.pd-loss', t: 'Потери без возврата',
+     b: 'Сколько людей ушло за три месяца и не вернулось. «Разобрать отток» — причины ухода, обещания вернуть и работа по клиентам.'},
+    {sel: '.pd-actions', t: 'Что поручить',
+     b: 'Готовые поручения с цифрами из отчёта. Стрелка ведёт в раздел, где лежит обоснование.'},
+    {sel: '.pd-nav nav', scope: 'doc', t: 'Разделы отчёта',
+     b: 'Вся глубина — здесь: выполнение плана по сегментам, подразделения, потенциал, отток, переток, структура, динамика. Каждый раздел начинается с «Вывода»: если времени мало, достаточно прочитать его.'},
+    {sel: '.pd-pdf', scope: 'doc', t: 'Для совещания',
+     b: '«Скачать PDF» сохраняет выбранный банк целиком. Подсказки можно пройти ещё раз кнопкой «Подсказки», полная инструкция — по кнопке «?».'}
+  ];
+
+  var GOSB = [
+    {sel: '.gd-head', t: 'Страница подразделения',
+     b: 'Вернуться — «← Главный экран» или к своему банку. «Экспорт PDF» сохраняет все вкладки страницы.'},
+    {sel: '.gp-kpis', t: 'Пять чисел подразделения',
+     b: 'Прогноз, выполнение плана, отклонение к плану, изменение год к году и потери за три месяца. Цвет выполнения — по тем же порогам, что во всём отчёте.'},
+    {sel: '.gp-tabs', t: 'Вкладки',
+     b: 'Те же разделы, что в отчёте, только по этому ГОСБ. Порядок разговора: «Обзор» → «Выполнение плана» (чем закрыть разрыв) → «Отток» (что потеряли).'},
+    {sel: '.gp-pane[data-pane="home"] > .gd-sum, .gp-pane[data-pane="home"] > .card.ai, .gp-pane[data-pane="home"] > :not(.gp-pane-t)', t: 'Вывод по подразделению',
+     b: 'Главное для разговора с управляющим: что с планом, где сегменты не выполняются, сколько организаций отобрано и что делать.', pane: 'home'},
+    {sel: '.gp-segs', t: 'Сегменты', pane: 'home',
+     b: 'Выполнение по каждому сегменту. Подсвечены западающие — с них начинается разговор.'},
+    {sel: '.gp-tab[data-pane="outflow"]', t: 'Отток подразделения',
+     b: 'Кто ушёл и почему, кого обещали вернуть и не вернули, где работали без результата. Фильтр по сегменту и выгрузка в Excel — по этому ГОСБ.'}
+  ];
+
+  var box, tip, steps, root, idx, key, scroller;
+
+  function build(host){
+    destroy();
+    box = document.createElement('div'); box.className = 'tr-spot';
+    tip = document.createElement('div'); tip.className = 'tr-tip'; tip.setAttribute('role', 'dialog');
+    tip.setAttribute('aria-live', 'polite');
+    host.appendChild(box); host.appendChild(tip);
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('resize', place);
+    document.addEventListener('scroll', place, true);
+  }
+  function destroy(){
+    if(box) box.remove(); if(tip) tip.remove(); box = tip = null;
+    document.removeEventListener('keydown', onKey, true);
+    window.removeEventListener('resize', place);
+    document.removeEventListener('scroll', place, true);
+  }
+  function onKey(e){
+    if(!tip) return;
+    if(e.key === 'Escape'){ e.preventDefault(); e.stopPropagation(); finish(); }
+    else if(e.key === 'ArrowRight' || e.key === 'Enter'){ e.preventDefault(); go(idx + 1); }
+    else if(e.key === 'ArrowLeft'){ e.preventDefault(); go(idx - 1); }
+  }
+  function target(s){
+    var base = s.scope === 'doc' ? document : root;
+    var list = base.querySelectorAll(s.sel);
+    for(var i = 0; i < list.length; i++){
+      var r = list[i].getBoundingClientRect();
+      if(r.width > 0 && r.height > 0) return list[i];
+    }
+    return null;
+  }
+  function usable(s){
+    if(s.pane && window.gpShow && root.matches && root.matches('dialog')) window.gpShow(root, s.pane);
+    return target(s);
+  }
+  function go(i){
+    if(i < 0) return;
+    /* шаги без блока на экране пропускаются в сторону движения */
+    var dir = i >= idx ? 1 : -1;
+    while(i >= 0 && i < steps.length && !usable(steps[i])) i += dir;
+    if(i < 0) return;
+    if(i >= steps.length){ finish(); return; }
+    idx = i;
+    var s = steps[i], el = target(s);
+    /* прокрутка — только если блок не виден целиком, и сразу, без анимации:
+       подсветка считается по итоговому положению блока */
+    var rr = el.getBoundingClientRect();
+    if(rr.top < 60 || rr.bottom > window.innerHeight - 10) el.scrollIntoView({block: 'center', inline: 'nearest', behavior: 'instant'});
+    var extra = s.dyn ? s.dyn(el) : '';
+    tip.innerHTML =
+      '<div class="tr-n">Подсказка ' + (i + 1) + ' из ' + steps.length + '</div>'
+      + '<div class="tr-t"></div><p class="tr-b"></p>'
+      + (extra ? '<p class="tr-x"></p>' : '')
+      + '<div class="tr-nav"><button type="button" class="tr-skip">Закрыть</button>'
+      + '<span></span>'
+      + (i > 0 ? '<button type="button" class="tr-prev">← Назад</button>' : '')
+      + '<button type="button" class="tr-next">' + (i === steps.length - 1 ? 'Готово' : 'Далее →') + '</button></div>';
+    tip.querySelector('.tr-t').textContent = s.t;
+    tip.querySelector('.tr-b').textContent = s.b;
+    if(extra) tip.querySelector('.tr-x').textContent = 'Сейчас: ' + extra;
+    tip.querySelector('.tr-skip').onclick = finish;
+    tip.querySelector('.tr-next').onclick = function(){ go(idx + 1); };
+    var pv = tip.querySelector('.tr-prev'); if(pv) pv.onclick = function(){ go(idx - 1); };
+    requestAnimationFrame(function(){ place(); if(tip) tip.querySelector('.tr-next').focus({preventScroll: true}); });
+    setTimeout(place, 320);
+  }
+  function place(){
+    if(!tip || !steps) return;
+    var el = target(steps[idx]); if(!el) return;
+    var r = el.getBoundingClientRect(), pad = 6;
+    box.style.left = (r.left - pad) + 'px'; box.style.top = (r.top - pad) + 'px';
+    box.style.width = (r.width + pad * 2) + 'px'; box.style.height = (r.height + pad * 2) + 'px';
+    var vw = window.innerWidth, vh = window.innerHeight, tw = tip.offsetWidth, th = tip.offsetHeight;
+    var top = r.bottom + 14;
+    if(top + th > vh - 8) top = r.top - th - 14;                  /* сверху, если снизу не помещается */
+    if(top < 8) top = Math.max(8, Math.min(vh - th - 8, r.top + 12)); /* блок во весь экран — поверх */
+    var left = Math.max(12, Math.min(vw - tw - 12, r.left));
+    tip.style.top = top + 'px'; tip.style.left = left + 'px';
+  }
+  function finish(){
+    if(key) mark(key);
+    destroy(); steps = null;
+  }
+  function start(which, dlg){
+    if(which === 'gosb'){
+      if(!dlg) return;
+      root = dlg; steps = GOSB; key = KEY_GOSB; build(dlg);
+    } else {
+      document.querySelectorAll('dialog[open]').forEach(function(d){ d.close(); });
+      if(window.hubHome) window.hubHome();
+      root = lvl(); if(!root) return;
+      steps = MAIN; key = KEY_MAIN; build(document.body);
+    }
+    /* в туре только шаги, чей блок есть на этом экране: нумерация честная */
+    steps = steps.filter(usable);
+    if(which === 'gosb' && window.gpShow) window.gpShow(dlg, 'home');
+    if(!steps.length){ destroy(); steps = null; return; }
+    idx = 0; go(0);
+  }
+  window.tourStart = start;
+
+  /* кнопка «Подсказки» в шапке отчёта */
+  var bar = document.querySelector('.top-switchers');
+  if(bar){
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'pd-tour'; b.textContent = 'Подсказки';
+    b.title = 'Пошаговые подсказки по главному экрану';
+    b.addEventListener('click', function(){ start('main'); });
+    var pdf = bar.querySelector('.pd-pdf');
+    bar.insertBefore(b, pdf || null);
+  }
+  /* и в шапке каждой страницы ГОСБ */
+  document.querySelectorAll('dialog.gd.gp').forEach(function(d){
+    var act = d.querySelector('.gd-head-actions'); if(!act) return;
+    var t = document.createElement('button');
+    t.type = 'button'; t.className = 'gd-tour'; t.textContent = 'Подсказки';
+    t.addEventListener('click', function(e){ e.stopPropagation(); start('gosb', d); });
+    act.insertBefore(t, act.firstChild);
+    /* первое открытие страницы ГОСБ в этом браузере — тур сам */
+    new MutationObserver(function(){
+      if(d.open && !seen(KEY_GOSB) && !steps) setTimeout(function(){ if(d.open) start('gosb', d); }, 350);
+      if(!d.open && steps && root === d) destroy();
+    }).observe(d, {attributes: true, attributeFilter: ['open']});
+  });
+
+  /* главный тур — один раз, как только закрыто окно «Что нового» и на экране
+     главный экран. Ждём опросом, а не событием закрытия: окно памятки
+     пересобирают другие скрипты, и подписка на него терялась. */
+  function waitMain(){
+    if(seen(KEY_MAIN) || steps) return;
+    var l = lvl();
+    var busy = document.querySelector('dialog[open]') || !l || l.dataset.hubView === 'sec'
+      || !window.matchMedia('(min-width: 1200px)').matches;
+    if(busy){ setTimeout(waitMain, 700); return; }
+    setTimeout(function(){ if(!document.querySelector('dialog[open]') && !steps && !seen(KEY_MAIN)) start('main'); else waitMain(); }, 400);
+  }
+  setTimeout(waitMain, 1200);
+})();

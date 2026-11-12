@@ -1,0 +1,214 @@
+/* Разделы отчёта — по принципу главного экрана: в одно окно, без прокрутки.
+
+   1. Длинные разделы делятся на внутренние вкладки по смыслу: «Отток» —
+      фокусы, масштаб, концентрация, задачи, клиенты; «Структура» — портфель
+      и люди; «Динамика» — портфель по месяцам и сегменты год к году. Блоки
+      не пересчитываются и не меняются — только переезжают в свою вкладку.
+   2. «Вывод» виден целиком: колонками, по объёму текста.
+   3. Длинные списки (карточки подразделений) прокручиваются внутри своей
+      панели, высота панели подгоняется под окно.
+   4. Заголовок и описание раздела повторяли строку «← Все разделы · название»;
+      описание переехало в подсказку к названию.
+
+   Печать и выгрузка PDF показывают все вкладки подряд (см. onescreen.css). */
+(function(){
+  'use strict';
+  var lvls = document.querySelectorAll('.lvl');
+  if(!lvls.length) return;
+
+  function tabs(holder, groups, key){
+    groups = groups.filter(function(g){ return g.els.length; });
+    if(groups.length < 2) return;
+    var nav = document.createElement('nav');
+    nav.className = 'gp-tabs os-tabs';
+    nav.setAttribute('role', 'tablist');
+    nav.setAttribute('aria-label', 'Части раздела');
+    var panes = [];
+    groups.forEach(function(g, i){
+      var pane = document.createElement('div');
+      pane.className = 'os-pane os-' + key + '-' + i;
+      pane.setAttribute('role', 'tabpanel');
+      var h = document.createElement('h3');
+      h.className = 'os-pane-t';
+      h.textContent = g.t;
+      g.els[0].parentNode.insertBefore(pane, g.els[0]);
+      pane.appendChild(h);
+      g.els.forEach(function(e){ pane.appendChild(e); });
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'gp-tab'; b.setAttribute('role', 'tab');
+      b.textContent = g.t;
+      b.addEventListener('click', function(){ show(i); });
+      nav.appendChild(b);
+      panes.push(pane);
+    });
+    panes[0].parentNode.insertBefore(nav, panes[0]);
+    function show(i){
+      panes.forEach(function(p, k){ p.hidden = k !== i; });
+      Array.prototype.forEach.call(nav.children, function(b, k){
+        b.classList.toggle('on', k === i);
+        b.setAttribute('aria-selected', k === i ? 'true' : 'false');
+      });
+      requestAnimationFrame(fit);
+    }
+    show(0);
+  }
+
+  function kids(el){ return el ? Array.prototype.slice.call(el.children) : []; }
+
+  /* Делит текст вывода на два абзаца по концу предложения ближе к середине.
+     Разметка внутри (выделения, цвет чисел) сохраняется: режется только
+     текстовый узел, остальные узлы переезжают во второй абзац целиком. */
+  function splitHalf(body){
+    var host = body.querySelector(':scope > p') || body;
+    if(host === body){
+      var p = document.createElement('p');
+      while(body.firstChild) p.appendChild(body.firstChild);
+      body.appendChild(p); host = p;
+    }
+    var total = (host.textContent || '').length, seen = 0, cut = null;
+    var walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+    var re = /[.!?…](?:[»)"])?\s+(?=[А-ЯЁA-Z«0-9])/g, node;
+    while((node = walker.nextNode())){
+      var t = node.nodeValue, m;
+      re.lastIndex = 0;
+      while((m = re.exec(t))){
+        if(seen + m.index >= total * 0.42 && node.parentNode === host){ cut = {node: node, at: m.index + m[0].length}; break; }
+      }
+      if(cut) break;
+      seen += t.length;
+    }
+    if(!cut) return false;
+    var rest = cut.node.splitText(cut.at);
+    var p2 = document.createElement('p');
+    p2.className = host.className;
+    if(host.getAttribute('style')) p2.setAttribute('style', host.getAttribute('style'));
+    host.parentNode.insertBefore(p2, host.nextSibling);
+    var n = rest;
+    while(n){ var nx = n.nextSibling; p2.appendChild(n); n = nx; }
+    return true;
+  }
+
+  /* Раскладка собирается при первом открытии раздела: обёртку раздела
+     (.section-body) скрипт дизайна строит лениво, у скрытых уровней её ещё нет. */
+  function setup(l){
+    /* --- Отток --- */
+    var ob = l.querySelector('section[id$="-outflow"] .section-body');
+    if(ob && ob.dataset.osDone) ob = null;
+    if(ob) ob.dataset.osDone = '1';
+    if(ob){
+      var ai = ob.querySelector(':scope > .card.ai');
+      if(ai) ob.insertBefore(ai, ob.firstChild);   /* вывод — первым, как в остальных разделах */
+      var pick = function(sel){ return kids(ob).filter(function(c){ return c.matches(sel); }); };
+      var rest = kids(ob).filter(function(c){
+        return c.classList.contains('card') && !c.classList.contains('ai')
+          && !/\boa-/.test(c.className);
+      });
+      tabs(ob, [
+        {t: 'Фокусы руководителя', els: pick('.oa-leader')},
+        {t: 'Масштаб оттока', els: pick('.oa-overview')},
+        {t: 'Сегменты', els: pick('.oa-segments')},
+        {t: 'Концентрация', els: pick('.oa-concentration')},
+        {t: 'Задачи и роли', els: pick('.oa-tasks')},
+        {t: 'Работа с клиентами', els: rest}
+      ], 'of');
+    }
+    /* --- Структура --- */
+    var sx = l.querySelector('section[id$="-struct"] .no-xls');
+    if(sx && !sx.dataset.osDone){
+      sx.dataset.osDone = '1';
+      var ch = kids(sx), cut = ch.findIndex(function(c){ return c.classList.contains('st-group'); });
+      var tail = ch.filter(function(c){ return c.matches('details.gd-help'); });
+      ch = ch.filter(function(c){ return tail.indexOf(c) < 0; });
+      if(cut > 0){
+        var a = ch.slice(0, ch.indexOf(sx.querySelector(':scope > .st-group')));
+        var b = ch.slice(a.length);
+        var grp = b.shift();                       /* «Портфель со стороны людей за …» */
+        grp.remove();                              /* его текст — имя вкладки и заголовок на печати */
+        tabs(sx, [{t: 'Портфель', els: a},
+                  {t: (grp.textContent || 'Портфель со стороны людей').trim(), els: b}], 'st');
+        /* слева отрасли, справа сегменты и глубина; строки сетки — после
+           общих строк вкладки (дата данных, плитки, пояснение) */
+        var p0 = sx.querySelector('.os-st-0');
+        var lead = kids(p0).filter(function(c){ return !c.classList.contains('st-panel') && !c.classList.contains('os-pane-t'); }).length;
+        var pn = p0.querySelectorAll(':scope > .st-panel');
+        var r = lead + 1;
+        if(pn[0]){ pn[0].style.gridColumn = '1'; pn[0].style.gridRow = r + ' / span 2'; }
+        if(pn[2]){ pn[2].style.gridColumn = '2'; pn[2].style.gridRow = String(r); }
+        if(pn[1]){ pn[1].style.gridColumn = '2'; pn[1].style.gridRow = String(r + 1); }
+      }
+    }
+    /* --- Динамика --- */
+    var tc = l.querySelector('section[id$="-trend"] .section-body > .card:not(.ai)');
+    if(tc && !tc.dataset.osDone){
+      tc.dataset.osDone = '1';
+      var tk = kids(tc);
+      var at = tk.findIndex(function(c){ return c.tagName === 'H4' && /сегмент/i.test(c.textContent); });
+      if(at > 0) tabs(tc, [{t: 'Портфель по месяцам', els: tk.slice(0, at)},
+                           {t: 'Сегменты год к году', els: tk.slice(at)}], 'tr');
+    }
+    /* --- «Вывод» целиком, колонками ---
+       Текст во всю ширину окна читался строками по 200 знаков, а свёрнутый
+       до трёх строк — требовал раскрытия. Колонки по 60–80 знаков читаются
+       сразу и по высоте занимают вдвое-втрое меньше. Абзац целиком в своей
+       колонке: фраза, разорванная между колонками, читается хуже. */
+    l.querySelectorAll(':scope > section .card.ai').forEach(function(c){
+      if(c.closest('dialog') || c.querySelector(':scope > .os-ai-body')) return;
+      var body = document.createElement('div');
+      body.className = 'os-ai-body';
+      Array.prototype.slice.call(c.childNodes).forEach(function(n){
+        if(n.nodeType === 1 && n.classList.contains('ai-head')) return;
+        body.appendChild(n);
+      });
+      c.appendChild(body);
+      c.classList.add('os-ai');
+      /* абзац не рвётся между колонками: колонок столько, сколько абзацев
+         (не больше трёх). Длинный вывод одним абзацем делится надвое по
+         границе предложения — иначе он шёл строками по 200 знаков */
+      var paras = body.querySelectorAll(':scope > p, :scope > ul, :scope > ol').length;
+      if(paras <= 1 && (body.textContent || '').trim().length > 280 && splitHalf(body)) paras = 2;
+      var n = (body.textContent || '').replace(/\s+/g, ' ').trim().length;
+      var cols = Math.min(3, Math.max(1, paras));
+      if(paras >= 4 && n < 700) cols = 2;
+      body.classList.add('os-cols-' + cols);
+    });
+    /* --- описание раздела — в подсказку к названию --- */
+    l.querySelectorAll(':scope > section').forEach(function(s){
+      var d = s.querySelector('.section-desc');
+      if(d) s.dataset.osDesc = d.textContent.trim();
+    });
+  }
+
+  lvls.forEach(function(l){
+    new MutationObserver(function(){ requestAnimationFrame(fit); })
+      .observe(l, {attributes: true, subtree: false, attributeFilter: ['hidden', 'data-hub-view']});
+    l.querySelectorAll(':scope > section').forEach(function(s){
+      new MutationObserver(function(){ requestAnimationFrame(fit); })
+        .observe(s, {attributes: true, attributeFilter: ['class']});
+    });
+  });
+
+  function fit(){
+    var wide = window.matchMedia('(min-width: 1200px)').matches;
+    var l = document.querySelector('.lvl:not([hidden])');
+    if(!l) return;
+    setup(l);
+    var s = l.querySelector(':scope > section.hub-on');
+    if(s){
+      var d = s.querySelector(':scope > details.section-details');
+      if(d && !d.open) d.open = true;
+      var t = l.querySelector(':scope > .hub-back .hub-back-t');
+      if(t) t.title = s.dataset.osDesc || '';
+    }
+    /* длинные списки — до низа окна, дальше прокрутка внутри своей панели:
+       карточки подразделений и таблицы клиентов в разделе «Отток» */
+    l.querySelectorAll('.gcards, section.hub-on .of-pane:not([hidden]) .tbl-scroll').forEach(function(g){
+      if(!wide || !g.offsetHeight){ g.style.maxHeight = ''; return; }
+      var top = g.getBoundingClientRect().top + window.scrollY;
+      g.style.maxHeight = Math.max(320, window.innerHeight - top - 76) + 'px';
+      g.style.overflowY = 'auto';
+    });
+  }
+  window.addEventListener('resize', function(){ requestAnimationFrame(fit); });
+  document.addEventListener('click', function(){ setTimeout(fit, 0); });
+  fit();
+})();

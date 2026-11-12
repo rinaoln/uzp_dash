@@ -1,0 +1,346 @@
+/* ==========================================================================
+   Главный экран уровня — целиком в одно окно, без прокрутки.
+
+   Раньше обзор шёл лентой в ~2400 px: здоровье портфеля, сценарий, три
+   плитки, тревога, динамика, рейтинг, потери и действия друг под другом, и
+   до рейтинга подразделений и списка действий читатель не долистывал. Здесь
+   те же блоки разложены сеткой: сверху «как дела и что делать» и цифры
+   уровня, снизу «динамика · где · что делать». Содержимое не меняется —
+   только места.
+
+   Только на широком экране: на узком лента остаётся, сетка там нечитаема.
+   Подключается ПОСЛЕ neon.css и перекрывает его.
+   ========================================================================== */
+
+/* ---------- Верхняя панель: все разделы видны сразу ----------
+   Подписи вкладок короткие (см. pine.js), полное имя — в подсказке. Если окно
+   всё равно узкое, вкладки переносятся второй строкой, а не уезжают за край:
+   скрытый скроллом раздел читатель не находил. */
+@media screen {
+  .pine-design .pd-nav nav {
+    flex: 1 1 auto; min-width: 0;
+    flex-wrap: wrap; overflow: visible; row-gap: 0;
+  }
+  .pine-design .pd-nav button { padding-left: 11px; padding-right: 11px; }
+  .pine-design .pd-brand small { display: none; }
+  .pine-design .pd-nav { gap: 22px; }
+}
+@media screen and (max-width: 1360px) {
+  .pine-design .pd-nav { gap: 12px; padding-left: 20px; padding-right: 20px; }
+  .pine-design .pd-nav button { padding-left: 7px; padding-right: 7px; }
+}
+
+@media screen and (min-width: 1200px) {
+  /* ---------- Шапка отчёта: заголовок и выбор банка в одну строку ---------- */
+  .pine-design .wrap { max-width: 1760px; padding-top: 12px; padding-bottom: 14px; position: relative; }
+  .pine-design .wrap > header {
+    padding: 0 0 8px; margin-bottom: 8px; padding-right: 720px; min-height: 40px;
+  }
+  .pine-design .wrap > header h1 { font-size: 20px; margin: 0 0 1px; letter-spacing: -0.3px; }
+  .pine-design .wrap > header .rep-meta { font-size: 12px; line-height: 1.4; }
+  .pine-design .top-switchers {
+    position: absolute; top: 12px; right: 32px; margin: 0;
+    width: 700px; justify-content: flex-end; align-items: center; gap: 8px;
+  }
+  .pine-design .pd-bank-field { flex-direction: row; align-items: center; gap: 8px;
+    max-width: 340px; min-width: 0; }
+  .pine-design .pd-bank-field > span { display: none; }
+  .pine-design .pd-bank-field select { min-height: 34px; padding-top: 5px; padding-bottom: 5px; }
+  .pine-design .pd-search-gosb { margin-left: 0; }
+  .pine-design .pd-search-gosb summary, .pine-design .pd-pdf { min-height: 34px; padding: 6px 14px; }
+
+  /* ---------- Сетка обзора ---------- */
+  .pine-design .pd-overview {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    /* нижний ряд — фиксированной высоты: рейтинг и список действий
+       прокручиваются внутри своих панелей, а не растягивают экран */
+    grid-template-rows: auto auto 292px auto;
+    gap: 10px;
+  }
+  .pine-design .pd-overview > * { margin: 0 !important; min-width: 0; }
+  .pine-design .pd-analysis { display: contents; }
+
+  /* строка «банк · прогноз на · статус» повторяла выбор банка в шапке, дату
+     прогноза из строки под заголовком и плитку «Выполнение плана» */
+  .pine-design .pd-overview-head { display: none !important; }
+
+  .pine-design .pd-health    { grid-column: 1 / 10; grid-row: 1; padding: 10px 14px; position: relative; }
+  .pine-design .pd-metrics   { grid-column: 10 / -1; grid-row: 1;
+    display: flex; flex-direction: column; gap: 8px; }
+  .pine-design .pd-attention { grid-column: 1 / -1; grid-row: 2; }
+  .pine-design .pd-trend     { grid-column: 1 / 5;  grid-row: 3; }
+  .pine-design .pd-ranking   { grid-column: 5 / 9;  grid-row: 3; }
+  .pine-design .pd-secondary { grid-column: 9 / -1; grid-row: 3;
+    display: flex !important; flex-direction: column; gap: 8px; min-height: 0; }
+  .pine-design .pd-tools     { grid-column: 1 / -1; grid-row: 4;
+    display: flex; gap: 18px; padding: 0; }
+
+  /* ---------- Здоровье портфеля и сценарий: плотнее ----------
+     Строка «смотреть раздел» ушла: ссылкой стала вся плитка (ссылка
+     растянута на плитку), переход тот же. */
+  .pine-design .pd-health :is(.hx-wrap, .chn-wrap) { margin: 0; padding: 0; border: 0; background: none; box-shadow: none; }
+  .pine-design .pd-health .hx-top { margin: 0 0 6px; gap: 10px; align-items: center; padding-right: 220px; }
+  .pine-design .pd-health .hx-top h2 { font-size: 15px; margin: 0; }
+  .pine-design .pd-health .hx-top h3 { font-size: 11px; margin: 0; }
+  .pine-design .pd-health .chn-lead { display: none; }
+  .pine-design .pd-health .hx-names { font-size: 12px; }
+  .pine-design .pd-health :is(.hx, .chn) { gap: 8px; }
+  .pine-design .pd-health :is(.hx-i, .chn-i) { padding: 7px 12px 8px; min-height: 0; position: relative; }
+  .pine-design .pd-health :is(.hx-i, .chn-i):hover { border-color: var(--accent); }
+  .pine-design .pd-health :is(.hx-go, .chn-go) {
+    position: absolute; inset: 0; margin: 0; padding: 0; border: 0;
+    font-size: 0; color: transparent; background: none; z-index: 1;
+  }
+  .pine-design .pd-health .hx-l, .pine-design .pd-health .chn-t { font-size: 12px; }
+  .pine-design .pd-health .hx-v { font-size: 22px; line-height: 1.15; margin: 1px 0 2px; }
+  .pine-design .pd-health .chn-v { font-size: 16px; line-height: 1.2; margin: 1px 0 2px; }
+  /* текст длиннее строк плитки — целиком в подсказке (pine.js) */
+  .pine-design .pd-health .chn-s { -webkit-line-clamp: 3 !important; }
+  .pine-design .pd-health :is(.hx-s, .chn-s) {
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden; font-size: 12px; line-height: 1.35;
+  }
+  /* «Как читаем» — в строку заголовка, справа; раскрывается поверх */
+  .pine-design .pd-health .hx-how {
+    position: absolute; top: 10px; right: 14px; margin: 0; font-size: 12px; z-index: 3;
+    max-width: 640px;
+  }
+  .pine-design .pd-health .hx-how[open] {
+    background: var(--nx-card-flat, #0e1534); border: 1px solid var(--nx-line, rgba(255,255,255,.12));
+    border-radius: 10px; padding: 10px 14px; box-shadow: 0 18px 40px rgba(0,0,0,.45);
+  }
+  .pine-design .pd-health .chn-wrap { margin-top: 10px; }
+  /* дата данных организаций уже подписана в плитке «Потенциал роста»;
+     предупреждение об устаревших данных остаётся на месте */
+  .pine-design .pd-health > .source-note:not(.is-stale) { display: none; }
+  .pine-design .pd-health > .source-note { margin: 8px 0 0; padding: 4px 10px; font-size: 12px; }
+
+  /* ---------- Три плитки уровня: стопкой справа ---------- */
+  .pine-design .pd-metric { flex: 1 1 0; padding: 8px 14px; display: flex; flex-direction: column;
+    justify-content: center; min-height: 0; }
+  .pine-design .pd-metric-top { min-height: 0; }
+  .pine-design .pd-metric-top h3 { font-size: 12px; }
+  .pine-design .pd-forecast-label { display: none; }
+  .pine-design .pd-number { font-size: 24px !important; margin: 1px 0 0; line-height: 1.15; }
+  .pine-design .pd-number small { display: inline !important; font-size: 11px; margin: 0 0 0 4px !important; }
+  .pine-design .pd-metric-details { margin: 3px 0 0; padding: 0;
+    display: flex; flex-wrap: wrap; gap: 0 14px; border: 0; }
+  .pine-design .pd-metric-details > div { display: flex; gap: 5px; align-items: center;
+    padding: 0; border: 0; margin: 0; }
+  .pine-design .pd-metric-details dt, .pine-design .pd-metric-details dd { font-size: 12px; margin: 0; }
+  .pine-design .pd-metric-details dt small { display: none; }
+  .pine-design .pd-execution dd.pd-status { padding: 0 6px; }
+  .pine-design .pd-reserve .pd-metric-top { flex-direction: row; }
+  .pine-design .pd-reserve .pd-source-caption { margin: 1px 0 0; font-size: 12px; }
+  .pine-design .pd-reserve .pd-metric-foot { margin-top: 3px; padding-top: 3px; min-height: 0; }
+
+  /* ---------- Тревога — одной строкой ---------- */
+  .pine-design .pd-attention { display: flex; align-items: center; gap: 12px; padding: 7px 14px; }
+  .pine-design .pd-attention > div { display: flex; gap: 10px; align-items: baseline; flex: 1; flex-wrap: wrap; }
+  .pine-design .pd-attention p { margin: 0; }
+
+  /* ---------- Нижний ряд ---------- */
+  .pine-design :is(.pd-panel, .pd-loss, .pd-actions) { padding: 10px 14px; min-height: 0; }
+  .pine-design .pd-trend { display: flex; flex-direction: column; overflow: hidden; }
+  .pine-design .pd-trend-summary { margin-top: 4px; }
+  .pine-design .pd-trend-summary > b { font-size: 22px; }
+  .pine-design .pd-trend svg { margin-top: 2px; flex: 1 1 0; min-height: 0; height: auto; }
+  .pine-design .pd-chart-readout { min-height: 0; }
+  .pine-design .pd-trend-foot { margin-top: 2px; padding-top: 5px; }
+  .pine-design .pd-trend-foot b { display: inline; margin: 0 0 0 4px; }
+  .pine-design .pd-trend > p, .pine-design .pd-trend .pd-chart-note { margin: 2px 0 0; font-size: 11px; }
+  .pine-design .pd-ranking { display: flex; flex-direction: column; }
+  .pine-design .pd-ranking-note { margin: 2px 0 4px; }
+  .pine-design .pd-bank-list { flex: 1 1 0; min-height: 0; overflow-y: auto; padding-right: 4px; }
+  .pine-design .pd-bank-row { min-height: 20px; padding: 1px 0; }
+  /* длинные имена ГОСБ — в одну строку, целиком в подсказке */
+  .pine-design .pd-bank-row > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pine-design .pd-bank-row { grid-template-columns: minmax(90px, 1.1fr) minmax(40px, 1.6fr) 46px; }
+
+  .pine-design .pd-loss { flex: none; display: grid; grid-template-columns: auto 1fr auto;
+    align-items: baseline; column-gap: 12px; row-gap: 0; }
+  .pine-design .pd-loss h3 { grid-column: 1 / -1; margin: 0 0 2px; }
+  .pine-design .pd-loss-number { font-size: 24px !important; margin: 0; white-space: nowrap; }
+  .pine-design .pd-loss-number span { display: inline !important; margin-left: 6px; }
+  .pine-design .pd-loss p { margin: 0; }
+  .pine-design .pd-loss .pd-link { margin: 0; }
+  .pine-design .pd-actions { flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
+  .pine-design .pd-actions .pd-panel-title { margin-bottom: 2px; flex: none; }
+  .pine-design .pd-actions > .pd-task:first-of-type { margin-top: 0; }
+  .pine-design .pd-actions { overflow-y: auto; }
+  .pine-design .pd-task { padding: 5px 0; font-size: 13px; line-height: 1.35; }
+
+  .pine-design .pd-tools .pd-link { font-size: 13px; }
+  .pine-design .wrap > footer, .pine-design .rep-foot { margin-top: 10px; padding-top: 8px; }
+}
+
+/* ---------- Инструкция: все шаги видны сразу ----------
+   Лента шагов прокручивалась вбок, и шаги после седьмого («Отток»,
+   «Структура», «Что нового») за краем окна не находили. Переносом во вторую
+   строку они всегда на виду. */
+@media screen {
+  .pine-design .hlp-rail { flex-wrap: wrap; overflow: visible; row-gap: 6px; }
+}
+
+/* ==========================================================================
+   Разделы — по тому же принципу: в одно окно.
+   Внутренние вкладки, «Вывод» колонками и прокрутка длинных списков —
+   в onescreen.js.txt; здесь — их вид и плотность.
+   ========================================================================== */
+.os-tabs { position: static !important; margin: 0 0 10px; }
+.os-pane-t { display: none; }
+
+@media screen and (min-width: 1200px) {
+  /* заголовок и описание раздела повторяли строку «← Все разделы · название» */
+  .pine-design .lvl > section.hub-on > details.section-details > summary { display: none; }
+  .pine-design .lvl > .hub-back { margin-bottom: 10px; padding-top: 6px; padding-bottom: 6px; }
+  .pine-design .lvl > .hub-back .hub-back-t { cursor: help; }
+  .pine-design .lvl > section.hub-on .section-body > * { margin-top: 0; margin-bottom: 10px; }
+  .pine-design .lvl > section.hub-on .card { padding: 14px 18px; }
+  .pine-design .lvl > section.hub-on .card h3 { font-size: 17px; margin-bottom: 4px; }
+  .pine-design .lvl > section.hub-on .card :is(p.sub, .sub, .card-desc) { font-size: 13px; line-height: 1.45; margin-bottom: 8px; }
+  .pine-design .lvl > section.hub-on .card > h3:first-child,
+  .pine-design .lvl > section.hub-on .card > div > h3:first-child { margin-top: 0; }
+  .pine-design .lvl > section.hub-on .sec-next { margin-top: 4px; padding-top: 8px; }
+  .pine-design .lvl > section.hub-on .sec-next button,
+  .pine-design .lvl > section.hub-on .sec-next a { padding-top: 8px; padding-bottom: 8px; }
+
+  /* плотные таблицы: строка в 34 px вместо 50 */
+  .pine-design .lvl > section.hub-on :is(td, th) { padding-top: 6px; padding-bottom: 6px; }
+  .pine-design .lvl > section.hub-on .mx :is(td, th),
+  .pine-design .lvl > section.hub-on table.mx :is(td, th) { padding-top: 7px; padding-bottom: 7px; }
+
+  /* «Вывод» — целиком, колонками: строка 60–80 знаков вместо 200 */
+  .pine-design .lvl > section .card.ai.os-ai { display: grid; grid-template-columns: 74px minmax(0, 1fr);
+    column-gap: 14px; align-items: start; padding-top: 12px; padding-bottom: 12px; }
+  .pine-design .lvl > section .card.ai.os-ai > .ai-head { margin: 3px 0 0; }
+  .pine-design .os-ai-body { column-gap: 34px; column-rule: 1px solid var(--nx-line, rgba(255,255,255,.1)); }
+  .pine-design .os-ai-body.os-cols-2 { column-count: 2; }
+  .pine-design .os-ai-body.os-cols-3 { column-count: 3; }
+  .pine-design .os-ai-body > :is(p, ul, ol) { break-inside: avoid; margin-top: 0; }
+  .pine-design .lvl > section .os-ai-body, .pine-design .lvl > section .os-ai-body :is(p, li) { font-size: 14px !important; line-height: 1.55; color: var(--text); }
+  .pine-design .os-ai-body > :last-child { margin-bottom: 0 !important; }
+  .pine-design .card.ai p { margin-bottom: 6px !important; }
+
+  /* --- Подразделения: карточки прокручиваются в своей панели --- */
+  .pine-design .lvl > section.hub-on .gcards { overflow-y: auto; padding-right: 6px;
+    align-content: start; scrollbar-gutter: stable; }
+  .pine-design .lvl > section.hub-on :is(.gc-sort, .gosb-finder) { margin-bottom: 8px; }
+
+  /* --- Структура: «Портфель» — отрасли и сегменты рядом, глубина под ними;
+     «люди» — четыре панели сеткой 2 × 2 --- */
+  .pine-design .os-st-0 { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 10px; }
+  .pine-design .os-st-0 > :not(.st-panel) { grid-column: 1 / -1; margin: 0 !important; }
+  .pine-design .os-st-0 > .st-panel { margin: 0 !important; }
+  .pine-design .os-st-0 > .st-panel { align-self: start; }
+  .pine-design .os-st-0 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .pine-design .os-st-1 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .pine-design .os-st-1 > .st-panel { margin: 0 !important; }
+  /* плитки распределения — одним рядом, без переноса пятой на новую строку */
+  .pine-design .os-st-1 .st-tiles { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; }
+  .pine-design .os-st-1 .st-tile strong { font-size: 20px; }
+  .pine-design .os-st-1 .st-tile :is(.st-l, i) { font-size: 11px; }
+  /* дата данных организаций уже стоит в строке под заголовком отчёта;
+     предупреждение об устаревших данных остаётся */
+  .pine-design .os-st-0 > .source-note:not(.is-stale) { display: none; }
+  .pine-design .os-st-0 td.num, .pine-design .os-st-0 td:not(:first-child) { white-space: nowrap; }
+  .pine-design .os-st-0 th { font-size: 12px; }
+  .pine-design .os-st-1 .st-tile { padding: 8px 10px; }
+  .pine-design .lvl > section.hub-on .st-kpis .st-tile { padding: 8px 14px; }
+  .pine-design .lvl > section.hub-on .st-panel { padding: 10px 14px; }
+  .pine-design .lvl > section.hub-on .no-xls > .source-note { margin-bottom: 8px; }
+
+  /* --- Динамика: график ниже, подписи остаются читаемыми --- */
+  .pine-design .os-tr-0 .chart { height: auto !important; min-height: 0 !important; }
+  .pine-design .os-tr-0 .chart svg { height: 340px !important; max-height: 340px; width: 100%; }
+  .pine-design .os-tr-0 .tr-cmp { margin-bottom: 6px; }
+  .pine-design .os-tr-0 .tr-cmp > * { padding-top: 8px; padding-bottom: 8px; }
+  .pine-design .os-tr-0 > h4:empty { display: none; }
+
+  /* пояснения — во всю ширину: узкой колонкой они занимали по пять строк */
+  .pine-design .lvl > section.hub-on :is(p, .oa-note, .gd-note, .source-note, .section-desc) { max-width: none !important; }
+  .pine-design .lvl > section.hub-on :is(.oa-note, .gd-note) { font-size: 12px; line-height: 1.45; }
+  .pine-design .lvl > section.hub-on .section-body > .section-desc { margin-bottom: 6px; font-size: 13px; }
+  .pine-design .lvl > section.hub-on .source-note { padding: 5px 12px; margin-bottom: 8px; }
+  /* бейджи в таблицах — ниже, строка таблицы не растягивается под них */
+  .pine-design .lvl > section.hub-on td .pill,
+  .pine-design .lvl > section.hub-on td [class*="badge"],
+  .pine-design .lvl > section.hub-on td .pd-status { padding-top: 1px; padding-bottom: 1px; line-height: 1.35; }
+  /* шапка «Работы с клиентами»: три числа воронки — в строку «число ·
+     люди · что значит», переток — плотнее, плашки списков — ниже */
+  .pine-design .lvl > section.hub-on .of-kpi { padding: 6px 14px; display: grid;
+    grid-template-columns: auto auto; justify-content: start; column-gap: 10px; align-items: baseline; }
+  .pine-design .lvl > section.hub-on .of-kpi > b { font-size: 20px; }
+  .pine-design .lvl > section.hub-on .of-kpi > i { grid-column: 1 / -1; }
+  .pine-design .lvl > section.hub-on .of-mv { padding: 6px 14px; font-size: 13px; line-height: 1.5; }
+  .pine-design .lvl > section.hub-on .of-wrap > p.sub { display: none; }
+  .pine-design .lvl > section.hub-on .of-tab { padding-top: 6px; padding-bottom: 6px; min-height: 0; }
+  .pine-design .lvl > section.hub-on .of-tab-n { font-size: 12px; }
+  .pine-design .lvl > section.hub-on .of-flt-sum { margin-bottom: 4px; }
+  /* общая шапка раздела — ниже */
+  .pine-design .lvl > .hub-back { min-height: 0; }
+  .pine-design .lvl > .hub-back .hub-home { padding-top: 5px; padding-bottom: 5px; }
+  .pine-design .lvl > section.hub-on .card.ai { padding-top: 10px; }
+  .pine-design .lvl > section.hub-on .card.ai :is(p, li) { font-size: 14px; line-height: 1.55; }
+  .pine-design .lvl > section.hub-on .os-tabs .gp-tab { padding-top: 9px; padding-bottom: 9px; }
+  /* «значение · доля» в ячейке — в одну строку, а не столбиком */
+  .pine-design .lvl > section.hub-on td .oa-cell-note { display: inline; margin: 0 0 0 6px; }
+  /* плитки покрытия и качества задач — ниже */
+  .pine-design .lvl > section.hub-on .oa-task-metrics > div { padding: 8px 14px; gap: 2px; }
+  .pine-design .lvl > section.hub-on .oa-task-metrics > div > b { font-size: 22px; }
+  .pine-design .lvl > section.hub-on .oa-tile { padding: 12px 16px; gap: 8px; }
+  .pine-design .lvl > section.hub-on .card :is(h4, .oa-h) { margin-top: 10px; margin-bottom: 6px; }
+  /* --- Отток: плотнее плашки и таблицы внутри вкладок --- */
+  .pine-design .os-of-1 > .card, .pine-design .os-of-0 > .card { margin-bottom: 10px; }
+}
+
+/* печать и PDF: все части раздела подряд, с заголовками, без вкладок */
+@media print {
+  .os-tabs { display: none !important; }
+  .os-ai-body { column-count: 1 !important; }
+  .card.ai.os-ai { display: block !important; }
+  .os-pane[hidden] { display: block !important; }
+  .os-pane-t { display: block !important; }
+}
+#print-root .os-tabs { display: none !important; }
+#print-root .os-ai-body { column-count: 1 !important; }
+#print-root .card.ai.os-ai { display: block !important; }
+#print-root .os-pane[hidden] { display: block !important; }
+#print-root .os-pane-t { display: block !important; margin: 14px 0 8px; }
+
+/* ==========================================================================
+   Подсказки-тур (tour.js.txt): подсветка блока и карточка с пояснением
+   ========================================================================== */
+.tr-spot {
+  position: fixed; z-index: 9998; pointer-events: none; border-radius: 14px;
+  border: 2px solid var(--accent, #4d8dff);
+  box-shadow: 0 0 0 9999px rgba(3, 6, 20, 0.62), 0 0 24px rgba(77, 141, 255, 0.55);
+  transition: left .25s ease, top .25s ease, width .25s ease, height .25s ease;
+}
+.tr-tip {
+  position: fixed; z-index: 9999; width: 380px; max-width: calc(100vw - 24px);
+  background: #131c47; color: var(--text, #e8ecff);
+  border: 1px solid rgba(120, 160, 255, .35); border-radius: 14px;
+  padding: 14px 16px 12px; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  font-size: 14px; line-height: 1.5;
+}
+.tr-n { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--accent, #4d8dff); font-weight: 700; }
+.tr-t { font-size: 16px; font-weight: 700; margin: 2px 0 6px; color: #fff; }
+.tr-b { margin: 0 0 6px; }
+.tr-x { margin: 0 0 6px; font-size: 13px; color: var(--text-2, #aab3d6); }
+.tr-nav { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.tr-nav > span { flex: 1; }
+.tr-nav button { font: inherit; font-size: 13px; cursor: pointer; border-radius: 999px; padding: 5px 14px; }
+.tr-skip { background: none; border: 0; color: var(--text-2, #aab3d6); padding-left: 0 !important; }
+.tr-prev { background: none; border: 1px solid var(--nx-line, rgba(255,255,255,.2)); color: var(--text, #e8ecff); }
+.tr-next { background: var(--accent, #4d8dff); border: 1px solid var(--accent, #4d8dff); color: #fff; font-weight: 600; }
+.pine-design .pd-tour, .gd-tour {
+  font: inherit; font-size: 13px; cursor: pointer; border-radius: 8px;
+  background: transparent; color: var(--accent, #7fb0ff);
+  border: 1px solid var(--nx-line, rgba(255,255,255,.2)); padding: 6px 14px; min-height: 34px;
+}
+.gd-tour { border-radius: 999px; min-height: 0; padding: 5px 14px; margin-right: 6px; }
+.pine-design .pd-tour:hover, .gd-tour:hover { border-color: var(--accent, #4d8dff); }
+@media print { .tr-spot, .tr-tip, .pd-tour, .gd-tour { display: none !important; } }
+#print-root .gd-tour, #print-root .pd-tour { display: none !important; }

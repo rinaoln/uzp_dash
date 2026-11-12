@@ -1,0 +1,455 @@
+/* ============================================================
+   NEON — тёмная тема по макету «Зарплатные проекты» (ZPP_CA_v26).
+   Подключается ПОСЛЕДНИМ слоем: перекрашивает pine.css и остальные стили,
+   не трогая разметку и скрипты. Чтобы вернуть светлую тему — убрать
+   neon.css из списка в view.py.
+
+   Язык макета:
+   - глубокий тёмно-синий фон с мягким свечением;
+   - карточки — полупрозрачное синее стекло с тонкой голубой рамкой,
+     активная/наведённая карточка подсвечена циановым ореолом;
+   - «хорошо» — бирюзово-мятный, «плохо» — розовый, бейджи-плашки
+     с цветной рамкой (как КСБ/ММБ/РГС на макете);
+   - главные кнопки — синий градиент со свечением;
+   - заголовки блоков — капслок, жирный, мелкий («РЕЗУЛЬТАТ»).
+   ============================================================ */
+
+:root, :root:not([data-theme="light"]) {
+  color-scheme: dark;
+  --bg: #070b1f;
+  --surface: rgba(22, 32, 78, 0.72);
+  --surface-solid: #111a3e;
+  --elevated: rgba(30, 42, 96, 0.55);
+  --text: #e9eeff;
+  --text-2: #8e9bc6;
+  --separator: rgba(112, 150, 255, 0.18);
+  --accent: #4d8dff;
+  --good: #34e2a8;
+  --warn: #ffb547;
+  --bad: #ff5d8f;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --radius: 12px;
+
+  --nx-line: rgba(98, 140, 255, 0.36);
+  --nx-line-strong: rgba(120, 165, 255, 0.6);
+  --nx-cyan: #3fd9ff;
+  --nx-card: linear-gradient(180deg, rgba(30, 43, 98, 0.78) 0%, rgba(17, 26, 64, 0.78) 100%);
+  --nx-card-flat: rgba(19, 28, 68, 0.7);
+  --nx-glow: 0 0 0 1px rgba(63, 217, 255, 0.55), 0 0 18px rgba(63, 217, 255, 0.35);
+  --nx-btn: linear-gradient(180deg, #3d73ff 0%, #2747d6 100%);
+  --nx-btn-glow: 0 0 14px rgba(70, 120, 255, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  --nx-good-bg: rgba(52, 226, 168, 0.14);
+  --nx-good-line: rgba(52, 226, 168, 0.6);
+  --nx-bad-bg: rgba(255, 93, 143, 0.14);
+  --nx-bad-line: rgba(255, 93, 143, 0.6);
+  --nx-warn-bg: rgba(255, 181, 71, 0.12);
+  --nx-warn-line: rgba(255, 181, 71, 0.5);
+}
+
+/* ---------- Фон страницы ---------- */
+html { background: var(--bg); }
+body, body.pine-design {
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(60, 90, 220, 0.22), transparent 60%),
+    radial-gradient(900px 500px at 95% 10%, rgba(120, 60, 200, 0.14), transparent 60%),
+    radial-gradient(1000px 700px at 50% 110%, rgba(30, 110, 200, 0.16), transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+  color: var(--text);
+}
+::selection { background: rgba(77, 141, 255, 0.45); color: #fff; }
+.pine-design ::-webkit-scrollbar { width: 10px; height: 10px; }
+.pine-design ::-webkit-scrollbar-track { background: transparent; }
+.pine-design ::-webkit-scrollbar-thumb { background: rgba(110, 150, 255, 0.25); border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
+.pine-design :is(button, a, input, select, summary, circle):focus-visible { outline: 2px solid var(--nx-cyan); outline-offset: 3px; }
+.pine-design a { color: #7fb0ff; }
+
+/* ---------- Навигация: верхние вкладки вместо боковой панели ---------- */
+@media screen {
+  .pd-nav {
+    position: sticky; top: 0; inset: auto; width: auto; z-index: 30;
+    flex-direction: row; align-items: center; gap: 28px;
+    padding: 10px 32px 0;
+    background: rgba(7, 11, 31, 0.82);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--nx-line);
+    color: var(--text-2);
+  }
+  .pd-brand { margin: 0 0 10px; font-size: 17px; gap: 10px; color: #fff; flex: none; }
+  .pd-brand small { display: inline; margin: 0 0 0 4px; font-size: 11px; color: var(--text-2); }
+  .pd-brand-symbol {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: var(--nx-btn); color: #fff; box-shadow: var(--nx-btn-glow);
+  }
+  .pd-brand-symbol svg { width: 20px; height: 20px; }
+  .pd-nav-label { display: none; }
+  .pd-nav nav { flex-direction: row; gap: 4px; overflow-x: auto; scrollbar-width: none; align-self: stretch; }
+  .pd-nav nav::-webkit-scrollbar { display: none; }
+  .pd-nav button {
+    white-space: nowrap; min-height: 0; border-radius: 0;
+    padding: 12px 12px 14px; gap: 8px; color: var(--text-2);
+    border-bottom: 2px solid transparent; background: transparent;
+  }
+  .pd-nav button svg { width: 15px; height: 15px; opacity: 0.75; }
+  .pd-nav button:hover { background: transparent; color: #fff; }
+  .pd-nav button[aria-current=page] {
+    background: transparent; color: #fff; font-weight: 650;
+    border-bottom-color: var(--accent);
+    box-shadow: 0 8px 14px -10px rgba(77, 141, 255, 0.9);
+  }
+  .pd-nav-bottom {
+    margin: 0 0 10px auto; padding: 6px 12px; border: 1px solid var(--nx-line);
+    border-radius: 8px; background: var(--nx-card-flat); color: var(--text);
+    align-items: center; white-space: nowrap; flex: none;
+  }
+  .pd-nav-bottom small { display: inline; margin: 0 0 0 6px; color: var(--text-2); }
+  .pd-nav-bottom br { display: none; }
+  .pd-archive-dot { background: var(--nx-cyan); box-shadow: 0 0 8px var(--nx-cyan); margin-top: 0; }
+
+  .pine-design .wrap { margin: 0 auto; max-width: 1480px; padding: 26px 32px 40px; }
+}
+@media screen and (max-width: 1600px) {
+  .pd-brand small { display: none; }
+  .pd-nav { gap: 18px; }
+  .pd-nav button { padding-left: 9px; padding-right: 9px; }
+  .pd-nav-bottom { display: none; }
+}
+@media screen and (max-width: 1360px) {
+  .pd-nav button svg { display: none; }
+}
+@media screen and (max-width: 1100px) {
+  .pd-nav { padding: 8px 20px 0; gap: 16px; }
+  .pd-nav-bottom { display: none; }
+  .pine-design .wrap { margin: 0 auto; padding: 22px 20px; }
+}
+@media screen and (max-width: 800px) {
+  .pd-nav { display: block; padding: 12px 16px 0; }
+  .pd-brand { margin-bottom: 6px; }
+  .pine-design .wrap { padding: 20px 16px; }
+}
+
+/* ---------- Шапка отчёта ---------- */
+.pine-design .wrap > header { border-bottom-color: var(--nx-line); }
+.pine-design .wrap > header h1 { color: #fff; font-weight: 700; letter-spacing: -0.4px; }
+.pine-design .rep-meta { color: var(--text-2); }
+
+/* ---------- Поля, селекты, кнопки ---------- */
+.pd-bank-field { color: var(--text-2); }
+.pd-bank-field select,
+.pine-design select, .pine-design input[type=text], .pine-design input[type=search],
+.pine-design .ts-select, .pine-design .gf-input, .pine-design .gf-select,
+.pine-design .filters input, .pine-design .filters select {
+  background-color: #0f1736; color: var(--text);
+  border: 1px solid var(--nx-line); border-radius: 8px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+.pine-design select:hover, .pine-design input:hover { border-color: var(--nx-line-strong); }
+.pine-design select:focus, .pine-design input:focus { border-color: var(--nx-cyan); outline: none; box-shadow: 0 0 0 3px rgba(63, 217, 255, 0.18); }
+.pine-design option { background: #0f1736; color: var(--text); }
+.pine-design input::placeholder { color: #66729c; }
+
+.pd-search-gosb summary {
+  background: var(--nx-btn); color: #fff; border: 1px solid rgba(140, 175, 255, 0.7);
+  box-shadow: var(--nx-btn-glow); border-radius: 8px;
+}
+.pd-search-gosb > .ts-item { background: var(--surface-solid); border-color: var(--nx-line); box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55); }
+.pd-pdf, .pine-design .lvl-pdf, .pine-design .xls-btn, .pine-design .mgmt-trigger {
+  background: var(--nx-btn); color: #fff; border: 1px solid rgba(140, 175, 255, 0.7);
+  box-shadow: var(--nx-btn-glow); border-radius: 8px;
+}
+.pd-pdf:hover, .pd-search-gosb summary:hover, .pine-design .lvl-pdf:hover,
+.pine-design .xls-btn:hover, .pine-design .mgmt-trigger:hover {
+  background: linear-gradient(180deg, #5585ff 0%, #2f53e6 100%); color: #fff;
+  box-shadow: 0 0 20px rgba(80, 130, 255, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+.pine-design .hub-home {
+  background: var(--nx-card-flat); color: var(--text); border: 1px solid var(--nx-line);
+}
+.pine-design .hub-home:hover { border-color: var(--nx-cyan); box-shadow: var(--nx-glow); }
+
+/* ---------- Ссылки-действия ---------- */
+.pd-link, .pine-design .pd-link { color: #7fb0ff; }
+.pd-link:hover { color: #b4d0ff; }
+.pd-task > b { color: #7fb0ff; }
+.pd-task:hover { color: #fff; }
+.pd-task-mark { border-color: var(--nx-line-strong); background: transparent; }
+.pd-task:hover .pd-task-mark { background: rgba(77, 141, 255, 0.25); }
+
+/* ---------- Статусы и бейджи: плашки с цветной рамкой ---------- */
+.pd-status, .pine-design .badge, .pd-health .hx-verdict {
+  border-radius: 5px; border: 1px solid var(--nx-good-line);
+  background: var(--nx-good-bg); color: #7ff5cc;
+}
+.pd-status.negative, .pine-design .badge.bad, .pd-health .hx-verdict.bad {
+  border-color: var(--nx-bad-line); background: var(--nx-bad-bg); color: #ff9dbb;
+}
+.pd-status.near, .pine-design .badge.warn, .pd-health .hx-verdict.warn {
+  border-color: var(--nx-warn-line); background: var(--nx-warn-bg); color: #ffd08a;
+}
+.pine-design .badge.good { border-color: var(--nx-good-line); background: var(--nx-good-bg); color: #7ff5cc; }
+.positive { color: var(--good); }
+.negative { color: var(--bad); }
+
+/* ---------- Карточки ---------- */
+.pine-design .card, .pd-metric, .pd-panel, .pd-health,
+.pine-design .pd-overview > .pd-health, .pine-design .gcard,
+.pd-health .chn-i, .pd-health .hx-i {
+  background: var(--nx-card);
+  border: 1px solid var(--nx-line);
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 28px rgba(0, 0, 0, 0.28);
+  color: var(--text);
+}
+.pine-design .card, .pd-metric, .pd-panel, .pine-design .gcard, .pd-health .chn-i, .pd-health .hx-i {
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.pd-metric:hover, .pd-panel:hover, .pine-design .gcard:hover, .pd-health .chn-i:hover, .pd-health .hx-i:hover {
+  border-color: rgba(63, 217, 255, 0.75);
+  box-shadow: var(--nx-glow), 0 10px 28px rgba(0, 0, 0, 0.3);
+  transform: none;
+}
+/* большой блок «Здоровье портфеля» — внешний контейнер, как колонки «РЕЗУЛЬТАТ / ПРИВЛЕЧЕНИЕ» */
+.pine-design .pd-overview > .pd-health {
+  background: rgba(14, 21, 52, 0.6);
+  border: 1px solid var(--nx-line); border-top: 1px solid var(--nx-line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+.pd-health .hx-i { background: var(--nx-card); }
+.pd-health > summary { color: #7fb0ff; }
+.pd-health > .chn-wrap { border-top-color: var(--separator); }
+
+/* заголовки блоков — капслок, как «РЕЗУЛЬТАТ / ПРИВЛЕЧЕНИЕ / ОТТОКИ» */
+.pd-panel-title h3, .pd-actions .pd-panel-title h3, .pd-loss h3,
+.pine-design .pd-health .hx-top h3 {
+  text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700;
+  font-size: 12.5px; color: #dfe6ff;
+}
+.pd-metric-top h3 { color: #fff; font-weight: 650; }
+.pd-overview-head h2, .pine-design .pd-health .hx-top h2 { color: #fff; }
+.pd-context { color: var(--text-2); }
+
+/* крупные числа */
+.pd-number, .pd-loss-number, .pd-trend-summary > b {
+  color: #fff; text-shadow: 0 0 18px rgba(110, 160, 255, 0.25);
+}
+.pd-health .hx-v, .pd-health .chn-v { text-shadow: 0 0 16px currentColor; }
+.pd-metric-foot, .pd-metric-details, .pd-metric-details .pd-execution, .pd-trend-foot { border-top-color: var(--separator); }
+.pd-trend-foot b, .pd-metric-details dd { color: var(--text); }
+
+/* карточка «Потенциал роста» — подсвечена, как выделенная «Портфель» на макете */
+.pd-reserve {
+  background: linear-gradient(180deg, rgba(36, 60, 130, 0.85) 0%, rgba(20, 34, 86, 0.85) 100%);
+  border-color: rgba(63, 217, 255, 0.7);
+  box-shadow: var(--nx-glow), 0 10px 28px rgba(0, 0, 0, 0.3);
+}
+.pd-reserve .pd-metric-foot { border-color: rgba(63, 217, 255, 0.25); }
+.pd-reserve-icon { color: var(--nx-cyan); }
+
+/* ---------- Плашка «требует внимания» ---------- */
+.pd-attention {
+  background: linear-gradient(90deg, rgba(255, 93, 143, 0.12), rgba(255, 93, 143, 0.04));
+  border: 1px solid var(--nx-bad-line); border-radius: 10px;
+}
+.pd-attention-icon { border-color: var(--bad); color: var(--bad); box-shadow: 0 0 10px rgba(255, 93, 143, 0.45); }
+.pd-attention strong { color: #ffb3c9; }
+.pd-attention p { color: #d7b7c6; }
+.pd-attention > .pd-link { color: #ff9dbb; }
+
+.source-note { background: rgba(15, 23, 54, 0.6); border-color: var(--separator); color: var(--text-2); }
+.source-note.is-stale { background: var(--nx-warn-bg); border-color: var(--nx-warn-line); color: #ffd08a; }
+
+/* ---------- График динамики ---------- */
+.pd-chart-grid line { stroke: rgba(120, 150, 255, 0.16); }
+.pd-chart-grid text, .pd-chart-labels text { fill: #7d8ab8; }
+.pd-chart-area { fill: rgba(63, 160, 255, 0.12); }
+.pd-chart-line { stroke: var(--nx-cyan); filter: drop-shadow(0 0 5px rgba(63, 217, 255, 0.7)); }
+.pd-trend circle { fill: #0c1435; stroke: var(--nx-cyan); }
+.pd-trend circle:hover, .pd-trend circle:focus { fill: var(--nx-cyan); }
+
+/* ---------- Рейтинг ТБ: полосы ---------- */
+.pd-bank-row { color: var(--text); }
+.pd-bank-track { background: rgba(120, 150, 255, 0.1); border-radius: 3px; }
+.pd-bank-track i { background: linear-gradient(90deg, rgba(52, 226, 168, 0.55), var(--good)); border-radius: 3px; box-shadow: 0 0 8px rgba(52, 226, 168, 0.35); }
+.pd-bank-track em { background: #c9d6ff; }
+.pd-bank-row.negative { color: var(--bad); }
+.pd-bank-row.negative i { background: linear-gradient(90deg, rgba(255, 93, 143, 0.55), var(--bad)); box-shadow: 0 0 8px rgba(255, 93, 143, 0.45); }
+.pd-bank-row.near i { background: linear-gradient(90deg, rgba(255, 181, 71, 0.5), var(--warn)); box-shadow: none; }
+.pd-bank-row:hover { background: rgba(77, 141, 255, 0.1); }
+
+.pd-actions { border-top-color: var(--nx-line); }
+.pd-task { border-bottom-color: var(--separator); color: var(--text); }
+
+/* ---------- Таблицы: как «Показатели по территориям» ---------- */
+.pine-design table { color: var(--text); }
+.pine-design .tbl-scroll { border: 1px solid var(--nx-line); border-radius: 10px; background: rgba(13, 20, 50, 0.7); }
+.pine-design th {
+  background: #18214d; color: #c3cdf2; font-weight: 600;
+  border-bottom: 1px solid var(--nx-line);
+}
+.pine-design td { border-bottom: 1px solid rgba(112, 150, 255, 0.1); }
+.pine-design tbody tr:nth-child(even) > td:not(.heat) { background: rgba(255, 255, 255, 0.015); }
+.pine-design tbody tr:hover > td:not(.heat) { background: rgba(77, 141, 255, 0.1); }
+
+/* ---------- Внутренние разделы, детализация ---------- */
+.pine-design .hub-back { background: rgba(7, 11, 31, 0.85); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); top: 52px; }
+.pine-design .hub-back-t { color: #fff; }
+.pine-design .meter { background: rgba(120, 150, 255, 0.12); }
+.pine-design .section-details > summary .st-chevron,
+.pine-design .qn-pill.qn-done .qn-dot { box-shadow: 0 0 10px rgba(77, 141, 255, 0.55); }
+
+/* отток: плитки как на макете */
+.oa-tile {
+  background: var(--nx-card); border: 1px solid var(--nx-line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 28px rgba(0, 0, 0, 0.28);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.oa-tile:hover { border-color: rgba(63, 217, 255, 0.75); box-shadow: var(--nx-glow), 0 10px 28px rgba(0, 0, 0, 0.3); }
+.oa-tile--focus {
+  background: linear-gradient(180deg, rgba(36, 60, 130, 0.85) 0%, rgba(20, 34, 86, 0.85) 100%);
+  border-color: rgba(63, 217, 255, 0.7); box-shadow: var(--nx-glow), 0 10px 28px rgba(0, 0, 0, 0.3);
+}
+.oa-tile-head > b { color: #fff; }
+.oa-kpi strong { color: #fff; }
+.oa-kpi strong.positive { color: var(--good); }
+.oa-kpi strong.negative { color: var(--bad); }
+.oa-chips { border-top-color: var(--separator); }
+.oa-seg-chip { background: rgba(120, 150, 255, 0.08); border-color: var(--nx-line); color: #c3cdf2; }
+.oa-seg-chip.good { color: #7ff5cc; border-color: var(--nx-good-line); background: var(--nx-good-bg); box-shadow: 0 0 8px rgba(52, 226, 168, 0.18); }
+.oa-seg-chip.bad { color: #ff9dbb; border-color: var(--nx-bad-line); background: var(--nx-bad-bg); box-shadow: 0 0 8px rgba(255, 93, 143, 0.18); }
+.pine-design .oa-board { background: rgba(14, 21, 52, 0.6); }
+.oa-board .oa-board-t { color: #dfe6ff; }
+.oa-cc { --c: #4d8dff; } .oa-cc2 { --c: #b07cff; } .oa-cc3 { --c: #34e2a8; } .oa-cc4 { --c: #ffb547; }
+
+/* ---------- Плитки по всему отчёту — как KPI-плитки макета ----------
+   Ряды «подпись · число · пояснение» без рамки собраны в плитки; толстые
+   цветные полосы слева убраны (на макете их нет) — тон несёт цвет числа,
+   а выделенная плитка подсвечена циановым ореолом, как «Портфель» на макете. */
+.oa-task-metrics { gap: 12px; }
+.oa-task-metrics > div, .of-kpi, .tr-cmp-i, .pd-loss, .pd-actions {
+  background: var(--nx-card); border: 1px solid var(--nx-line); border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 28px rgba(0, 0, 0, 0.28);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.oa-task-metrics > div { padding: 14px 16px; gap: 5px; }
+.oa-task-metrics > div > b { color: #fff; }
+.oa-task-metrics > div > b.oa-t-bad { color: var(--bad); }
+.oa-task-metrics > div > b.oa-t-warn { color: var(--warn); }
+.oa-task-metrics > div > b.oa-t-good { color: var(--good); }
+.oa-task-metrics > div:hover, .of-kpi:hover, .tr-cmp-i:hover, .pd-loss:hover, .oa-cc:hover {
+  border-color: rgba(63, 217, 255, 0.75); box-shadow: var(--nx-glow), 0 10px 28px rgba(0, 0, 0, 0.3);
+}
+/* акцентная плитка («Завершено возвратом») — подсвеченная, без полосы */
+.oa-task-metrics > .oa-accent, .oa-accent {
+  border-left: 1px solid rgba(63, 217, 255, 0.7); padding-left: 16px;
+  background: linear-gradient(180deg, rgba(36, 60, 130, 0.85) 0%, rgba(20, 34, 86, 0.85) 100%);
+  border-color: rgba(63, 217, 255, 0.7); box-shadow: var(--nx-glow), 0 10px 28px rgba(0, 0, 0, 0.3);
+}
+
+/* «345 орг / 421 орг / 63%» — без цветной полосы, тон в числе */
+.of-kpi { border-left: 1px solid var(--nx-line); padding: 13px 16px; }
+.of-kpi > b { color: #fff; }
+.of-kpi.bad > b { color: var(--bad); }
+.of-kpi.warn > b { color: var(--warn); }
+.of-kpi > i { color: #c9d2f2; }
+
+/* концентрация: карточки без полосы, цвет группы — в полосках и подписи */
+.oa-cc { background: var(--nx-card); border: 1px solid var(--nx-line); border-left: 1px solid var(--nx-line);
+  border-radius: 12px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 28px rgba(0, 0, 0, 0.28);
+  transition: border-color 160ms ease, box-shadow 160ms ease; }
+
+/* здоровье портфеля и карточки ТБ/ГОСБ — без полос */
+.hx-i, .pd-health .hx-i, .pd-health .hx-i.good, .pd-health .hx-i.warn, .pd-health .hx-i.bad,
+.hx-i.good, .hx-i.warn, .hx-i.bad { border-left: 1px solid var(--nx-line); }
+.gcard::before { display: none; }
+.pine-design .oa-leader, .pine-design .card.ai, .pine-design .card.reco, .pine-design .ai {
+  border-left: 1px solid var(--nx-line);
+}
+
+/* «Динамика»: год к году / с начала года — плитки */
+.tr-cmp-i { padding: 13px 16px; }
+.tr-cmp-i > strong { color: #fff; }
+
+/* обзор: «Потери без возврата» и «В работе руководителя» — плитка и панель */
+.pd-secondary { gap: 14px; align-items: start; }
+.pd-loss { padding: 18px 20px; }
+.pd-loss-number { color: var(--bad); text-shadow: 0 0 16px rgba(255, 93, 143, 0.35); }
+.pd-actions { padding: 16px 20px 6px; border-top: 1px solid var(--nx-line); }
+.pd-task:last-child { border-bottom: 0; }
+
+/* «Структура портфеля»: плитки и панели */
+.st-tile, .st-panel {
+  background: var(--nx-card); border: 1px solid var(--nx-line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 28px rgba(0, 0, 0, 0.28);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.st-panel { background: rgba(14, 21, 52, 0.6); }
+.st-panel > h4, .st-panel > h5 { color: #dfe6ff; }
+.st-tile strong { color: #fff; }
+.st-tile strong.warn { color: var(--warn); }
+.st-tile strong.positive { color: var(--good); }
+.st-tile strong.negative { color: var(--bad); }
+.st-tile:hover { border-color: rgba(63, 217, 255, 0.75); box-shadow: var(--nx-glow), 0 10px 28px rgba(0, 0, 0, 0.3); }
+.st-focus {
+  background: linear-gradient(180deg, rgba(36, 60, 130, 0.85) 0%, rgba(20, 34, 86, 0.85) 100%);
+  border-color: rgba(63, 217, 255, 0.7); box-shadow: var(--nx-glow), 0 10px 28px rgba(0, 0, 0, 0.3);
+}
+.st-focus strong:not(.warn):not(.positive):not(.negative) { color: var(--nx-cyan); text-shadow: 0 0 16px rgba(63, 217, 255, 0.35); }
+.st-tile .st-foot { border-top-color: var(--separator); }
+
+/* ---------- Диалоги (карточка ГОСБ, памятка) ---------- */
+.pine-design dialog::backdrop, dialog.hlp::backdrop { background: rgba(3, 6, 20, 0.72); }
+.pine-design .gd-sheet, .hlp-sheet {
+  background: #0d1535; border: 1px solid var(--nx-line);
+  box-shadow: 0 0 0 1px rgba(63, 217, 255, 0.15), 0 30px 80px rgba(0, 0, 0, 0.6);
+}
+.hlp-head, .pine-design .gd-head { background: #111a3e; border-bottom-color: var(--nx-line); }
+.pine-design .hlp-fab, .hlp-fab { background: var(--nx-btn); box-shadow: var(--nx-btn-glow); }
+
+/* Страница ГОСБ/ТБ — в языке макета: фон страницы, вкладки как верхняя навигация */
+dialog.gd.gp .gd-sheet {
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(60, 90, 220, 0.22), transparent 60%),
+    radial-gradient(900px 500px at 95% 10%, rgba(120, 60, 200, 0.14), transparent 60%),
+    var(--bg);
+  border: 0; box-shadow: none;
+}
+dialog.gd.gp::backdrop { background: var(--bg); }
+.gp-tabs { background: rgba(7, 11, 31, 0.88);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+dialog.gd.gp .gd-head h3 { color: #fff; }
+dialog.gd.gp .gd-head { background: transparent; border-bottom: 0; box-shadow: none; }
+.gp-tabs { border-bottom-color: var(--nx-line); top: 0; }
+.gp-tab.on { color: #fff; border-bottom-color: var(--accent); box-shadow: 0 8px 14px -10px rgba(77, 141, 255, 0.9); }
+.gp-tab:hover { color: #fff; }
+.gp-pane-t { color: #fff; }
+.gp-pane > .gd-block { background: rgba(14, 21, 52, 0.6); border-color: var(--nx-line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03); }
+.gp-pane > .gd-block > h4 { color: #dfe6ff; }
+
+/* ---------- Подвал ---------- */
+.pine-design .rep-foot { border-top-color: var(--nx-line); }
+.pine-design .footer { color: var(--text-2); }
+
+/* ---------- Печать: светлая бумага, без неона ---------- */
+@media print {
+  :root, :root:not([data-theme="light"]) {
+    color-scheme: light;
+    --bg: #fff; --surface: #fff; --surface-solid: #fff; --elevated: #f6f7fb;
+    --text: #111; --text-2: #555; --separator: #ddd;
+    --accent: #2747d6; --good: #13805a; --warn: #9b641e; --bad: #c0285a;
+  }
+  body, body.pine-design { background: #fff !important; color: #111; }
+  .pine-design .card, .pd-metric, .pd-panel, .pd-health, .pine-design .gcard,
+  .pine-design th, .pine-design .tbl-scroll, .oa-tile, .oa-task-metrics > div,
+  .of-kpi, .tr-cmp-i, .pd-loss, .pd-actions, .oa-cc, .hx-i, .chn-i, .st-tile, .st-panel {
+    background: #fff !important; box-shadow: none !important; border-color: #ccc !important; color: #111;
+  }
+  .pd-number, .pd-loss-number, .pd-trend-summary > b, .pd-health .hx-v { text-shadow: none; color: #111; }
+  .oa-kpi strong, .tr-cmp-i > strong, .oa-task-metrics > div > b, .of-kpi > b, .oa-tile-head > b { text-shadow: none; }
+  .oa-kpi strong:not(.positive):not(.negative), .tr-cmp-i > strong, .oa-tile-head > b,
+  .st-tile strong:not(.warn):not(.positive):not(.negative), .st-panel > h4, .st-panel > h5 { color: #111; text-shadow: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pd-chart-line { filter: none; }
+}
