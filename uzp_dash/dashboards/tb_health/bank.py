@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import pandas as pd
+from sqlalchemy.exc import DBAPIError
 
 from ... import anonymize, progress
 from ...db import execute, read_sql, session
@@ -1296,20 +1297,32 @@ def forecast_bank(engine, orgs: pd.DataFrame, d: dict, tb_of: dict):
     # план двух сделок одного месяца складывается в одно число, с которым и сравнивается
     # пришедший факт.
     pp = {"plan_from": d["plan_from"], "ref_funnel": d["ref_funnel"]}
-    plan_m = read_sql(engine, Q.PIPELINE_PLAN_M, pp)
-    fact_m = read_sql(engine, Q.PIPELINE_FACT_M,
-                      {"plan_from": d["plan_from"], "ref_cur": d["ref_cur"],
-                       "m_np": Q.METRIC_NEW_RECIPIENTS_B2B, "counted": Q.MOTIV_COUNTED})
-    fstat = read_sql(engine, Q.PIPELINE_FACT_STATS,
-                     {"plan_from": d["plan_from"], "ref_cur": d["ref_cur"],
-                      "m_np": Q.METRIC_NEW_RECIPIENTS_B2B, "counted": Q.MOTIV_COUNTED})
-    pstat = read_sql(engine, Q.PIPELINE_PLAN_STATS, pp)
+    pipeline_available = True
+    try:
+        plan_m = read_sql(engine, Q.PIPELINE_PLAN_M, pp)
+    except DBAPIError as exc:
+        if getattr(exc.orig, "pgcode", None) != "42501":
+            raise
+        pipeline_available = False
+        plan_m = fact_m = pd.DataFrame()
+        progress.warn("Нет доступа к данным для расчёта плана сделок. "
+                      "Отчёт будет собран без расчёта пайплайна.")
+    else:
+        fact_m = read_sql(engine, Q.PIPELINE_FACT_M,
+                          {"plan_from": d["plan_from"], "ref_cur": d["ref_cur"],
+                           "m_np": Q.METRIC_NEW_RECIPIENTS_B2B, "counted": Q.MOTIV_COUNTED})
+        fstat = read_sql(engine, Q.PIPELINE_FACT_STATS,
+                         {"plan_from": d["plan_from"], "ref_cur": d["ref_cur"],
+                          "m_np": Q.METRIC_NEW_RECIPIENTS_B2B, "counted": Q.MOTIV_COUNTED})
+        pstat = read_sql(engine, Q.PIPELINE_PLAN_STATS, pp)
+
 
     conv = forecast.conversion_by_month(plan_m, fact_m, d["ref_cur"], tb_of)
     pipe_fc = forecast.pipeline_current(plan_m, fact_m, d["ref_cur"], conv["of_gosb"],
                                         conv["sb"], d["pipe_left"])
     due = forecast.deal_due(plan_m, fact_m, d["ref_cur"])
-    _log_pipeline(fstat, pstat, conv, d)
+    if pipeline_available:
+        _log_pipeline(fstat, pstat, conv, d)
     # сегмент из воронки приходит БОЛЬШИМ именем — приводим к короткому,
     # иначе он не совпадёт с сегментами матрицы
     if not pipe_fc.empty:
@@ -1330,23 +1343,24 @@ def forecast_bank(engine, orgs: pd.DataFrame, d: dict, tb_of: dict):
     # маппинг ГОСБ → ТБ, единица разбора задаётся просто именем колонки
     fc["tb_id"] = [tb_of.get(int(g)) if pd.notna(g) else None for g in fc["new_gosb_id"]]
 
-    stats = {"n_out": len(out), "n_pipe": len(pipe_fc),
+    stats = {"pipeline_available": pipeline_available, "n_out": len(out), "n_pipe": len(pipe_fc),
              "out_kept": float(fc["out_kept"].sum()) if not fc.empty else 0.0,
              "out_ret": float(fc["ret_qty"].sum()) if not fc.empty else 0.0,
              "pipe_np": float(fc["pipe_np"].sum()) if not fc.empty else 0.0,
              "pipe_np_raw": float(fc["pipe_np_raw"].sum()) if not fc.empty else 0.0}
-    raw = conv["diag_sb"].get("tb_raw")
-    conv_txt = (f"коэф. банка {raw:.2f} → поднят до пола {conv['sb']:.2f}"
-                if conv["diag_sb"].get("tb_clipped") else f"коэф. банка {conv['sb']:.2f}")
-    progress.done(f"Пайплайн на {d['label']}: {len(pipe_fc)} орг, "
-                  f"{stats['pipe_np_raw']:.0f} чел заявлено → {stats['pipe_np']:.0f} фл "
-                  f"с поправкой на реализуемость ({conv_txt})")
-    n_clip = conv["diag_sb"].get("n_gosb_clipped", 0)
-    if n_clip:
-        progress.done(f"Коэффициент реализуемости упёрся в границы "
-                      f"[{forecast.CONV_MIN}, {forecast.CONV_MAX}] у {n_clip} из "
-                      f"{conv['diag_sb'].get('n_gosb', 0)} ТБ — по ним вклад пайплайна "
-                      f"завышен")
+    if pipeline_available:
+        raw = conv["diag_sb"].get("tb_raw")
+        conv_txt = (f"коэф. банка {raw:.2f} → поднят до пола {conv['sb']:.2f}"
+                    if conv["diag_sb"].get("tb_clipped") else f"коэф. банка {conv['sb']:.2f}")
+        progress.done(f"Пайплайн на {d['label']}: {len(pipe_fc)} орг, "
+                      f"{stats['pipe_np_raw']:.0f} чел заявлено → {stats['pipe_np']:.0f} фл "
+                      f"с поправкой на реализуемость ({conv_txt})")
+        n_clip = conv["diag_sb"].get("n_gosb_clipped", 0)
+        if n_clip:
+            progress.done(f"Коэффициент реализуемости упёрся в границы "
+                          f"[{forecast.CONV_MIN}, {forecast.CONV_MAX}] у {n_clip} из "
+                          f"{conv['diag_sb'].get('n_gosb', 0)} ТБ — по ним вклад пайплайна "
+                          f"завышен")
 
     keep = ["new_gosb_id", "inn", "out_qty", "ret_qty", "out_kept", "out_months",
             "pipe_np", "pipe_np_raw", "pipe_fact_mtd", "pipe_fot", "n_deals"]

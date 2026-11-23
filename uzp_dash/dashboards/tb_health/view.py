@@ -252,6 +252,8 @@ def build(ctx: Context) -> str:
             f'база — закрытый {C.esc(d.get("closed_label", ""))} · '
             f'организации — {C.esc(orgs_snapshot(d)["label"])} · '
             f'отчёт обновлён {datetime.now():%d.%m.%Y, %H:%M}{lag_txt}')
+    if b.fc_stats.get("pipeline_available") is False:
+        meta += " · Нет доступа к планам сделок. Оценка пайплайна недоступна."
     return page(
         title=TITLE,
         subtitle=SUBTITLE,
