@@ -355,6 +355,7 @@ def _level_body(a: analyze.Analysis, story: dict, idx: int) -> str:
     # листает). Но ОБЪЁМ потенциала нужен и сети: там он сводом по банкам.
     secs = [
         ("matrix", _matrix(a, story.get("matrix"), idx)),
+        ("decline", _annual_decline(a, idx)),
         ("gosb", _problem_gosb(a, story.get("gosb"), idx)),
         ("orgs", _orgs(a, story.get("orgs"), idx) if a.level != "sb"
          else _potential_sb(a, story.get("orgs"))),
@@ -2382,13 +2383,8 @@ def _matrix(a: analyze.Analysis, ai: str | None = None, idx: int = 0) -> str:
     # Выгрузка раздела — книгой из трёх листов. На экране матрица отвечает на
     # вопрос «где», а построчный разбор до организации — работа в Excel: в
     # разметку он не едет, берётся из того же словаря, что и раскрытие ячейки.
-    dl = ('<div class="of-flt"><span class="of-flt-l">Раздел целиком:</span>'
-          '<button type="button" class="of-detail" onclick="mxXls(this)" '
-          'title="Книга из трёх листов: матрица, ТОП по невыполнению и '
-          'детализация по организациям">'
-          'Выгрузить в Excel: матрица и детализация</button></div>')
     return C.section(f"Матрица выполнения {a.unit_label}/сегмент",
-                     _ai(ai) + dl
+                     _ai(ai)
                      + f'<div class="grid cols-2">{heat}{top_tbl}</div>'
                      + _cell_data(a, idx, cells),
                      eyebrow="Диагностика по прогнозу")
@@ -2453,6 +2449,78 @@ def _cell_data(a: analyze.Analysis, idx: int, cells: dict) -> str:
     holder, expr = veil.hide(payload, f"d-cells-{idx}")
     return (f'{meta}{holder}<script>window.__CELLS=window.__CELLS||{{}};'
             f'window.__CELLS["lvl-{idx}"]={expr};</script>')
+
+
+def _annual_decline(a: analyze.Analysis, idx: int) -> str:
+    title = "Снижение портфеля организаций за год"
+    meta = _cell_meta(a)
+    export = ('<div class="xls-bar"><button class="xls-btn" type="button" onclick="mxXls(this)">'
+              'Скачать Excel · матрица и все организации</button></div>')
+    if not meta["available"]:
+        return C.section(title, C.card(export + C.esc(meta["reason"])))
+    # Переток рассчитан по организации на уровне выбранного банка. Складываем
+    # портфель её подразделений до отбора, чтобы один переход учесть один раз.
+    data = a.detail.dropna(subset=["inn", "fl_yoy", "current_fl_qty"])
+    totals = data.groupby("inn").agg(
+        cur=("current_fl_qty", "sum"), yoy=("fl_yoy", "sum"),
+        name=("company_name", "first"))
+    declines = totals[totals.yoy <= -1].sort_values("yoy", kind="stable")
+    note = C.esc(meta["source_note"])
+    rows = []
+    for r in declines.itertuples():
+        loss = round(-r.yoy)
+        mv = a.moves.get(int(r.Index)) or {}
+        moved = round(mv.get("fl", 0))
+        rows.append([str(int(r.Index)), str(r.name or ""), round(r.cur - r.yoy),
+                     round(r.cur), loss, moved, _move_text(mv)])
+    flow = a.flow or {}
+    period = " → ".join(str(flow[k]) for k in ("m_prev", "m_cur") if flow.get(k))
+    note += (" Переходы между работодателями по ведомостям за " + C.esc(period) + "."
+             if period else " Данные о периоде перетока недоступны.")
+    holder, expr = veil.hide(rows, f"d-decline-{idx}")
+    moved_rows = sorted((r for r in rows if r[5]), key=lambda r: -r[5])
+    partial = sorted((r for r in moved_rows if r[5] < r[4]), key=lambda r: r[5]-r[4])
+    groups = [
+        ("Снизился портфель", rows, sum(r[4] for r in rows), "ФЛ снижения",
+         "Крупнейшие снижения за год"),
+        ("Из них с перетоком", moved_rows, sum(r[5] for r in moved_rows), "ФЛ перешли",
+         "Где больше всего получателей сменили работодателя"),
+        ("Из них с частичным перетоком", partial, sum(r[4]-r[5] for r in partial), "ФЛ разницы",
+         "Где проверить причины оставшегося снижения"),
+    ]
+    controls, panels = [], []
+    for i, (label, clients, volume, unit, heading) in enumerate(groups):
+        active = i == (2 if partial else 0)
+        known = i == 0 or bool(period or moved_rows)
+        counts = (f'<strong class="annual-number">{C.fmt_num(len(clients))} <small>орг.</small></strong>'
+                  f'<span class="annual-volume">{C.fmt_num(volume)} {unit}</span>'
+                  if known else '<strong>Нет данных по переходам</strong>')
+        controls.append(f'<button class="pd-metric" type="button" data-group="{i}" aria-pressed="{str(active).lower()}">'
+                        f'<span class="annual-label">{label}</span>{counts}</button>')
+        top = []
+        for org, name, was, cur, loss, moved, dest in clients[:5]:
+            top.append([_HID.text(name or org), C.fmt_num(loss),
+                        C.fmt_num(moved) if moved else "—",
+                        C.fmt_num(max(0, loss-moved)) if moved else "—",
+                        _HID.text(dest) if dest else "—"])
+        table = (C.table(["Организация", "Снижение за год", "Перешли", "Разница", "Куда перешли"],
+                         top, num_cols=[1, 2, 3]) if top else
+                 '<p>По доступным данным таких организаций нет.</p>')
+        panels.append(f'<div data-list="{i}"{"" if active else " hidden"}><h3>{heading} · топ-5</h3>{table}</div>')
+    body = ('<div class="annual-brief no-xls">' + export + '<div class="annual-groups">' + "".join(controls)
+            + '</div>' + "".join(panels)
+            + f'<footer><span>{note} Разница сопоставляет годовое снижение с переходами за месяц.</span></footer></div>')
+    script = """<script>(function(root){
+      root.querySelector('.annual-groups').onclick=function(e){
+        var b=e.target.closest('button'); if(!b)return;
+        root.querySelectorAll('[data-group]').forEach(function(x){x.setAttribute('aria-pressed',x===b);});
+        root.querySelectorAll('[data-list]').forEach(function(x){x.hidden=x.dataset.list!==b.dataset.group;});
+      };
+    })(document.getElementById('decline-ID'));</script>"""
+    return C.section(title, C.card(f'<div id="decline-{idx}">{body}</div>') + holder
+                     + f'<script>window.annualDeclines=window.annualDeclines||{{}};'
+                       f'window.annualDeclines["lvl-{idx}"]=function(){{return {expr};}};</script>'
+                     + script.replace("decline-ID", f"decline-{idx}"))
 
 
 def _gap_cell(v: float) -> str:
@@ -4585,12 +4653,11 @@ _MX_JS = """
 
   window.mxXls = function(btn){
     if(typeof window.xlsxBook !== 'function') return;
-    var sec = btn.closest('section');
     var lvl = btn.closest('.lvl');
-    if(!sec || !lvl) return;
-    var heat = sec.querySelector('table.matrix');
+    var sec = lvl.querySelector('section[id$="-matrix"]');
+    var heat = sec && sec.querySelector('table.matrix');
     var top = null;
-    Array.prototype.forEach.call(sec.querySelectorAll('table'), function(t){
+    Array.prototype.forEach.call(sec ? sec.querySelectorAll('table') : [], function(t){
       if(t !== heat && !top) top = t;
     });
 
@@ -4618,9 +4685,16 @@ _MX_JS = """
       });
     });
 
+    var read = (window.annualDeclines || {})[lvl.id];
+    var header = ['Номер организации','Организация','Год назад','Сейчас','Снижение за год','Перешли за месяц','Куда перешли','Разница при частичном перетоке'];
+    var all = (read ? read() : []).map(function(r){
+      return r.concat(r[5]>0 && r[5]<r[4] ? r[4]-r[5] : '');
+    });
     var name = lvl.querySelector('.lvl-name');
     window.xlsxBook((name ? name.textContent.trim() + ' — ' : '')
-      + 'Матрица выполнения', [
+      + 'Снижение за год', [
+      {name: 'Все снижения', rows: [header].concat(all)},
+      {name: 'Частичный переток', rows: [header].concat(all.filter(function(r){return r[7]!=='';}))},
       {name: 'Матрица', rows: domRows(heat)},
       {name: 'ТОП по невыполнению', rows: domRows(top)},
       {name: 'Детализация по организациям', rows: det}

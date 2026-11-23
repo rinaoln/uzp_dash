@@ -95,6 +95,8 @@ def render(sql: str) -> str:
     разъедется с исполняемым, и отчёт начнёт предъявлять запрос, которым цифра
     не считалась, — то есть будет обещать проверку, которой нет.
     """
+    if config.CONTOUR == "closed":
+        return sql.format(schema=config.PROD_SCHEMA, schema_t=config.PROD_SCHEMA_T)
     return sql.format(schema=config.SCHEMA, schema_t=config.SCHEMA_T)
 
 

@@ -20,7 +20,7 @@
     .pd-nav-bottom small, .pd-context, .pd-status, .pd-metric-top .pd-status,
     .pd-number small, .pd-metric-foot, .pd-attention p, .pd-trend-summary>span,
     .pd-chart-readout, .pd-trend-foot, .pd-ranking-note, .pd-loss-number span,
-    .pd-loss p, .pd-actions .pd-panel-title>span, .rep-foot-main,
+    .pd-loss p, .rep-foot-main,
     .rep-foot-sub, .pd-metric-details dd small, .pd-execution dt>small,
     .pd-source-caption) { font-size: 12px; }
   .pine-design .pd-link { font-family: inherit; font-size: 13px; white-space: normal; }

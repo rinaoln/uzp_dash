@@ -369,8 +369,7 @@ body, body.pine-design {
 .tr-cmp-i { padding: 13px 16px; }
 .tr-cmp-i > strong { color: #fff; }
 
-/* обзор: «Потери без возврата» и «В работе руководителя» — плитка и панель */
-.pd-secondary { gap: 14px; align-items: start; }
+/* обзор: «Потери без возврата» и «В работе руководителя» */
 .pd-loss { padding: 18px 20px; }
 .pd-loss-number { color: var(--bad); text-shadow: 0 0 16px rgba(255, 93, 143, 0.35); }
 .pd-actions { padding: 16px 20px 6px; border-top: 1px solid var(--nx-line); }

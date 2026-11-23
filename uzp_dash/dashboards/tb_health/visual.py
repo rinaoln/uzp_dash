@@ -159,7 +159,7 @@ def overview(a, idx, titles, roll, concentration, asks, health=""):
         f'<p class="pd-context">Прогноз на {C.esc(dates.get("label", a.ref_date))}</p>'
         f'<h2>{C.esc(a.tb_full)}</h2></div><span class="pd-status '
         f'{_tone(None if execution is None else execution - 1)}"><i></i>{state}</span></div>'
-        + health_panel + '<div class="pd-metrics">'
+        + '<div class="pd-metrics">'
         + _metric("Получатели зарплаты", a.verdict["rcp"], "человек")
         + _metric("Фонд оплаты труда", a.verdict["fot"], "млн ₽", 1e6)
         + '<article class="pd-metric pd-reserve"><div class="pd-metric-top">'
@@ -168,6 +168,10 @@ def overview(a, idx, titles, roll, concentration, asks, health=""):
         f'<p class="pd-source-caption">Данные организаций: {C.esc(source["label"])}</p>'
         f'<div class="pd-metric-foot"><span>{potential_count}</span>'
         + _link(idx, "orgs", "Открыть", titles) + '</div></article></div>' + attention
+        + '<article class="pd-actions"><div class="pd-panel-title">'
+          '<h3>В работе руководителя</h3></div>'
+        + ("".join(tasks) or '<p class="pd-empty">Дополнительных действий по текущим данным нет.</p>')
+        + '</article>' + health_panel
         + '<div class="pd-analysis"><article class="pd-panel pd-trend">'
           '<div class="pd-panel-title"><h3>Динамика портфеля</h3>'
         + _link(idx, "trend", "Подробнее", titles) + '</div>'
@@ -178,16 +182,13 @@ def overview(a, idx, titles, roll, concentration, asks, health=""):
         + _link(idx, "gosb", "Все", titles) + '</div>'
           '<p class="pd-ranking-note">Прогноз · черта на полосе — 100% плана</p>'
         f'<div class="pd-bank-list">{"".join(ranking) or "Нет данных по подразделениям"}</div>'
-        '</article></div><div class="pd-secondary"><article class="pd-loss">'
+        '</article></div><article class="pd-loss">'
         '<h3>Потери без возврата</h3>'
         f'<div class="pd-loss-number">{C.fmt_num(outflow.get("tot_kept") or 0)}'
         '<span>человек за 3 месяца</span></div>'
         f'<p>Вернули {C.fmt_num(outflow.get("ret_returned") or 0)} человек</p>'
         + _link(idx, "outflow", "Разобрать отток", titles)
-        + '</article><article class="pd-actions"><div class="pd-panel-title">'
-          f'<h3>В работе руководителя</h3><span>{len(tasks)} действий</span></div>'
-        + ("".join(tasks) or '<p class="pd-empty">Дополнительных действий по текущим данным нет.</p>')
-        + '</article></div><div class="pd-tools">'
+        + '</article><div class="pd-tools">'
           '<button type="button" class="pd-link" data-pd-management>'
           'Управление портфелем<span aria-hidden="true">↗</span></button>'
           '<button type="button" class="pd-link" data-pd-network>'

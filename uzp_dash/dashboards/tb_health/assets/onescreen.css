@@ -1,12 +1,8 @@
 /* ==========================================================================
-   Главный экран уровня — целиком в одно окно, без прокрутки.
+   Главный экран уровня — компактная раскладка для широкого окна.
 
-   Раньше обзор шёл лентой в ~2400 px: здоровье портфеля, сценарий, три
-   плитки, тревога, динамика, рейтинг, потери и действия друг под другом, и
-   до рейтинга подразделений и списка действий читатель не долистывал. Здесь
-   те же блоки разложены сеткой: сверху «как дела и что делать» и цифры
-   уровня, снизу «динамика · где · что делать». Содержимое не меняется —
-   только места.
+   Прогноз, риск и поручения идут первыми. Ниже — здоровье портфеля
+   и три панели для подробного разбора.
 
    Только на широком экране: на узком лента остаётся, сетка там нечитаема.
    Подключается ПОСЛЕ neon.css и перекрывает его.
@@ -53,9 +49,6 @@
   .pine-design .pd-overview {
     display: grid;
     grid-template-columns: repeat(12, minmax(0, 1fr));
-    /* нижний ряд — фиксированной высоты: рейтинг и список действий
-       прокручиваются внутри своих панелей, а не растягивают экран */
-    grid-template-rows: auto auto 292px auto;
     gap: 10px;
   }
   .pine-design .pd-overview > * { margin: 0 !important; min-width: 0; }
@@ -65,16 +58,15 @@
      прогноза из строки под заголовком и плитку «Выполнение плана» */
   .pine-design .pd-overview-head { display: none !important; }
 
-  .pine-design .pd-health    { grid-column: 1 / 10; grid-row: 1; padding: 10px 14px; position: relative; }
-  .pine-design .pd-metrics   { grid-column: 10 / -1; grid-row: 1;
-    display: flex; flex-direction: column; gap: 8px; }
-  .pine-design .pd-attention { grid-column: 1 / -1; grid-row: 2; }
-  .pine-design .pd-trend     { grid-column: 1 / 5;  grid-row: 3; }
-  .pine-design .pd-ranking   { grid-column: 5 / 9;  grid-row: 3; }
-  .pine-design .pd-secondary { grid-column: 9 / -1; grid-row: 3;
-    display: flex !important; flex-direction: column; gap: 8px; min-height: 0; }
-  .pine-design .pd-tools     { grid-column: 1 / -1; grid-row: 4;
-    display: flex; gap: 18px; padding: 0; }
+  .pine-design :is(.pd-metrics, .pd-attention, .pd-actions, .pd-health, .pd-tools) {
+    grid-column: 1 / -1;
+  }
+  .pine-design .pd-health { position: relative; }
+  .pine-design .pd-metrics { gap: 8px; }
+  .pine-design :is(.pd-trend, .pd-ranking, .pd-loss) {
+    grid-column: span 4; height: 270px;
+  }
+  .pine-design .pd-tools { display: flex; gap: 18px; padding: 0; }
 
   /* ---------- Здоровье портфеля и сценарий: плотнее ----------
      Строка «смотреть раздел» ушла: ссылкой стала вся плитка (ссылка
@@ -116,7 +108,7 @@
   .pine-design .pd-health > .source-note:not(.is-stale) { display: none; }
   .pine-design .pd-health > .source-note { margin: 8px 0 0; padding: 4px 10px; font-size: 12px; }
 
-  /* ---------- Три плитки уровня: стопкой справа ---------- */
+  /* ---------- Три плитки прогноза ---------- */
   .pine-design .pd-metric { flex: 1 1 0; padding: 8px 14px; display: flex; flex-direction: column;
     justify-content: center; min-height: 0; }
   .pine-design .pd-metric-top { min-height: 0; }
@@ -158,17 +150,14 @@
   .pine-design .pd-bank-row > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .pine-design .pd-bank-row { grid-template-columns: minmax(90px, 1.1fr) minmax(40px, 1.6fr) 46px; }
 
-  .pine-design .pd-loss { flex: none; display: grid; grid-template-columns: auto 1fr auto;
-    align-items: baseline; column-gap: 12px; row-gap: 0; }
+  .pine-design .pd-loss { max-width: none; }
   .pine-design .pd-loss h3 { grid-column: 1 / -1; margin: 0 0 2px; }
   .pine-design .pd-loss-number { font-size: 24px !important; margin: 0; white-space: nowrap; }
   .pine-design .pd-loss-number span { display: inline !important; margin-left: 6px; }
   .pine-design .pd-loss p { margin: 0; }
   .pine-design .pd-loss .pd-link { margin: 0; }
-  .pine-design .pd-actions { flex: 1 1 0; display: flex; flex-direction: column; overflow: hidden; }
-  .pine-design .pd-actions .pd-panel-title { margin-bottom: 2px; flex: none; }
+  .pine-design .pd-actions .pd-panel-title { margin-bottom: 2px; }
   .pine-design .pd-actions > .pd-task:first-of-type { margin-top: 0; }
-  .pine-design .pd-actions { overflow-y: auto; }
   .pine-design .pd-task { padding: 5px 0; font-size: 13px; line-height: 1.35; }
 
   .pine-design .pd-tools .pd-link { font-size: 13px; }
@@ -344,3 +333,23 @@
 .pine-design .pd-tour:hover, .gd-tour:hover { border-color: var(--accent, #4d8dff); }
 @media print { .tr-spot, .tr-tip, .pd-tour, .gd-tour { display: none !important; } }
 #print-root .gd-tour, #print-root .pd-tour { display: none !important; }
+
+.annual-groups {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.annual-groups button {color:inherit;background:transparent;border:1px solid var(--separator);border-radius:8px;padding:8px;text-align:left;cursor:pointer;font:inherit;font-size:13px}
+.annual-groups button[aria-pressed=true] {border-color:var(--accent);box-shadow:inset 0 -2px var(--accent)}
+.annual-groups strong {display:block;margin-top:4px}
+.annual-brief h3 {margin:12px 0 6px}
+.annual-brief table {width:100%;table-layout:fixed}
+.annual-brief th:first-child,.annual-brief th:last-child {width:28%}
+.pine-design .annual-brief :is(td,th) {padding:5px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.annual-brief footer {display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;font-size:12px}
+.annual-brief footer button {flex-shrink:0}
+@media(max-width:640px){.annual-brief footer{display:block}.annual-groups button{padding:5px;font-size:11px}.annual-brief :is(th,td):last-child{display:none}}
+
+.annual-brief > .xls-bar {display:flex;justify-content:flex-end;margin:0 0 6px}
+.pine-design .annual-groups .pd-metric {display:grid;align-content:start;gap:2px;padding:8px 12px;border:1px solid var(--separator);border-radius:10px;background:var(--panel);font-variant-numeric:tabular-nums}
+.pine-design .annual-groups .pd-metric[aria-pressed=true] {border-color:var(--accent);box-shadow:inset 3px 0 var(--accent)}
+.annual-label {font-weight:600}
+.annual-groups .annual-number {margin:0;font-size:clamp(20px,2vw,30px);line-height:1.1;letter-spacing:-.03em}
+.annual-number small,.annual-volume {font-size:12px;letter-spacing:0;color:var(--text-2)}
+.annual-volume {font-weight:600}
