@@ -33,7 +33,44 @@
   var d=ev.target.closest('[data-pd-dialog]');if(d&&typeof window.gdOpen==='function')window.gdOpen(d.dataset.pdDialog);
  });
  /* плитки здоровья и сценария на главном экране обрезают длинный текст — целиком он в подсказке */
- document.querySelectorAll('.pd-health .hx-i, .pd-health .chn-i').forEach(function(t){t.title=Array.prototype.map.call(t.querySelectorAll('.hx-l,.hx-v,.hx-s,.chn-t,.chn-v,.chn-s'),function(e){return e.textContent.trim();}).filter(Boolean).join(' · ');});
+ var healthTip=document.createElement('div');
+ healthTip.className='pd-health-tip';healthTip.id='pd-health-tip';healthTip.role='tooltip';healthTip.hidden=true;
+ document.body.append(healthTip);
+ function hideHealthTip(){healthTip.hidden=true;}
+ document.addEventListener('click',hideHealthTip);
+ document.addEventListener('keydown',function(e){if(e.key==='Escape')hideHealthTip();});
+ window.addEventListener('scroll',hideHealthTip,true);
+ document.querySelectorAll('.pd-health .hx-i').forEach(function(card){
+   var link=card.querySelector('.hx-go'),level=card.closest('.lvl');
+   if(!link||!level)return;
+   var key=link.hash.split('-').pop(), unit=level.id==='lvl-0'?'ТБ':'ГОСБ';
+   var notes={
+     matrix:'В разделе «Выполнение плана» сравните прогноз с планом по '+unit+' и сегментам. Нажмите на ячейку матрицы, чтобы увидеть организации со снижением.',
+     trend:'В разделе «Снижение за год» видно, у каких организаций стало меньше получателей и сколько ФЛ перешли к другому работодателю за месяц. В «Динамике» сравните портфель по месяцам с планом и с тем же месяцем прошлого года.',
+     outflow:'В разделе «Отток» посмотрите, сколько получателей ушло за три месяца, сколько вернулось и как отработаны задачи по этим клиентам.',
+     gosb:'В разделе «Подразделения» найдите '+unit+' с прогнозом ниже 95% плана. В карточке подразделения видны сегменты с наибольшим отклонением.',
+     orgs:'В разделе «Потенциал организаций» оцените, какую часть отклонения можно закрыть привлечением и возвратом получателей. На уровне СБ показан свод по банкам, внутри ТБ — список организаций.'
+   };
+   var destination=key==='trend'&&document.getElementById('sec-'+level.id.slice(4)+'-decline')?'decline':key;
+   var button=document.createElement('button');button.type='button';button.className='health-open';
+   button.dataset.pdSection='sec-'+level.id.slice(4)+'-'+destination;
+   button.setAttribute('aria-label',card.querySelector('.hx-l').textContent+' — открыть '+labels[destination]);
+   link.replaceWith(button);
+   if(key==='trend'&&destination==='decline'){
+     var more=document.createElement('button');more.type='button';more.className='pd-link health-months';
+     more.dataset.pdSection='sec-'+level.id.slice(4)+'-trend';more.textContent='Динамика по месяцам ↗';card.append(more);
+   }
+   function show(){
+     healthTip.textContent=notes[key];healthTip.hidden=false;
+     var r=card.getBoundingClientRect(),t=healthTip.getBoundingClientRect();
+     healthTip.style.left=Math.max(8,Math.min(r.left,innerWidth-t.width-8))+'px';
+     healthTip.style.top=(r.bottom+t.height+8<innerHeight?r.bottom+4:Math.max(4,r.top-t.height-4))+'px';
+     button.setAttribute('aria-describedby',healthTip.id);
+   }
+   card.addEventListener('pointerenter',show);card.addEventListener('pointerleave',hideHealthTip);
+   card.addEventListener('focusin',show);card.addEventListener('focusout',function(){button.removeAttribute('aria-describedby');hideHealthTip();});
+ });
+ document.querySelectorAll('.pd-health .chn-i').forEach(function(t){t.title=Array.prototype.map.call(t.querySelectorAll('.hx-l,.hx-v,.hx-s,.chn-t,.chn-v,.chn-s'),function(e){return e.textContent.trim();}).filter(Boolean).join(' · ');});
  document.querySelectorAll('[data-pd-point]').forEach(function(p){function show(){p.closest('.pd-trend').querySelector('.pd-chart-readout').textContent=p.dataset.pdPoint;}p.addEventListener('mouseenter',show);p.addEventListener('focus',show);});
  function sync(){var l=active();if(!l)return;if(select)select.value=l.id.slice(4);var sec=l.querySelector(':scope > section.hub-on');var part=l.dataset.hubView==='sec'&&sec?sec.id.split('-').pop():'home';nav.querySelectorAll('[data-pd-nav]').forEach(function(b){b.disabled=b.dataset.pdNav!=='home'&&!l.querySelector('.hub-tile[data-sec="sec-'+l.id.slice(4)+'-'+b.dataset.pdNav+'"]');if(b.dataset.pdNav===part)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});var overview=l.querySelector('.pd-overview');closed.textContent=overview&&overview.dataset.closed?'Закрытый месяц: '+overview.dataset.closed:'';}
  var observer=new MutationObserver(sync);document.querySelectorAll('.lvl').forEach(function(l){observer.observe(l,{attributes:true,attributeFilter:['hidden','data-hub-view']});});sync();document.body.classList.add('pine-design');document.documentElement.classList.remove('js-boot');

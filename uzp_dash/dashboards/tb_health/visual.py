@@ -28,6 +28,23 @@ def _link(idx, section, label, titles):
             f'{C.esc(label)}<span aria-hidden="true">↗</span></button>')
 
 
+def _detail_guide(idx, titles):
+    sections = [
+        ("decline", "Снижение за год", "У каких клиентов сократился портфель, сколько ФЛ перешли и куда."),
+        ("matrix", "Выполнение плана", "В каких подразделениях и сегментах прогноз ниже плана."),
+        ("gosb", "Подразделения", "Какой вклад в отклонение даёт каждое подразделение."),
+        ("orgs", "Потенциал организаций", "Сколько получателей можно привлечь или вернуть для выполнения плана."),
+        ("outflow", "Отток", "Кто ушёл, сколько получателей вернулось и как отработаны задачи."),
+        ("flow", "Переток", "Между какими организациями перешли получатели за месяц."),
+        ("struct", "Структура", "Как распределён портфель по сегментам и отраслям."),
+        ("trend", "Динамика", "Как менялись портфель и выполнение плана по месяцам."),
+    ]
+    items = "".join(f'<li>{_link(idx, key, title, titles)} <span>{hint}</span></li>'
+                    for key, title, hint in sections if titles.get(key))
+    return ('<details class="pd-detail-guide"><summary>Где посмотреть детализацию?</summary>'
+            f'<ul>{items}</ul></details>') if items else ""
+
+
 def _metric(title, row, unit, scale=1):
     fact, plan = float(row.get("fact") or 0) / scale, float(row.get("plan") or 0) / scale
     execution = row.get("exec")
@@ -159,6 +176,7 @@ def overview(a, idx, titles, roll, concentration, asks, health=""):
         f'<p class="pd-context">Прогноз на {C.esc(dates.get("label", a.ref_date))}</p>'
         f'<h2>{C.esc(a.tb_full)}</h2></div><span class="pd-status '
         f'{_tone(None if execution is None else execution - 1)}"><i></i>{state}</span></div>'
+        + _detail_guide(idx, titles)
         + '<div class="pd-metrics">'
         + _metric("Получатели зарплаты", a.verdict["rcp"], "человек")
         + _metric("Фонд оплаты труда", a.verdict["fot"], "млн ₽", 1e6)

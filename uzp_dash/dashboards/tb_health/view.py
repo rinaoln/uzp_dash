@@ -950,7 +950,7 @@ def _health_block(a: analyze.Analysis, idx: int, titles: dict) -> str:
     elif h["warn"]:
         names = "Требуют внимания: " + ", ".join(x.lower() for x in h["warn"]) + "."
     note = (
-        '<details class="hx-how"><summary>Как читаем эти пять сторон</summary>'
+        '<details class="hx-how"><summary>Как читаем эти пять строк</summary>'
         '<p>Это не новый расчёт: каждое число уже стоит в своём разделе, слой '
         'только сводит их вместе. Пороги — управленческое соглашение, одно на '
         'все уровни отчёта.</p>'
@@ -2494,8 +2494,8 @@ def _annual_decline(a: analyze.Analysis, idx: int) -> str:
     for i, (label, clients, volume, unit, heading) in enumerate(groups):
         active = i == (2 if partial else 0)
         known = i == 0 or bool(period or moved_rows)
-        counts = (f'<strong class="annual-number">{C.fmt_num(len(clients))} <small>орг.</small></strong>'
-                  f'<span class="annual-volume">{C.fmt_num(volume)} {unit}</span>'
+        counts = (f'<strong class="annual-number">{C.fmt_num(volume)} <small>{unit}</small></strong>'
+                  f'<span class="annual-volume">{C.fmt_num(len(clients))} орг.</span>'
                   if known else '<strong>Нет данных по переходам</strong>')
         controls.append(f'<button class="pd-metric" type="button" data-group="{i}" aria-pressed="{str(active).lower()}">'
                         f'<span class="annual-label">{label}</span>{counts}</button>')

@@ -353,3 +353,15 @@
 .annual-groups .annual-number {margin:0;font-size:clamp(20px,2vw,30px);line-height:1.1;letter-spacing:-.03em}
 .annual-number small,.annual-volume {font-size:12px;letter-spacing:0;color:var(--text-2)}
 .annual-volume {font-weight:600}
+
+.pd-detail-guide {grid-column:1/-1;font-size:13px}
+.pd-detail-guide summary {cursor:pointer;color:var(--accent);width:fit-content;font-weight:600}
+.pd-detail-guide ul {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(270px,100%),1fr));gap:10px 18px;padding:12px 0;margin:0;list-style:none}
+.pd-detail-guide li span:not([aria-hidden]) {display:block;color:var(--text-2)}
+
+.pd-health .hx-i {position:relative}
+.pd-health .health-open {position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent;cursor:pointer;border-radius:inherit;z-index:1}
+.pd-health .health-open:focus-visible {outline:2px solid var(--accent);outline-offset:-3px}
+.pd-health .health-months {position:relative;z-index:2;align-self:start;font-size:12px}
+.pd-health-tip {position:fixed;z-index:9999;max-width:min(360px,calc(100vw - 16px));box-sizing:border-box;background:#141d35;color:#fff;border:1px solid #6176a1;border-radius:8px;padding:9px 12px;font:13px/1.45 system-ui;pointer-events:none}
+@media print {.pd-health-tip,.health-open,.health-months {display:none!important}}
